@@ -803,33 +803,13 @@ def load_csv(path: str) -> list[Bar]:
     return bars
 
 
-def fetch_binance_1m(days: int = 7, symbol: str = "BTCUSDT") -> list[Bar]:
-    """Fetch recent 1m klines from Binance. Runs on your PC; blocked in
-    restricted network sandboxes (that's fine — use --synth or --csv there)."""
-    import time
+def fetch_binance_1m(days: float = 7, symbol: str = "BTCUSDT") -> list[Bar]:
+    """Fetch recent 1m klines from Binance via the shared connector. Runs on your
+    PC; blocked in restricted network sandboxes (use --synth or --csv there)."""
+    from btc_binance import download_history
 
-    import requests
-
-    end = int(time.time() * 1000)
-    start = end - days * 24 * 3600 * 1000
-    bars: list[Bar] = []
-    cur = start
-    while cur < end:
-        j = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": symbol, "interval": "1m", "startTime": cur, "limit": 1000},
-            timeout=15,
-        ).json()
-        if not j:
-            break
-        for k in j:
-            bars.append(Bar(int(k[0]) // 1000, float(k[1]), float(k[2]),
-                            float(k[3]), float(k[4]), float(k[5])))
-        cur = int(j[-1][0]) + 60_000
-        if len(j) < 1000:
-            break
-    bars.sort(key=lambda b: b.ts)
-    return bars
+    rows = download_history(symbol=symbol, interval="1m", days=days)
+    return [Bar(r["time"], r["open"], r["high"], r["low"], r["close"], r["volume"]) for r in rows]
 
 
 def synth_bars(
