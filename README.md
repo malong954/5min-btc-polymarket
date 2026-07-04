@@ -71,6 +71,49 @@ scripts/btc5m_docker.sh status
 scripts/btc5m_docker.sh down
 ```
 
+## Real-Time BTC Impulse Gate
+The runner no longer trusts the Polymarket contract price alone. Before entry it
+confirms the **actual BTC move** in the current 5m round using two independent
+price feeds (`scripts/btc_price_feeds.py`, default Binance + Coinbase):
+
+- Measures `spot - round_open` on each feed and enforces the documented
+  ~$70-$100 impulse (`--btc-move-min-usd`, `--btc-move-max-usd`).
+- Cross-checks the feeds and skips when they disagree beyond
+  `--btc-feed-divergence-usd` (one feed lagging / bad tick).
+- Vetoes entries where the contract book points opposite to real BTC direction.
+
+Flags: `--btc-impulse` / `--no-btc-impulse`, `--btc-feeds binance,coinbase`,
+`--btc-move-min-usd`, `--btc-move-max-usd`, `--btc-feed-divergence-usd`,
+`--btc-min-feeds`. Feeds run on your machine; no API keys required.
+
+## Backtesting (Multi-Timeframe Indicators)
+`scripts/btc_backtest.py` backtests a 1m/5m/15m indicator ensemble
+(current-round impulse, RSI, MACD, EMA trend, relative volume) against the
+historical 5m settle. It freezes the clock ~2 min before close (no lookahead),
+predicts up/down, and reports directional accuracy, coverage, per-feature
+correlation, and simulated PnL at a configurable contract entry price.
+
+```bash
+# Offline demo (synthetic data, no network):
+python3 scripts/btc_backtest.py --synth 6000
+
+# Real data on your PC:
+python3 scripts/btc_backtest.py --fetch-binance --days 7 --entry-price 0.85
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --entry-threshold 0.80 --json
+```
+
+**Key lesson the backtest makes explicit:** buying contracts at $0.80-$0.99 means
+your breakeven win-rate is 80-99%. High directional accuracy alone loses money;
+positive EV only appears when you raise `--entry-threshold` to trade only the
+highest-confidence rounds. Validate that the edge clears breakeven on real data
+before going live.
+
+Tests (stdlib only, no network):
+```bash
+python3 scripts/test_btc_impulse_feeds.py
+python3 scripts/test_btc_backtest.py
+```
+
 ## Execution Checklist (Before Live Trade)
 Use this quick pre-flight checklist before any real order:
 
