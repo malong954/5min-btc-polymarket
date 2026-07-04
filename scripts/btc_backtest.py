@@ -542,6 +542,63 @@ def run_walk_forward(
     }
 
 
+def run_ablation(
+    bars_1m: list[Bar],
+    weights: Optional[dict[str, float]] = None,
+    entry_price: float = 0.85,
+    train: int = 500,
+    test: int = 250,
+    min_trades: int = 15,
+) -> dict[str, Any]:
+    """Leave-one-out feature ablation, all measured out-of-sample.
+
+    Runs the walk-forward once with the full ensemble (baseline), then once per
+    indicator with that indicator's weight zeroed. The drop in out-of-sample
+    EV/trade when a feature is removed is its contribution: a positive
+    contribution means the feature earns its weight; a negative one means it is
+    dead weight (or actively hurting) and could be dropped.
+    """
+    base_w = dict(weights or DEFAULT_WEIGHTS)
+    base = run_walk_forward(bars_1m, weights=base_w, entry_price=entry_price,
+                            train=train, test=test, min_trades=min_trades)
+    base_ev = base["oos_ev_per_trade"]
+    base_acc = base["oos_accuracy"]
+
+    ablations = []
+    for feat in base_w:
+        w = dict(base_w)
+        w[feat] = 0.0
+        r = run_walk_forward(bars_1m, weights=w, entry_price=entry_price,
+                             train=train, test=test, min_trades=min_trades)
+        ablations.append({
+            "removed": feat,
+            "oos_trades": r["oos_trades"],
+            "oos_accuracy": r["oos_accuracy"],
+            "oos_ev_per_trade": r["oos_ev_per_trade"],
+            "ev_contribution": round(base_ev - r["oos_ev_per_trade"], 5),
+            "acc_contribution": round(base_acc - r["oos_accuracy"], 4),
+        })
+    # Rank most-valuable first.
+    ablations.sort(key=lambda a: a["ev_contribution"], reverse=True)
+
+    return {
+        "mode": "ablation",
+        "bars_1m": base["bars_1m"],
+        "rounds_5m": base["rounds_5m"],
+        "train_window": train,
+        "test_window": test,
+        "baseline": {
+            "oos_trades": base["oos_trades"],
+            "oos_accuracy": base_acc,
+            "oos_ev_per_trade": base_ev,
+            "oos_edge_vs_breakeven": base["oos_edge_vs_breakeven"],
+        },
+        "breakeven_winrate": entry_price,
+        "weights": base_w,
+        "ablations": ablations,
+    }
+
+
 # --------------------------------------------------------------------------
 # Data sources
 # --------------------------------------------------------------------------
@@ -715,6 +772,31 @@ def _print_wf_report(res: dict[str, Any]) -> None:
     print("=" * 68)
 
 
+def _print_ablation_report(res: dict[str, Any]) -> None:
+    b = res["baseline"]
+    print("=" * 72)
+    print("BTC 5m Feature Ablation (leave-one-out, out-of-sample)")
+    print("=" * 72)
+    print(f"1m bars / 5m rounds  : {res['bars_1m']} / {res['rounds_5m']}")
+    print(f"train/test window    : {res['train_window']} / {res['test_window']} rounds")
+    print(f"breakeven win-rate   : {res['breakeven_winrate']:.1%}")
+    print("-" * 72)
+    print(f"BASELINE (full ensemble): OOS acc {b['oos_accuracy']:.1%}  "
+          f"EV/trade {b['oos_ev_per_trade']:+.4f}  trades {b['oos_trades']}  "
+          f"edge {b['oos_edge_vs_breakeven']:+.1%}")
+    print("-" * 72)
+    print("drop-one-feature (ranked by EV contribution; higher = more valuable):")
+    print(f"  {'removed':<14}{'oos_acc':<10}{'oos_ev':<11}{'EV contrib':<13}{'acc contrib':<12}")
+    for a in res["ablations"]:
+        flag = "  <- earns weight" if a["ev_contribution"] > 0 else ("  <- dead/hurts" if a["ev_contribution"] < 0 else "")
+        print(f"  {a['removed']:<14}{a['oos_accuracy']:<10.3f}{a['oos_ev_per_trade']:<+11.4f}"
+              f"{a['ev_contribution']:<+13.4f}{a['acc_contribution']:<+12.4f}{flag}")
+    print("-" * 72)
+    print("Positive EV contribution => removing the feature lowers out-of-sample")
+    print("EV, i.e. it is pulling its weight. Negative => consider dropping it.")
+    print("=" * 72)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Multi-timeframe BTC 5m backtester")
     src = ap.add_mutually_exclusive_group(required=True)
@@ -727,6 +809,7 @@ def main() -> int:
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
     ap.add_argument("--trade-log", metavar="PATH", help="Write a per-round CSV of every decision (taken/skipped, win/loss, features)")
     ap.add_argument("--walk-forward", action="store_true", help="Out-of-sample eval: tune the threshold on rolling train blocks, score on the next test block")
+    ap.add_argument("--ablation", action="store_true", help="Leave-one-out feature ablation (out-of-sample); shows each indicator's EV contribution")
     ap.add_argument("--wf-train", type=int, default=500, help="Train window in 5m rounds (walk-forward)")
     ap.add_argument("--wf-test", type=int, default=250, help="Test window in 5m rounds (walk-forward)")
     ap.add_argument("--wf-min-trades", type=int, default=15, help="Min in-sample trades required when tuning a fold's threshold")
@@ -739,6 +822,20 @@ def main() -> int:
         bars = fetch_binance_1m(days=args.days)
     else:
         bars = synth_bars(args.synth, autocorr=args.autocorr)
+
+    if args.ablation:
+        res = run_ablation(
+            bars,
+            entry_price=args.entry_price,
+            train=args.wf_train,
+            test=args.wf_test,
+            min_trades=args.wf_min_trades,
+        )
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            _print_ablation_report(res)
+        return 0
 
     if args.walk_forward:
         res = run_walk_forward(

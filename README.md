@@ -113,7 +113,18 @@ python3 scripts/btc_backtest.py --csv data/btc_1m.csv --trade-log out/trades.csv
 # (unseen) block. The reported edge is out-of-sample, not curve-fit:
 python3 scripts/btc_backtest.py --csv data/btc_1m.csv --walk-forward \
     --wf-train 500 --wf-test 250 --trade-log out/oos_trades.csv
+
+# Ablation: re-run walk-forward dropping one indicator at a time to see which
+# of impulse / RSI / MACD / 5m-trend / 15m-trend actually earns its weight:
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --ablation \
+    --wf-train 500 --wf-test 250
 ```
+
+The ablation ranks features by **out-of-sample EV contribution** (baseline EV
+minus EV-with-feature-removed). A positive number means dropping the feature
+lowers EV, so it's pulling its weight; a negative number flags dead weight you
+can prune from `DEFAULT_WEIGHTS` in `scripts/btc_backtest.py`. Re-run on your own
+data — the ranking is data-dependent, not universal.
 
 **Key lesson the backtest makes explicit:** buying contracts at $0.80-$0.99 means
 your breakeven win-rate is 80-99%. High directional accuracy alone loses money;

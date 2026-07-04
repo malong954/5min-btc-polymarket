@@ -13,6 +13,8 @@ from btc_backtest import (
     Bar,
     MTFModel,
     DECISION_OFFSET,
+    DEFAULT_WEIGHTS,
+    run_ablation,
     run_backtest,
     run_walk_forward,
     synth_bars,
@@ -148,6 +150,23 @@ def test_walk_forward_is_out_of_sample():
     check("random-walk OOS edge is not implausibly large", res["oos_edge_vs_breakeven"] < 0.15)
 
 
+def test_ablation():
+    bars = synth_bars(12000, autocorr=0.5, seed=17)
+    res = run_ablation(bars, train=400, test=200, min_trades=10)
+    check("ablation covers every weighted feature",
+          {a["removed"] for a in res["ablations"]} == set(DEFAULT_WEIGHTS))
+    check("ablation has a baseline", res["baseline"]["oos_trades"] > 0)
+    check("ablation ranked by EV contribution (descending)",
+          all(res["ablations"][i]["ev_contribution"] >= res["ablations"][i + 1]["ev_contribution"]
+              for i in range(len(res["ablations"]) - 1)))
+    # On momentum data the current-round impulse is the dominant signal, so
+    # removing it should be among the most damaging (top-half contributor).
+    order = [a["removed"] for a in res["ablations"]]
+    check("impulse_1m ranks in the more-valuable half",
+          order.index("impulse_1m") < len(order) / 2)
+    print(f"       ablation ranking (most->least valuable): {order}")
+
+
 def main():
     test_indicators()
     test_resample_alignment()
@@ -157,6 +176,7 @@ def main():
     test_trade_log()
     test_walk_forward_structure()
     test_walk_forward_is_out_of_sample()
+    test_ablation()
     print("\nAll backtest tests passed.")
 
 
