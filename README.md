@@ -118,6 +118,12 @@ python3 scripts/btc_backtest.py --csv data/btc_1m.csv --walk-forward \
 # of impulse / RSI / MACD / 5m-trend / 15m-trend actually earns its weight:
 python3 scripts/btc_backtest.py --csv data/btc_1m.csv --ablation \
     --wf-train 500 --wf-test 250
+
+# Weight optimization: head-to-head OOS comparison of fixed default weights vs
+# per-fold tuned weights (coordinate ascent on each train block, scored on the
+# next unseen block). Reports a verdict on whether tuning actually helps:
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --optimize-weights \
+    --wf-train 500 --wf-test 250
 ```
 
 The ablation ranks features by **out-of-sample EV contribution** (baseline EV
@@ -125,6 +131,14 @@ minus EV-with-feature-removed). A positive number means dropping the feature
 lowers EV, so it's pulling its weight; a negative number flags dead weight you
 can prune from `DEFAULT_WEIGHTS` in `scripts/btc_backtest.py`. Re-run on your own
 data — the ranking is data-dependent, not universal.
+
+Weight optimization tunes only on each in-sample block and is scored purely on
+the following unseen block, so its verdict is honest: if tuning does not beat the
+fixed baseline out-of-sample, the message says so (fixed weights are good enough;
+tuning would overfit). The whole pipeline carries a **leakage guard** in the test
+suite — when outcome labels are shuffled to break the feature→outcome link, the
+optimizer's out-of-sample edge collapses to negative, proving it cannot
+manufacture edge from noise. Trust the OOS numbers, not in-sample ones.
 
 **Key lesson the backtest makes explicit:** buying contracts at $0.80-$0.99 means
 your breakeven win-rate is 80-99%. High directional accuracy alone loses money;

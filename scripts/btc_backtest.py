@@ -245,6 +245,9 @@ class MTFModel:
 
         raw = sum(self.weights.get(k, 0.0) * v for k, v in subs.items())
         sig.features.update({f"sub_{k}": v for k, v in subs.items()})
+        # Stored so a round can be re-weighted later (walk-forward weight tuning)
+        # from its sub-signals alone, without recomputing indicators.
+        sig.features["vol_factor"] = vol_factor
         sig.score = math.tanh(raw)
         sig.confidence = clamp(abs(sig.score) * vol_factor, 0.0, 1.0)
         # Direction is threshold-independent (pure sign of the score); whether a
@@ -599,6 +602,164 @@ def run_ablation(
     }
 
 
+def rescore_rows(rows: list[dict[str, Any]], weights: dict[str, float]) -> list[dict[str, Any]]:
+    """Recompute score / confidence / direction for pre-scored rows under a new
+    weight vector, using only the stored sub-signals and volume factor. No
+    indicators are recomputed, so weight search over many candidates is cheap."""
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        feats = r["features"]
+        raw = 0.0
+        for k, w in weights.items():
+            sv = feats.get(f"sub_{k}")
+            if sv is not None:
+                raw += w * sv
+        score = math.tanh(raw)
+        vf = feats.get("vol_factor", 1.0)
+        conf = clamp(abs(score) * vf, 0.0, 1.0)
+        pred = None
+        if score != 0.0:
+            pred = "UP" if score > 0 else "DOWN"
+        out.append({**r, "score": score, "confidence": conf, "pred": pred})
+    return out
+
+
+WEIGHT_CANDIDATES = [0.0, 0.25, 0.5, 1.0, 1.5]
+
+
+def _optimize_weights(
+    train_rows: list[dict[str, Any]],
+    entry_price: float,
+    grid_thr: list[float],
+    min_trades: int,
+) -> tuple[dict[str, float], float, float]:
+    """Coordinate-ascent search for the weight vector that maximizes in-sample
+    EV/trade (jointly picking the best entry threshold). Coordinate ascent is
+    used over an exhaustive grid deliberately: it touches far fewer combinations,
+    which keeps the in-sample fit shallow and less prone to overfitting — the
+    out-of-sample test block is what ultimately judges it."""
+    NEG = -1e9
+
+    def eval_w(w: dict[str, float]) -> tuple[float, float]:
+        rr = rescore_rows(train_rows, w)
+        thr, ev = _best_threshold(rr, entry_price, grid_thr, min_trades)
+        if ev != ev:  # nan => no qualifying threshold
+            return NEG, thr
+        return ev, thr
+
+    weights = dict(DEFAULT_WEIGHTS)
+    best_ev, best_thr = eval_w(weights)
+    for _ in range(2):  # two refinement passes
+        for k in list(weights):
+            keep_val, keep_ev, keep_thr = weights[k], best_ev, best_thr
+            for cv in WEIGHT_CANDIDATES:
+                if cv == keep_val:
+                    continue
+                weights[k] = cv
+                ev, thr = eval_w(weights)
+                if ev > keep_ev + 1e-9:
+                    keep_val, keep_ev, keep_thr = cv, ev, thr
+            weights[k] = keep_val
+            best_ev, best_thr = keep_ev, keep_thr
+    return dict(weights), best_thr, (best_ev if best_ev > NEG else float("nan"))
+
+
+def weight_opt_over_rows(
+    rows: list[dict[str, Any]],
+    entry_price: float = 0.85,
+    train: int = 500,
+    test: int = 250,
+    min_trades: int = 15,
+    grid: Optional[list[float]] = None,
+) -> dict[str, Any]:
+    """Core walk-forward, fixed-vs-optimized comparison over pre-scored rows.
+    Separated from data loading so a label-shuffle null test can drive it
+    directly (see test suite)."""
+    rows = sorted(rows, key=lambda r: r["round_start"])
+    if grid is None:
+        grid = [round(0.10 + 0.05 * i, 2) for i in range(18)]
+
+    def agg(oos: list[dict[str, Any]]) -> dict[str, Any]:
+        n = len(oos)
+        wins = sum(1 for r in oos if r["pred"] == r["actual"])
+        acc = wins / n if n else 0.0
+        win_pnl, loss_pnl = 1.0 - entry_price, -entry_price
+        total = wins * win_pnl + (n - wins) * loss_pnl
+        return {
+            "oos_trades": n,
+            "oos_accuracy": round(acc, 4),
+            "oos_edge_vs_breakeven": round(acc - entry_price, 4),
+            "oos_ev_per_trade": round(total / n, 5) if n else 0.0,
+            "oos_total_pnl_units": round(total, 3),
+        }
+
+    base_oos: list[dict[str, Any]] = []
+    opt_oos: list[dict[str, Any]] = []
+    folds = []
+    start = train
+    while start + 1 <= len(rows):
+        tr = rows[start - train:start]
+        te = rows[start:start + test]
+        if not te:
+            break
+        # Baseline: fixed default weights, tune threshold only.
+        b_thr, _ = _best_threshold(tr, entry_price, grid, min_trades)
+        base_oos.extend(r for r in te if r["confidence"] >= b_thr)
+        # Optimized: tune weights + threshold on train, apply to test.
+        w, o_thr, tr_ev = _optimize_weights(tr, entry_price, grid, min_trades)
+        te_re = rescore_rows(te, w)
+        opt_oos.extend(r for r in te_re if r["confidence"] >= o_thr)
+        folds.append({
+            "fold": len(folds) + 1,
+            "baseline_threshold": b_thr,
+            "opt_threshold": o_thr,
+            "opt_weights": {k: round(v, 2) for k, v in w.items()},
+            "train_opt_ev": round(tr_ev, 5) if tr_ev == tr_ev else None,
+        })
+        start += test
+
+    baseline = agg(base_oos)
+    optimized = agg(opt_oos)
+    return {
+        "scored_rounds": len(rows),
+        "train_window": train,
+        "test_window": test,
+        "breakeven_winrate": entry_price,
+        "default_weights": dict(DEFAULT_WEIGHTS),
+        "folds": folds,
+        "baseline_oos": baseline,
+        "optimized_oos": optimized,
+        "oos_ev_improvement": round(optimized["oos_ev_per_trade"] - baseline["oos_ev_per_trade"], 5),
+        "verdict": (
+            "optimization helps out-of-sample"
+            if optimized["oos_ev_per_trade"] > baseline["oos_ev_per_trade"] + 1e-9
+            else "fixed weights are as good or better (tuning would overfit)"
+        ),
+    }
+
+
+def run_weight_optimization(
+    bars_1m: list[Bar],
+    entry_price: float = 0.85,
+    train: int = 500,
+    test: int = 250,
+    min_trades: int = 15,
+    grid: Optional[list[float]] = None,
+) -> dict[str, Any]:
+    """Head-to-head, out-of-sample: fixed default weights vs per-fold optimized
+    weights. Both tune only on each train block and are scored on the following
+    unseen test block, so the comparison is honest. If optimization does not beat
+    the fixed baseline out-of-sample, that is itself the finding (the hand-set
+    weights are good enough and tuning would be curve-fitting)."""
+    model = MTFModel(bars_1m)
+    rows = score_rounds(model)
+    res = weight_opt_over_rows(rows, entry_price, train, test, min_trades, grid)
+    res["mode"] = "weight_optimization"
+    res["bars_1m"] = len(model.bars_1m)
+    res["rounds_5m"] = len(model.bars_5m)
+    return res
+
+
 # --------------------------------------------------------------------------
 # Data sources
 # --------------------------------------------------------------------------
@@ -797,6 +958,32 @@ def _print_ablation_report(res: dict[str, Any]) -> None:
     print("=" * 72)
 
 
+def _print_weight_opt_report(res: dict[str, Any]) -> None:
+    b, o = res["baseline_oos"], res["optimized_oos"]
+    print("=" * 72)
+    print("BTC 5m Weight Optimization -- Fixed vs Tuned (out-of-sample)")
+    print("=" * 72)
+    print(f"1m bars / 5m rounds  : {res['bars_1m']} / {res['rounds_5m']}")
+    print(f"train/test window    : {res['train_window']} / {res['test_window']} rounds  ({len(res['folds'])} folds)")
+    print(f"breakeven win-rate   : {res['breakeven_winrate']:.1%}")
+    print("-" * 72)
+    print(f"{'':<22}{'trades':<10}{'accuracy':<12}{'EV/trade':<12}{'edge':<10}")
+    print(f"{'baseline (fixed W)':<22}{b['oos_trades']:<10}{b['oos_accuracy']:<12.1%}"
+          f"{b['oos_ev_per_trade']:<+12.4f}{b['oos_edge_vs_breakeven']:<+10.1%}")
+    print(f"{'optimized (tuned W)':<22}{o['oos_trades']:<10}{o['oos_accuracy']:<12.1%}"
+          f"{o['oos_ev_per_trade']:<+12.4f}{o['oos_edge_vs_breakeven']:<+10.1%}")
+    print("-" * 72)
+    print(f"OOS EV improvement   : {res['oos_ev_improvement']:+.4f} units/trade")
+    print(f"VERDICT              : {res['verdict']}")
+    print("-" * 72)
+    print("per-fold optimized weights (impulse/rsi/macd/trend5/trend15):")
+    for f in res["folds"]:
+        w = f["opt_weights"]
+        print(f"  fold {f['fold']:<2} thr={f['opt_threshold']:<5} "
+              f"[{w['impulse_1m']}, {w['rsi_1m']}, {w['macd_1m']}, {w['trend_5m']}, {w['trend_15m']}]")
+    print("=" * 72)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Multi-timeframe BTC 5m backtester")
     src = ap.add_mutually_exclusive_group(required=True)
@@ -810,6 +997,7 @@ def main() -> int:
     ap.add_argument("--trade-log", metavar="PATH", help="Write a per-round CSV of every decision (taken/skipped, win/loss, features)")
     ap.add_argument("--walk-forward", action="store_true", help="Out-of-sample eval: tune the threshold on rolling train blocks, score on the next test block")
     ap.add_argument("--ablation", action="store_true", help="Leave-one-out feature ablation (out-of-sample); shows each indicator's EV contribution")
+    ap.add_argument("--optimize-weights", action="store_true", help="Out-of-sample head-to-head: fixed default weights vs per-fold tuned weights")
     ap.add_argument("--wf-train", type=int, default=500, help="Train window in 5m rounds (walk-forward)")
     ap.add_argument("--wf-test", type=int, default=250, help="Test window in 5m rounds (walk-forward)")
     ap.add_argument("--wf-min-trades", type=int, default=15, help="Min in-sample trades required when tuning a fold's threshold")
@@ -822,6 +1010,20 @@ def main() -> int:
         bars = fetch_binance_1m(days=args.days)
     else:
         bars = synth_bars(args.synth, autocorr=args.autocorr)
+
+    if args.optimize_weights:
+        res = run_weight_optimization(
+            bars,
+            entry_price=args.entry_price,
+            train=args.wf_train,
+            test=args.wf_test,
+            min_trades=args.wf_min_trades,
+        )
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            _print_weight_opt_report(res)
+        return 0
 
     if args.ablation:
         res = run_ablation(

@@ -17,6 +17,10 @@ from btc_backtest import (
     run_ablation,
     run_backtest,
     run_walk_forward,
+    run_weight_optimization,
+    weight_opt_over_rows,
+    rescore_rows,
+    score_rounds,
     synth_bars,
 )
 
@@ -167,6 +171,59 @@ def test_ablation():
     print(f"       ablation ranking (most->least valuable): {order}")
 
 
+def test_rescore_identity():
+    """Rescoring with the default weights must reproduce the original score and
+    confidence exactly (proves the cheap re-weight path matches the model)."""
+    bars = synth_bars(3000, autocorr=0.3, seed=8)
+    rows = score_rounds(MTFModel(bars))
+    re = rescore_rows(rows, dict(DEFAULT_WEIGHTS))
+    check("rescore reproduces model scores under default weights",
+          all(abs(a["score"] - b["score"]) < 1e-12 and abs(a["confidence"] - b["confidence"]) < 1e-12
+              for a, b in zip(rows, re)))
+    # Zeroing all weights => zero score => no direction.
+    z = rescore_rows(rows, {k: 0.0 for k in DEFAULT_WEIGHTS})
+    check("zero weights => zero score and no prediction",
+          all(r["score"] == 0.0 and r["pred"] is None for r in z))
+
+
+def test_weight_optimization_out_of_sample():
+    bars = synth_bars(12000, autocorr=0.5, seed=19)
+    res = run_weight_optimization(bars, train=400, test=200, min_trades=10)
+    check("weight-opt produced folds", len(res["folds"]) >= 2)
+    check("weight-opt baseline has OOS trades", res["baseline_oos"]["oos_trades"] > 0)
+    check("weight-opt optimized has OOS trades", res["optimized_oos"]["oos_trades"] > 0)
+    check("weight-opt reports a verdict", "overfit" in res["verdict"] or "helps" in res["verdict"])
+    # Each optimized weight is either a grid candidate or the retained default
+    # (a coordinate is only moved off its default when a candidate beats it).
+    allowed = {0.0, 0.25, 0.5, 1.0, 1.5} | {round(v, 2) for v in DEFAULT_WEIGHTS.values()}
+    check("optimized weights are grid candidates or retained defaults",
+          all(v in allowed for f in res["folds"] for v in f["opt_weights"].values()))
+    print(f"       weight-opt: baseline EV={res['baseline_oos']['oos_ev_per_trade']:+.4f} "
+          f"optimized EV={res['optimized_oos']['oos_ev_per_trade']:+.4f} "
+          f"-> {res['verdict']}")
+
+
+def test_weight_opt_no_edge_on_shuffled_labels():
+    """Leakage guard: if outcome labels are decoupled from the decision-time
+    features, the optimizer must NOT be able to produce a large positive
+    out-of-sample edge. If it does, the walk-forward machinery is leaking.
+    Rotating the labels destroys both real and mechanical edge."""
+    rows = score_rounds(MTFModel(synth_bars(12000, autocorr=0.5, seed=19)))
+    n = len(rows)
+    k = n // 3
+    shuffled = [dict(r) for r in rows]
+    for i in range(n):
+        shuffled[i]["actual"] = rows[(i + k) % n]["actual"]
+    real = weight_opt_over_rows(rows, train=400, test=200, min_trades=10)
+    null = weight_opt_over_rows(shuffled, train=400, test=200, min_trades=10)
+    real_edge = real["optimized_oos"]["oos_edge_vs_breakeven"]
+    null_edge = null["optimized_oos"]["oos_edge_vs_breakeven"]
+    print(f"       real optimized edge={real_edge:+.3f}  shuffled optimized edge={null_edge:+.3f}")
+    check("real labels: optimizer finds positive OOS edge", real_edge > 0.02)
+    check("shuffled labels: optimizer cannot manufacture OOS edge", null_edge < 0.02)
+    check("shuffled edge is far below real edge (no leakage)", null_edge < real_edge - 0.10)
+
+
 def main():
     test_indicators()
     test_resample_alignment()
@@ -177,6 +234,9 @@ def main():
     test_walk_forward_structure()
     test_walk_forward_is_out_of_sample()
     test_ablation()
+    test_rescore_identity()
+    test_weight_optimization_out_of_sample()
+    test_weight_opt_no_edge_on_shuffled_labels()
     print("\nAll backtest tests passed.")
 
 
