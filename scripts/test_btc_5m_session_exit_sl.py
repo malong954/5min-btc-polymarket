@@ -14,6 +14,8 @@ from py_clob_client.client import ClobClient
 from py_clob_client.constants import POLYGON
 from py_clob_client.clob_types import ApiCreds
 
+from btc_price_feeds import build_feeds, evaluate_impulse
+
 UTC = dt.timezone.utc
 
 
@@ -290,6 +292,11 @@ PROFILES: dict[str, dict[str, Any]] = {
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        # Intra-round BTC impulse gate (real price move, cross-checked on 2 feeds).
+        'btc_move_min_usd': 70.0,
+        'btc_move_max_usd': 0.0,        # 0 disables the overextension cap
+        'btc_feed_divergence_usd': 60.0,
+        'btc_min_feeds': 2,
     },
     'aggressive': {
         'threshold': 0.70,
@@ -299,6 +306,10 @@ PROFILES: dict[str, dict[str, Any]] = {
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        'btc_move_min_usd': 70.0,
+        'btc_move_max_usd': 0.0,
+        'btc_feed_divergence_usd': 80.0,  # looser cross-check for higher frequency
+        'btc_min_feeds': 2,
     },
 }
 
@@ -319,6 +330,14 @@ def apply_profile(args: argparse.Namespace) -> argparse.Namespace:
         args.entry_timeout_min = int(prof['entry_timeout_min'])
     if args.poll_sec is None:
         args.poll_sec = float(prof['poll_sec'])
+    if args.btc_move_min_usd is None:
+        args.btc_move_min_usd = float(prof['btc_move_min_usd'])
+    if args.btc_move_max_usd is None:
+        args.btc_move_max_usd = float(prof['btc_move_max_usd'])
+    if args.btc_feed_divergence_usd is None:
+        args.btc_feed_divergence_usd = float(prof['btc_feed_divergence_usd'])
+    if args.btc_min_feeds is None:
+        args.btc_min_feeds = int(prof['btc_min_feeds'])
     return args
 
 
@@ -342,8 +361,18 @@ def main():
     ap.add_argument('--poll-sec', type=float, default=None)
     ap.add_argument('--close-retry-max', type=int, default=18, help='Max close retries when position is not yet visible / not immediately closable')
     ap.add_argument('--close-retry-delay-sec', type=float, default=2.0, help='Delay between close retries')
+    # Real-time BTC impulse gate (two cross-checked price feeds).
+    ap.add_argument('--btc-impulse', dest='btc_impulse', action='store_true', help='Require confirmed BTC intra-round move before entry (default on)')
+    ap.add_argument('--no-btc-impulse', dest='btc_impulse', action='store_false', help='Disable the BTC impulse gate (contract-price logic only)')
+    ap.set_defaults(btc_impulse=True)
+    ap.add_argument('--btc-feeds', type=str, default='binance,coinbase', help='Comma-separated price feeds to cross-check (choices: binance, coinbase, kraken)')
+    ap.add_argument('--btc-move-min-usd', type=float, default=None, help='Minimum confirmed BTC move in the current 5m round (strategy reference: ~70)')
+    ap.add_argument('--btc-move-max-usd', type=float, default=None, help='Optional cap; skip if move exceeds this (0 disables). Guards against overextension.')
+    ap.add_argument('--btc-feed-divergence-usd', type=float, default=None, help='Max allowed spot disagreement between feeds; beyond this a feed is lagging -> skip')
+    ap.add_argument('--btc-min-feeds', type=int, default=None, help='Minimum feeds that must return data for a valid impulse check')
     ap.add_argument('--execute', action='store_true')
     args = apply_profile(ap.parse_args())
+    btc_feeds = build_feeds([s for s in (args.btc_feeds or '').split(',') if s.strip()]) if args.btc_impulse else []
 
     report: dict[str, Any] = {
         'started_at': ts_utc(),
@@ -358,6 +387,12 @@ def main():
             'poll_sec': args.poll_sec,
             'close_retry_max': args.close_retry_max,
             'close_retry_delay_sec': args.close_retry_delay_sec,
+            'btc_impulse': args.btc_impulse,
+            'btc_feeds': args.btc_feeds if args.btc_impulse else None,
+            'btc_move_min_usd': args.btc_move_min_usd,
+            'btc_move_max_usd': args.btc_move_max_usd,
+            'btc_feed_divergence_usd': args.btc_feed_divergence_usd,
+            'btc_min_feeds': args.btc_min_feeds,
             'execute': args.execute,
         },
         'attempts': [],
@@ -441,6 +476,50 @@ def main():
                 continue
 
             side, trigger_price = sorted(candidates, key=lambda x: x[1], reverse=True)[0]
+
+            # Real-time BTC impulse gate: confirm the actual price move in this
+            # 5m round (cross-checked across two feeds) supports the side the
+            # contract book is pointing us at. The contract price alone can be a
+            # thin/stale book; this checks BTC itself.
+            if args.btc_impulse:
+                imp = evaluate_impulse(
+                    btc_feeds,
+                    min_usd=args.btc_move_min_usd,
+                    max_usd=args.btc_move_max_usd,
+                    divergence_usd=args.btc_feed_divergence_usd,
+                    min_feeds=args.btc_min_feeds,
+                )
+                if not imp.get('ok'):
+                    report['attempts'].append({
+                        'ts': ts_utc(),
+                        'slug': slug,
+                        'status': 'skip_btc_impulse',
+                        'side': side,
+                        'trigger_price': trigger_price,
+                        'impulse': imp,
+                    })
+                    time.sleep(args.poll_sec)
+                    continue
+                if imp.get('direction') != side:
+                    report['attempts'].append({
+                        'ts': ts_utc(),
+                        'slug': slug,
+                        'status': 'skip_impulse_side_conflict',
+                        'contract_side': side,
+                        'btc_direction': imp.get('direction'),
+                        'impulse': imp,
+                    })
+                    time.sleep(args.poll_sec)
+                    continue
+                report['attempts'].append({
+                    'ts': ts_utc(),
+                    'slug': slug,
+                    'status': 'btc_impulse_confirmed',
+                    'side': side,
+                    'btc_move_usd': imp.get('move_usd'),
+                    'spot_spread': imp.get('spot_spread'),
+                    'impulse': imp,
+                })
 
             out, objs = run_open(args.repo, slug, side, args.stake_usd, args.execute)
             post = None
