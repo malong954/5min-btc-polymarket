@@ -84,7 +84,25 @@ price feeds (`scripts/btc_price_feeds.py`, default Binance + Coinbase):
 
 Flags: `--btc-impulse` / `--no-btc-impulse`, `--btc-feeds binance,coinbase`,
 `--btc-move-min-usd`, `--btc-move-max-usd`, `--btc-feed-divergence-usd`,
-`--btc-min-feeds`. Feeds run on your machine; no API keys required.
+`--btc-min-feeds`. Feeds run on your machine.
+
+**Available feeds** (`--btc-feeds`, pick any two+ that your network/region allows):
+
+| feed | key? | round-open (gate) | notes |
+|------|------|-------------------|-------|
+| `binance` | no | yes | best coverage; may be geo-blocked (US) |
+| `coinbase` | no | yes | |
+| `kraken` | no | yes | |
+| `cryptocompare` | no | yes | keyless minute OHLCV, good Binance alt |
+| `coingecko` | no | spot-only | live cross-check display, not the gate |
+| `dia` | no | spot-only | keyless (DIAdata) |
+| `livecoinwatch` | yes (`LIVECOINWATCH_API_KEY`) | spot-only | |
+| `coinmarketcap` | yes (`COINMARKETCAP_API_KEY`) | spot-only | |
+
+The gate needs the current 5m round-open, so it only counts feeds marked
+"round-open"; spot-only feeds are fine for a live sanity check but are ignored by
+the impulse gate. Default `binance,coinbase`. On a US network, try
+`--btc-feeds coinbase,kraken` or `--btc-feeds coinbase,cryptocompare`.
 
 ## Backtesting (Multi-Timeframe Indicators)
 `scripts/btc_backtest.py` backtests a 1m/5m/15m indicator ensemble
@@ -102,8 +120,9 @@ and prices the fill at `--entry-price`, settling $1 on a correct call.
 # Offline demo (synthetic data, no network):
 python3 scripts/btc_backtest.py --synth 6000
 
-# Real data on your PC:
-python3 scripts/btc_backtest.py --fetch-binance --days 7 --entry-price 0.85
+# Real data on your PC (provider = binance | cryptocompare):
+python3 scripts/btc_backtest.py --fetch binance --days 7 --entry-price 0.85
+python3 scripts/btc_backtest.py --fetch cryptocompare --days 7
 python3 scripts/btc_backtest.py --csv data/btc_1m.csv --entry-threshold 0.80 --json
 
 # Per-round CSV of every decision (taken/skipped, win/loss, all features):
@@ -152,7 +171,50 @@ Tests (stdlib only, no network):
 ```bash
 python3 scripts/test_btc_impulse_feeds.py
 python3 scripts/test_btc_backtest.py
+python3 scripts/test_btc_binance.py
+python3 scripts/test_btc_datafeeds.py
 ```
+
+## Running Locally (macOS / Mac mini)
+The research tools and data feeds have no exchange-egress restrictions on a
+normal home network — a Mac mini is an ideal always-on host. The heavy trading
+stack (`py_clob_client`, Polymarket auth) is only needed for *live execution*;
+the data + backtest layer needs just Python 3 and `requests`.
+
+```bash
+# 1. Python 3 (Homebrew) + a virtualenv
+brew install python@3.12
+git clone https://github.com/Novals83/5min-btc-polymarket.git
+cd 5min-btc-polymarket
+python3 -m venv .venv
+source .venv/bin/activate
+pip install requests            # data + backtest layer only
+
+# 2. Confirm a data provider is reachable from your network
+python3 scripts/btc_binance.py check          # or set BINANCE_BASE
+#   US network / Binance geo-blocked? Use CryptoCompare instead:
+#   (history) --fetch cryptocompare   (live gate) --btc-feeds coinbase,cryptocompare
+
+# 3. Pull real 1-minute history and back it up to CSV
+python3 scripts/btc_binance.py history --days 30 --out data/btc_1m.csv
+#   or, keyless alternative:
+#   python3 scripts/btc_history.py  (via) btc_backtest --fetch cryptocompare
+
+# 4. Validate the strategy OUT-OF-SAMPLE on that real data
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --walk-forward \
+    --wf-train 500 --wf-test 250 --entry-price 0.85 --trade-log out/oos.csv
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --ablation --wf-train 500 --wf-test 250
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --optimize-weights --wf-train 500 --wf-test 250
+
+# 5. Watch the live feed (REST poll)
+python3 scripts/btc_binance.py live --poll 2
+```
+
+Only after the out-of-sample edge clears breakeven on your own data should you
+wire in the execution stack and run `scripts/test_btc_5m_session_exit_sl.py`
+(which additionally needs `py_clob_client` and configured Polymarket credentials).
+For an always-on setup, run the watcher under `launchd` (a `launchd` plist is the
+macOS equivalent of cron) or inside the provided Docker isolation.
 
 ## Execution Checklist (Before Live Trade)
 Use this quick pre-flight checklist before any real order:

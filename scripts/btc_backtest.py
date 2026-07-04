@@ -968,9 +968,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Multi-timeframe BTC 5m backtester")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--csv", help="Load 1m OHLCV CSV")
-    src.add_argument("--fetch-binance", action="store_true", help="Fetch 1m klines from Binance (needs network)")
+    src.add_argument("--fetch", metavar="PROVIDER", choices=["binance", "cryptocompare"],
+                     help="Fetch 1m OHLCV from a provider (needs network): binance | cryptocompare")
+    src.add_argument("--fetch-binance", action="store_true", help="Alias for --fetch binance")
     src.add_argument("--synth", type=int, metavar="N", help="Generate N synthetic 1m bars (offline)")
-    ap.add_argument("--days", type=int, default=7, help="Days of history for --fetch-binance")
+    ap.add_argument("--days", type=float, default=7, help="Days of history for --fetch")
     ap.add_argument("--autocorr", type=float, default=0.0, help="Momentum for --synth (0=random walk)")
     ap.add_argument("--entry-threshold", type=float, default=0.20, help="Min confidence to take a trade (ignored in --walk-forward, which tunes it)")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
@@ -986,8 +988,11 @@ def main() -> int:
 
     if args.csv:
         bars = load_csv(args.csv)
-    elif args.fetch_binance:
-        bars = fetch_binance_1m(days=args.days)
+    elif args.fetch or args.fetch_binance:
+        from btc_history import fetch_history
+        provider = args.fetch or "binance"
+        rows = fetch_history(provider, days=args.days)
+        bars = [Bar(r["time"], r["open"], r["high"], r["low"], r["close"], r["volume"]) for r in rows]
     else:
         bars = synth_bars(args.synth, autocorr=args.autocorr)
 

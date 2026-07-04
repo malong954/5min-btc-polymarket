@@ -154,11 +154,132 @@ class KrakenFeed(Feed):
         return None
 
 
+class CryptoCompareFeed(Feed):
+    """Keyless (rate-limited). Provides both spot and 1m round-open, so it can
+    be used as a full cross-check feed in the impulse gate."""
+    name = "cryptocompare"
+
+    def spot(self) -> Optional[float]:
+        try:
+            j = _get_json(
+                "https://min-api.cryptocompare.com/data/price",
+                {"fsym": "BTC", "tsyms": "USD"},
+            )
+            return float(j["USD"])
+        except Exception:
+            return None
+
+    def slot_open(self, slot_start: int) -> Optional[float]:
+        try:
+            j = _get_json(
+                "https://min-api.cryptocompare.com/data/v2/histominute",
+                {"fsym": "BTC", "tsym": "USD", "limit": 6, "toTs": slot_start + SLOT_SECONDS},
+            )
+            for row in ((j or {}).get("Data") or {}).get("Data") or []:
+                if int(row.get("time", -1)) == slot_start:
+                    return float(row["open"])
+        except Exception:
+            return None
+        return None
+
+
+class CoinGeckoFeed(Feed):
+    """Keyless live spot. No keyless 1m round-open, so this contributes to a
+    live cross-check display but not to the round gate (slot_open -> None)."""
+    name = "coingecko"
+
+    def spot(self) -> Optional[float]:
+        try:
+            j = _get_json(
+                "https://api.coingecko.com/api/v3/simple/price",
+                {"ids": "bitcoin", "vs_currencies": "usd"},
+            )
+            return float(j["bitcoin"]["usd"])
+        except Exception:
+            return None
+
+    def slot_open(self, slot_start: int) -> Optional[float]:
+        return None
+
+
+class DiaFeed(Feed):
+    """Keyless live spot (DIAdata). Spot-only for the gate's purposes."""
+    name = "dia"
+
+    def spot(self) -> Optional[float]:
+        try:
+            j = _get_json("https://api.diadata.org/v1/assetQuotation/Bitcoin/0x0000000000000000000000000000000000000000")
+            return float(j["Price"])
+        except Exception:
+            return None
+
+    def slot_open(self, slot_start: int) -> Optional[float]:
+        return None
+
+
+class LiveCoinWatchFeed(Feed):
+    """Live spot. Requires a free API key in env LIVECOINWATCH_API_KEY."""
+    name = "livecoinwatch"
+
+    def spot(self) -> Optional[float]:
+        key = os.getenv("LIVECOINWATCH_API_KEY")
+        if not key:
+            return None
+        try:
+            r = requests.post(
+                "https://api.livecoinwatch.com/coins/single",
+                headers={"content-type": "application/json", "x-api-key": key},
+                json={"currency": "USD", "code": "BTC", "meta": False},
+                timeout=4.0,
+            )
+            r.raise_for_status()
+            return float(r.json()["rate"])
+        except Exception:
+            return None
+
+    def slot_open(self, slot_start: int) -> Optional[float]:
+        return None
+
+
+class CoinMarketCapFeed(Feed):
+    """Live spot. Requires an API key in env COINMARKETCAP_API_KEY."""
+    name = "coinmarketcap"
+
+    def spot(self) -> Optional[float]:
+        key = os.getenv("COINMARKETCAP_API_KEY")
+        if not key:
+            return None
+        try:
+            r = requests.get(
+                "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
+                headers={"X-CMC_PRO_API_KEY": key},
+                params={"symbol": "BTC", "convert": "USD"},
+                timeout=4.0,
+            )
+            r.raise_for_status()
+            return float(r.json()["data"]["BTC"]["quote"]["USD"]["price"])
+        except Exception:
+            return None
+
+    def slot_open(self, slot_start: int) -> Optional[float]:
+        return None
+
+
 FEEDS: dict[str, type[Feed]] = {
     "binance": BinanceFeed,
     "coinbase": CoinbaseFeed,
     "kraken": KrakenFeed,
+    "cryptocompare": CryptoCompareFeed,
+    "coingecko": CoinGeckoFeed,
+    "dia": DiaFeed,
+    "livecoinwatch": LiveCoinWatchFeed,
+    "coinmarketcap": CoinMarketCapFeed,
 }
+
+# Feeds that can supply the current 5m round-open (usable as full gate feeds).
+# The others are spot-only: fine for a live cross-check display, but they can't
+# anchor the intra-round move so the gate ignores them.
+GATE_CAPABLE_FEEDS = ["binance", "coinbase", "kraken", "cryptocompare"]
 
 
 def build_feeds(names: list[str]) -> list[Feed]:
