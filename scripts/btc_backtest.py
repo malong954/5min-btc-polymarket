@@ -247,7 +247,11 @@ class MTFModel:
         sig.features.update({f"sub_{k}": v for k, v in subs.items()})
         sig.score = math.tanh(raw)
         sig.confidence = clamp(abs(sig.score) * vol_factor, 0.0, 1.0)
-        if sig.confidence >= self.entry_threshold and sig.score != 0.0:
+        # Direction is threshold-independent (pure sign of the score); whether a
+        # round is actually *traded* is decided later by comparing confidence to
+        # the entry threshold. Keeping these separate lets the walk-forward tuner
+        # re-thresholds the same scored rounds without recomputing indicators.
+        if sig.score != 0.0:
             sig.direction = "UP" if sig.score > 0 else "DOWN"
         return sig
 
@@ -270,19 +274,18 @@ def outcome_direction(model: MTFModel, round_start: int) -> Optional[str]:
     return "FLAT"
 
 
-def run_backtest(
-    bars_1m: list[Bar],
-    weights: Optional[dict[str, float]] = None,
-    entry_threshold: float = 0.20,
-    entry_price: float = 0.85,
-) -> dict[str, Any]:
-    model = MTFModel(bars_1m, weights=weights, entry_threshold=entry_threshold)
+def score_rounds(model: MTFModel) -> list[dict[str, Any]]:
+    """Score every evaluable 5m round once (threshold-independent).
 
-    rounds = [b.ts for b in model.bars_5m]
+    Each row carries the model score, confidence, predicted direction (sign of
+    score), the realized outcome, and the raw features. Whether a round is
+    *traded* is a later decision (confidence vs entry threshold), so these rows
+    can be re-thresholded cheaply — which is what walk-forward tuning needs.
+    """
     rows: list[dict[str, Any]] = []
-    for rs in rounds:
+    for rs in [b.ts for b in model.bars_5m]:
         sig = model.evaluate(rs)
-        if sig is None:
+        if sig is None or sig.direction is None:
             continue
         actual = outcome_direction(model, rs)
         if actual is None or actual == "FLAT":
@@ -295,27 +298,36 @@ def run_backtest(
             "actual": actual,
             "features": sig.features,
         })
+    return rows
 
+
+def metrics_from_rows(
+    rows: list[dict[str, Any]],
+    entry_threshold: float,
+    entry_price: float,
+) -> dict[str, Any]:
+    """Compute accuracy / coverage / PnL for a set of scored rows at a threshold.
+
+    A round is traded when its confidence >= entry_threshold.
+    """
     evaluated = len(rows)
-    trades = [r for r in rows if r["pred"] is not None]
+    trades = [r for r in rows if r["confidence"] >= entry_threshold]
     n_trades = len(trades)
     wins = sum(1 for r in trades if r["pred"] == r["actual"])
     acc = wins / n_trades if n_trades else 0.0
 
     # Baseline: naively follow the current-round impulse direction on every round.
-    base_ok = 0
-    base_n = 0
+    base_ok = base_n = 0
     for r in rows:
         mv = r["features"].get("btc_move_usd", 0.0)
         if mv == 0:
             continue
         base_n += 1
-        pred = "UP" if mv > 0 else "DOWN"
-        if pred == r["actual"]:
+        if ("UP" if mv > 0 else "DOWN") == r["actual"]:
             base_ok += 1
     base_acc = base_ok / base_n if base_n else 0.0
 
-    # Accuracy by confidence tercile.
+    # Accuracy by confidence tercile (over traded rounds).
     conf_sorted = sorted(trades, key=lambda r: r["confidence"])
     buckets = []
     if n_trades >= 3:
@@ -337,7 +349,7 @@ def run_backtest(
     for key in ["sub_impulse_1m", "sub_rsi_1m", "sub_macd_1m", "sub_trend_5m", "sub_trend_15m", "score"]:
         xs, ys = [], []
         for r, yy in zip(rows, y):
-            v = r["features"].get(key) if key != "score" else r["score"]
+            v = r["score"] if key == "score" else r["features"].get(key)
             if v is not None:
                 xs.append(v)
                 ys.append(yy)
@@ -345,15 +357,12 @@ def run_backtest(
         if c is not None:
             feature_corr[key] = round(c, 4)
 
-    # Simulated PnL: buy at entry_price, settle $1 on win / $0 on loss.
     win_pnl = 1.0 - entry_price
     loss_pnl = -entry_price
     total_pnl = wins * win_pnl + (n_trades - wins) * loss_pnl
     ev = total_pnl / n_trades if n_trades else 0.0
 
     return {
-        "bars_1m": len(model.bars_1m),
-        "rounds_5m": len(model.bars_5m),
         "rounds_evaluated": evaluated,
         "trades": n_trades,
         "coverage": round(n_trades / evaluated, 4) if evaluated else 0.0,
@@ -370,8 +379,166 @@ def run_backtest(
             "ev_per_trade": round(ev, 5),
             "total_pnl_units": round(total_pnl, 3),
         },
-        "weights": model.weights,
         "entry_threshold": entry_threshold,
+    }
+
+
+TRADE_LOG_FEATURES = [
+    "btc_move_usd", "rsi_1m", "macd_hist_1m",
+    "ema_gap_5m", "ema_gap_15m", "rel_volume_1m",
+]
+
+
+def write_trade_log(path: str, rows: list[dict[str, Any]], entry_threshold: float) -> int:
+    """Write a per-round CSV: one line per evaluated round, `taken` flags the
+    ones that cleared the threshold, `result` is win/loss for taken trades.
+    Lets you eyeball exactly which rounds were traded and which lost."""
+    import csv
+
+    header = (
+        ["round_start", "utc_time", "score", "confidence", "pred", "taken", "actual", "result"]
+        + TRADE_LOG_FEATURES
+    )
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for r in rows:
+            taken = r["confidence"] >= entry_threshold
+            result = ""
+            if taken:
+                result = "win" if r["pred"] == r["actual"] else "loss"
+            iso = dt.datetime.fromtimestamp(r["round_start"], dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            feats = [round(r["features"][k], 4) if r["features"].get(k) is not None else "" for k in TRADE_LOG_FEATURES]
+            w.writerow([
+                r["round_start"], iso, round(r["score"], 5), round(r["confidence"], 5),
+                r["pred"], int(taken), r["actual"], result, *feats,
+            ])
+    return len(rows)
+
+
+def run_backtest(
+    bars_1m: list[Bar],
+    weights: Optional[dict[str, float]] = None,
+    entry_threshold: float = 0.20,
+    entry_price: float = 0.85,
+    trade_log: Optional[str] = None,
+) -> dict[str, Any]:
+    model = MTFModel(bars_1m, weights=weights, entry_threshold=entry_threshold)
+    rows = score_rounds(model)
+    res = metrics_from_rows(rows, entry_threshold, entry_price)
+    res["bars_1m"] = len(model.bars_1m)
+    res["rounds_5m"] = len(model.bars_5m)
+    res["weights"] = model.weights
+    if trade_log:
+        n = write_trade_log(trade_log, rows, entry_threshold)
+        res["trade_log"] = {"path": trade_log, "rows": n}
+    return res
+
+
+def _best_threshold(train_rows: list[dict[str, Any]], entry_price: float,
+                    grid: list[float], min_trades: int) -> tuple[float, float]:
+    """Pick the entry threshold that maximizes in-sample EV/trade, requiring at
+    least `min_trades` trades. Ties break toward higher coverage (lower
+    threshold). Falls back to the lowest grid value if nothing qualifies."""
+    best_thr = grid[0]
+    best_ev = None
+    for thr in grid:
+        m = metrics_from_rows(train_rows, thr, entry_price)
+        if m["trades"] < min_trades:
+            continue
+        ev = m["sim_pnl"]["ev_per_trade"]
+        if best_ev is None or ev > best_ev + 1e-9:
+            best_ev, best_thr = ev, thr
+    return best_thr, (best_ev if best_ev is not None else float("nan"))
+
+
+def run_walk_forward(
+    bars_1m: list[Bar],
+    weights: Optional[dict[str, float]] = None,
+    entry_price: float = 0.85,
+    train: int = 500,
+    test: int = 250,
+    min_trades: int = 15,
+    grid: Optional[list[float]] = None,
+    trade_log: Optional[str] = None,
+) -> dict[str, Any]:
+    """Walk-forward evaluation: slide a train/test window over the scored rounds,
+    tune the entry threshold on each in-sample train block, and measure it purely
+    on the following out-of-sample test block. Aggregates OOS results so the
+    reported edge is never fit on the same data it's scored on."""
+    model = MTFModel(bars_1m, weights=weights)
+    rows = score_rounds(model)
+    rows.sort(key=lambda r: r["round_start"])
+    if grid is None:
+        grid = [round(0.10 + 0.05 * i, 2) for i in range(18)]  # 0.10 .. 0.95
+
+    folds = []
+    oos_rows: list[dict[str, Any]] = []       # test rows that were traded, with the fold threshold
+    oos_all_rows: list[dict[str, Any]] = []    # every test row (for the trade log)
+    start = train
+    while start + 1 <= len(rows):
+        tr = rows[start - train:start]
+        te = rows[start:start + test]
+        if not te:
+            break
+        thr, tr_ev = _best_threshold(tr, entry_price, grid, min_trades)
+        te_metrics = metrics_from_rows(te, thr, entry_price)
+        for r in te:
+            oos_all_rows.append({**r, "_thr": thr})
+            if r["confidence"] >= thr:
+                oos_rows.append(r)
+        folds.append({
+            "fold": len(folds) + 1,
+            "train_rounds": len(tr),
+            "test_rounds": len(te),
+            "chosen_threshold": thr,
+            "train_ev_per_trade": round(tr_ev, 5) if tr_ev == tr_ev else None,
+            "oos_trades": te_metrics["trades"],
+            "oos_accuracy": te_metrics["directional_accuracy"],
+            "oos_ev_per_trade": te_metrics["sim_pnl"]["ev_per_trade"],
+        })
+        start += test
+
+    # Aggregate out-of-sample.
+    n = len(oos_rows)
+    wins = sum(1 for r in oos_rows if r["pred"] == r["actual"])
+    acc = wins / n if n else 0.0
+    win_pnl, loss_pnl = 1.0 - entry_price, -entry_price
+    total_pnl = wins * win_pnl + (n - wins) * loss_pnl
+    thresholds = [f["chosen_threshold"] for f in folds]
+
+    if trade_log:
+        # Log OOS decisions: `taken` uses each row's own fold threshold.
+        import csv
+        with open(trade_log, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["round_start", "utc_time", "fold_threshold", "score", "confidence",
+                        "pred", "taken", "actual", "result"] + TRADE_LOG_FEATURES)
+            for r in oos_all_rows:
+                taken = r["confidence"] >= r["_thr"]
+                result = ("win" if r["pred"] == r["actual"] else "loss") if taken else ""
+                iso = dt.datetime.fromtimestamp(r["round_start"], dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                feats = [round(r["features"][k], 4) if r["features"].get(k) is not None else "" for k in TRADE_LOG_FEATURES]
+                w.writerow([r["round_start"], iso, r["_thr"], round(r["score"], 5),
+                            round(r["confidence"], 5), r["pred"], int(taken), r["actual"], result, *feats])
+
+    return {
+        "mode": "walk_forward",
+        "bars_1m": len(model.bars_1m),
+        "rounds_5m": len(model.bars_5m),
+        "scored_rounds": len(rows),
+        "train_window": train,
+        "test_window": test,
+        "folds": folds,
+        "chosen_threshold_range": [min(thresholds), max(thresholds)] if thresholds else None,
+        "oos_trades": n,
+        "oos_accuracy": round(acc, 4),
+        "oos_edge_vs_breakeven": round(acc - entry_price, 4),
+        "oos_ev_per_trade": round(total_pnl / n, 5) if n else 0.0,
+        "oos_total_pnl_units": round(total_pnl, 3),
+        "breakeven_winrate": entry_price,
+        "weights": model.weights,
+        "trade_log": {"path": trade_log, "rows": len(oos_all_rows)} if trade_log else None,
     }
 
 
@@ -515,7 +682,37 @@ def _print_report(res: dict[str, Any]) -> None:
     p = res["sim_pnl"]
     print(f"sim PnL @ ${p['entry_price']:.2f} entry: EV/trade {p['ev_per_trade']:+.4f} units, "
           f"total {p['total_pnl_units']:+.2f} units over {res['trades']} trades")
+    if res.get("trade_log"):
+        print(f"trade log written    : {res['trade_log']['path']} ({res['trade_log']['rows']} rows)")
     print("=" * 60)
+
+
+def _print_wf_report(res: dict[str, Any]) -> None:
+    print("=" * 68)
+    print("BTC 5m Walk-Forward Backtest (out-of-sample)")
+    print("=" * 68)
+    print(f"1m bars / 5m rounds  : {res['bars_1m']} / {res['rounds_5m']}")
+    print(f"scored rounds        : {res['scored_rounds']}")
+    print(f"train/test window    : {res['train_window']} / {res['test_window']} rounds")
+    print(f"folds                : {len(res['folds'])}")
+    print(f"chosen threshold rng : {res['chosen_threshold_range']}")
+    print("-" * 68)
+    print(f"{'fold':<5}{'thr':<7}{'train_ev':<11}{'oos_trades':<12}{'oos_acc':<10}{'oos_ev':<10}")
+    for f in res["folds"]:
+        tev = f["train_ev_per_trade"]
+        print(f"{f['fold']:<5}{f['chosen_threshold']:<7}"
+              f"{(f'{tev:+.4f}' if tev is not None else 'n/a'):<11}"
+              f"{f['oos_trades']:<12}{f['oos_accuracy']:<10.3f}{f['oos_ev_per_trade']:<+10.4f}")
+    print("-" * 68)
+    print(f"AGGREGATE out-of-sample ({res['oos_trades']} trades):")
+    print(f"  accuracy           : {res['oos_accuracy']:.1%}")
+    print(f"  breakeven win-rate : {res['breakeven_winrate']:.1%}")
+    print(f"  edge vs breakeven  : {res['oos_edge_vs_breakeven']:+.1%}")
+    print(f"  EV/trade           : {res['oos_ev_per_trade']:+.4f} units")
+    print(f"  total PnL          : {res['oos_total_pnl_units']:+.2f} units")
+    if res.get("trade_log"):
+        print(f"  trade log          : {res['trade_log']['path']} ({res['trade_log']['rows']} rows)")
+    print("=" * 68)
 
 
 def main() -> int:
@@ -526,8 +723,13 @@ def main() -> int:
     src.add_argument("--synth", type=int, metavar="N", help="Generate N synthetic 1m bars (offline)")
     ap.add_argument("--days", type=int, default=7, help="Days of history for --fetch-binance")
     ap.add_argument("--autocorr", type=float, default=0.0, help="Momentum for --synth (0=random walk)")
-    ap.add_argument("--entry-threshold", type=float, default=0.20, help="Min confidence to take a trade")
+    ap.add_argument("--entry-threshold", type=float, default=0.20, help="Min confidence to take a trade (ignored in --walk-forward, which tunes it)")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
+    ap.add_argument("--trade-log", metavar="PATH", help="Write a per-round CSV of every decision (taken/skipped, win/loss, features)")
+    ap.add_argument("--walk-forward", action="store_true", help="Out-of-sample eval: tune the threshold on rolling train blocks, score on the next test block")
+    ap.add_argument("--wf-train", type=int, default=500, help="Train window in 5m rounds (walk-forward)")
+    ap.add_argument("--wf-test", type=int, default=250, help="Test window in 5m rounds (walk-forward)")
+    ap.add_argument("--wf-min-trades", type=int, default=15, help="Min in-sample trades required when tuning a fold's threshold")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of a text report")
     args = ap.parse_args()
 
@@ -538,10 +740,26 @@ def main() -> int:
     else:
         bars = synth_bars(args.synth, autocorr=args.autocorr)
 
+    if args.walk_forward:
+        res = run_walk_forward(
+            bars,
+            entry_price=args.entry_price,
+            train=args.wf_train,
+            test=args.wf_test,
+            min_trades=args.wf_min_trades,
+            trade_log=args.trade_log,
+        )
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            _print_wf_report(res)
+        return 0
+
     res = run_backtest(
         bars,
         entry_threshold=args.entry_threshold,
         entry_price=args.entry_price,
+        trade_log=args.trade_log,
     )
     if args.json:
         print(json.dumps(res, indent=2))

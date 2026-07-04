@@ -93,6 +93,11 @@ historical 5m settle. It freezes the clock ~2 min before close (no lookahead),
 predicts up/down, and reports directional accuracy, coverage, per-feature
 correlation, and simulated PnL at a configurable contract entry price.
 
+Each 5m market is a **Yes/No pair** (an "Up" token and a "Down" token). A
+prediction of `UP` means buy the Up/Yes contract; `DOWN` means buy the Down
+contract (equivalently "No" on Up). The backtest picks that side from the trend
+and prices the fill at `--entry-price`, settling $1 on a correct call.
+
 ```bash
 # Offline demo (synthetic data, no network):
 python3 scripts/btc_backtest.py --synth 6000
@@ -100,13 +105,23 @@ python3 scripts/btc_backtest.py --synth 6000
 # Real data on your PC:
 python3 scripts/btc_backtest.py --fetch-binance --days 7 --entry-price 0.85
 python3 scripts/btc_backtest.py --csv data/btc_1m.csv --entry-threshold 0.80 --json
+
+# Per-round CSV of every decision (taken/skipped, win/loss, all features):
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --trade-log out/trades.csv
+
+# Walk-forward: tune the threshold on rolling train blocks, score the NEXT
+# (unseen) block. The reported edge is out-of-sample, not curve-fit:
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --walk-forward \
+    --wf-train 500 --wf-test 250 --trade-log out/oos_trades.csv
 ```
 
 **Key lesson the backtest makes explicit:** buying contracts at $0.80-$0.99 means
 your breakeven win-rate is 80-99%. High directional accuracy alone loses money;
 positive EV only appears when you raise `--entry-threshold` to trade only the
-highest-confidence rounds. Validate that the edge clears breakeven on real data
-before going live.
+highest-confidence rounds. **Always confirm with `--walk-forward`** — an
+in-sample threshold that looks great is easy to overfit; the walk-forward number
+is the honest one. Validate that the out-of-sample edge clears breakeven on real
+data before going live.
 
 Tests (stdlib only, no network):
 ```bash

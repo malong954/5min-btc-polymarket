@@ -4,12 +4,17 @@ Offline tests for the multi-timeframe backtester. Stdlib only, no network.
 Run: python3 scripts/test_btc_backtest.py
 """
 
+import csv
+import os
+import tempfile
+
 from btc_indicators import ema, macd, rsi
 from btc_backtest import (
     Bar,
     MTFModel,
     DECISION_OFFSET,
     run_backtest,
+    run_walk_forward,
     synth_bars,
 )
 
@@ -100,12 +105,58 @@ def test_resample_alignment():
     check("15m bar count roughly 1/3 of 5m", abs(len(m.bars_15m) - len(m.bars_5m) / 3) <= 2)
 
 
+def test_trade_log():
+    bars = synth_bars(4000, autocorr=0.4, seed=9)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "trades.csv")
+        res = run_backtest(bars, entry_threshold=0.5, trade_log=path)
+        check("trade log recorded in result", res.get("trade_log", {}).get("path") == path)
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+        check("trade log row per evaluated round", len(rows) == res["rounds_evaluated"])
+        taken = [r for r in rows if r["taken"] == "1"]
+        check("trade log taken count matches metrics", len(taken) == res["trades"])
+        check("taken rows all have win/loss result", all(r["result"] in ("win", "loss") for r in taken))
+        check("skipped rows have empty result", all(r["result"] == "" for r in rows if r["taken"] == "0"))
+        wins = sum(1 for r in taken if r["result"] == "win")
+        expected = round(res["directional_accuracy"] * res["trades"])
+        check("trade log wins match reported accuracy", abs(wins - expected) <= 1)
+        check("trade log has feature columns", "btc_move_usd" in rows[0] and "rsi_1m" in rows[0])
+
+
+def test_walk_forward_structure():
+    bars = synth_bars(12000, autocorr=0.5, seed=13)
+    res = run_walk_forward(bars, train=400, test=200, min_trades=10)
+    check("walk-forward produced folds", len(res["folds"]) >= 2)
+    check("walk-forward has OOS trades", res["oos_trades"] > 0)
+    check("walk-forward OOS accuracy valid", 0.0 <= res["oos_accuracy"] <= 1.0)
+    grid_lo, grid_hi = 0.10, 0.95
+    check("chosen thresholds within grid",
+          all(grid_lo - 1e-9 <= f["chosen_threshold"] <= grid_hi + 1e-9 for f in res["folds"]))
+    # Each fold's threshold was tuned on train only, then applied to the *next*
+    # block, so this is a true out-of-sample number.
+    check("walk-forward OOS edge is finite", res["oos_edge_vs_breakeven"] == res["oos_edge_vs_breakeven"])
+    print(f"       walk-forward OOS: acc={res['oos_accuracy']:.3f} "
+          f"trades={res['oos_trades']} thr_range={res['chosen_threshold_range']}")
+
+
+def test_walk_forward_is_out_of_sample():
+    """Sanity: on a pure random walk the OOS edge should not be a large positive
+    number (no free lunch once the threshold is tuned out-of-sample)."""
+    bars = synth_bars(12000, autocorr=0.0, seed=21)
+    res = run_walk_forward(bars, train=400, test=200, min_trades=10)
+    check("random-walk OOS edge is not implausibly large", res["oos_edge_vs_breakeven"] < 0.15)
+
+
 def main():
     test_indicators()
     test_resample_alignment()
     test_no_lookahead()
     test_end_to_end_random_walk()
     test_edge_detected_on_momentum()
+    test_trade_log()
+    test_walk_forward_structure()
+    test_walk_forward_is_out_of_sample()
     print("\nAll backtest tests passed.")
 
 
