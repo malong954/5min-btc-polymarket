@@ -59,6 +59,22 @@ echo "##################################################################"
 
 echo
 echo "##################################################################"
+echo "# 1b  PRICE SENSITIVITY  — the edge vs the price you ACTUALLY pay   "
+echo "##################################################################"
+echo "The backtest prices every trade at a FIXED entry price. But the impulse"
+echo "signal is strongest exactly when the round is already mostly decided —"
+echo "and the real market prices THOSE contracts near \$0.97-0.99, not \$0.90."
+echo "If the edge evaporates as the price rises, it was a pricing artifact:"
+for ep in 0.90 0.93 0.95 0.97 0.99; do
+  edge=$("$PY" scripts/btc_backtest.py --csv "$CSV" --walk-forward \
+         --wf-train "$WF_TRAIN" --wf-test "$WF_TEST" --entry-price "$ep" --json 2>/dev/null \
+         | "$PY" -c "import sys,json;print(json.load(sys.stdin)['oos_edge_vs_breakeven'])" 2>/dev/null || echo "?")
+  echo "   entry \$$ep  ->  OOS edge $edge"
+done
+echo "The TRUE test is the live paper trader (real per-trade prices), not this."
+
+echo
+echo "##################################################################"
 echo "# 2/4  ABLATION  — which indicators earn weight, which are dead?   "
 echo "##################################################################"
 "$PY" scripts/btc_backtest.py --csv "$CSV" --ablation \
