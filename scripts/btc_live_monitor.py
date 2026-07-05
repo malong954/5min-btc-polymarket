@@ -47,6 +47,7 @@ def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: flo
         "entry_sum": 0.0, "entry_n": 0,  # realized entry prices (real varies per trade)
         "last_stake": stake_usd,          # most recent actual stake (grows with balance)
         "skips_since_trade": 0, "last_skip": None,
+        "total_skips": 0, "total_decided": 0,   # cumulative: skipped vs decided rounds
         "last_hb": None, "last_pred": None, "last_entry": None,
         "recent": [], "peak_pnl": 0.0, "max_drawdown": 0.0,
     }
@@ -63,8 +64,10 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         state["last_hb"] = ev
     elif t == "prediction":
         state["last_pred"] = ev
+        state["total_decided"] += 1          # every round we made a call on
     elif t == "skip":
         state["skips_since_trade"] += 1
+        state["total_skips"] += 1
         state["last_skip"] = ev
     elif t == "entry":
         state["last_entry"] = ev
@@ -186,6 +189,14 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
                  f"{p.c(f'{wins}W', GREEN, BOLD)} / {p.c(f'{losses}L', RED, BOLD)}   "
                  f"winrate {p.c(f'{wr:.1%}', wr_col, BOLD)}  "
                  f"({be_label}, {p.c(verdict, wr_col)})")
+    dec = state.get("total_decided", 0)
+    if dec:
+        entered = dec - state.get("total_skips", 0)
+        rate = state.get("total_skips", 0) / dec
+        lines.append(f"  rounds  {p.c(str(dec), BOLD)} decided   "
+                     f"{p.c(str(entered), GREEN)} entered   "
+                     f"{p.c(str(state.get('total_skips', 0)), GREY)} skipped "
+                     f"({rate:.0%})")
 
     lines.append(p.c("  " + "─" * 56, GREY))
     lines.append(p.c("  recent settles (newest first)", BOLD))
