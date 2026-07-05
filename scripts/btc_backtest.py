@@ -50,6 +50,7 @@ from typing import Any, Optional
 from btc_indicators import (
     bollinger_pctb,
     clamp,
+    divergence_signal,
     ema,
     macd as macd_ind,
     pearson,
@@ -119,8 +120,9 @@ DEFAULT_WEIGHTS = {
     "macd_1m": 0.6,
     "trend_5m": 0.8,
     "trend_15m": 0.6,
-    "bb_1m": 0.3,      # Bollinger %B — validate/tune with --ablation on real data
-    "roc_1m": 0.3,     # rate of change  — same
+    "bb_1m": 0.3,          # Bollinger %B — validate/tune with --ablation on real data
+    "roc_1m": 0.3,         # rate of change  — same
+    "divergence_1m": 0.3,  # RSI divergence (leading) — noisy; ablate on real data
 }
 
 
@@ -152,6 +154,7 @@ class MTFModel:
         self.confluence = clamp(confluence, 0.0, 1.0)
 
         c1 = [b.c for b in self.bars_1m]
+        self.c1 = c1                               # closes, for divergence pivots
         self.rsi_1m = rsi_ind(c1, 14)
         _, _, self.macd_hist = macd_ind(c1, 12, 26, 9)
         self.vol_ma_1m = rolling_mean([b.v for b in self.bars_1m], 20)
@@ -239,6 +242,13 @@ class MTFModel:
         if rc is not None:
             subs["roc_1m"] = math.tanh(rc / 0.0015)
             sig.features["roc_1m"] = rc
+
+        # (3d) RSI divergence on 1m — a LEADING signal (momentum vs price). Always
+        # present (0 = no divergence) so it's a stable feature for ablation/rescore.
+        div = divergence_signal(self.c1, self.rsi_1m, i1, k=3, max_lookback=60)
+        subs["divergence_1m"] = float(div["signal"])
+        if div["type"]:
+            sig.features["divergence_type"] = div["type"]
 
         # (4) 5m EMA trend (closed bars only).
         j5 = self._last_closed_index(self._starts_5m, SLOT, t_dec)

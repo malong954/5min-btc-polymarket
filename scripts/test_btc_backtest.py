@@ -8,7 +8,7 @@ import csv
 import os
 import tempfile
 
-from btc_indicators import ema, macd, rsi, bollinger_pctb, roc
+from btc_indicators import ema, macd, rsi, bollinger_pctb, roc, divergence_signal
 from btc_backtest import (
     Bar,
     MTFModel,
@@ -112,6 +112,68 @@ def test_edge_detected_on_momentum():
     check("momentum data: ensemble score positively correlates with outcome", corr > 0.1)
     check("momentum data: high-confidence bucket >= low-confidence bucket",
           res["accuracy_by_confidence"][-1]["accuracy"] >= res["accuracy_by_confidence"][0]["accuracy"])
+
+
+def _two_peak_series(p1, p2):
+    """Prices with two clean swing highs (at i=6 and i=18) of value p1 then p2,
+    linear between, so pivots are unambiguous."""
+    pts = [(0, 10), (6, p1), (12, 10), (18, p2), (24, 10)]
+    prices = []
+    for a in range(len(pts) - 1):
+        (ia, va), (ib, vb) = pts[a], pts[a + 1]
+        for i in range(ia, ib):
+            prices.append(va + (vb - va) * (i - ia) / (ib - ia))
+    prices.append(pts[-1][1])
+    return prices  # indices 0..24, highs at 6 and 18
+
+
+def test_divergence_detection():
+    # Regular BEARISH: price higher-high (100 -> 110), RSI lower-high (80 -> 70) -> -1.
+    prices = _two_peak_series(100.0, 110.0)
+    osc = [50.0] * len(prices)
+    osc[6] = 80.0
+    osc[18] = 70.0
+    d = divergence_signal(prices, osc, di=22, k=2, max_lookback=60)
+    check("regular bearish divergence -> signal -1", d["signal"] == -1 and d["type"] == "regular_bearish")
+
+    # Same price higher-high but RSI ALSO higher-high -> no bearish divergence.
+    osc2 = [50.0] * len(prices)
+    osc2[6], osc2[18] = 70.0, 80.0
+    d2 = divergence_signal(prices, osc2, di=22, k=2, max_lookback=60)
+    check("aligned price/osc -> no divergence", d2["signal"] == 0)
+
+    # Regular BULLISH via two troughs: price lower-low, osc higher-low -> +1.
+    lows = [(0, 100), (6, 30), (12, 100), (18, 20), (24, 100)]  # troughs at 6,18; 20<30
+    pr = []
+    for a in range(len(lows) - 1):
+        (ia, va), (ib, vb) = lows[a], lows[a + 1]
+        for i in range(ia, ib):
+            pr.append(va + (vb - va) * (i - ia) / (ib - ia))
+    pr.append(lows[-1][1])
+    o = [50.0] * len(pr)
+    o[6], o[18] = 25.0, 35.0                    # osc higher-low (35 > 25)
+    d3 = divergence_signal(pr, o, di=22, k=2, max_lookback=60)
+    check("regular bullish divergence -> signal +1", d3["signal"] == 1 and d3["type"] == "regular_bullish")
+
+
+def test_divergence_no_lookahead():
+    """The divergence at di must not change when bars AFTER di change."""
+    prices = _two_peak_series(100.0, 110.0)
+    osc = [50.0] * len(prices)
+    osc[6], osc[18] = 80.0, 70.0
+    d_before = divergence_signal(prices, osc, di=22, k=2)
+    corrupt = list(prices)
+    for i in range(23, len(corrupt)):
+        corrupt[i] += 9999.0                      # future bars only
+    d_after = divergence_signal(corrupt, osc, di=22, k=2)
+    check("divergence signal ignores post-di bars", d_before == d_after)
+
+
+def test_divergence_feeds_model():
+    from btc_backtest import MTFModel, score_rounds
+    rows = score_rounds(MTFModel(synth_bars(5000, autocorr=0.5, seed=45)))
+    feats = rows[len(rows) // 2]["features"]
+    check("divergence sub-signal present in model features", "sub_divergence_1m" in feats)
 
 
 def test_confluence_agreement():
@@ -266,6 +328,9 @@ def test_weight_opt_no_edge_on_shuffled_labels():
 
 def main():
     test_indicators()
+    test_divergence_detection()
+    test_divergence_no_lookahead()
+    test_divergence_feeds_model()
     test_confluence_agreement()
     test_resample_alignment()
     test_no_lookahead()

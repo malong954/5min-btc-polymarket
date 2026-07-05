@@ -11,7 +11,7 @@ yet defined. This makes them safe to index positionally against the source bars.
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Any, Optional
 
 
 def ema(values: list[float], period: int) -> list[Optional[float]]:
@@ -136,6 +136,61 @@ def roc(values: list[float], period: int = 5) -> list[Optional[float]]:
         if prev:
             out[i] = (values[i] - prev) / prev
     return out
+
+
+def divergence_signal(
+    prices: list[float],
+    osc: list[Optional[float]],
+    di: int,
+    k: int = 3,
+    max_lookback: int = 60,
+) -> dict[str, Any]:
+    """Detect RSI/MACD price divergence at decision index `di` — a LEADING signal.
+
+    Compares the last two confirmed swing pivots in price against the oscillator:
+      regular bearish : price higher-high, osc lower-high   -> reversal down (-1)
+      regular bullish : price lower-low,  osc higher-low   -> reversal up   (+1)
+      hidden  bearish : price lower-high, osc higher-high  -> continue down (-1)
+      hidden  bullish : price higher-low, osc lower-low    -> continue up   (+1)
+
+    No lookahead: a pivot at index i needs k bars on each side, so it is only
+    considered once confirmed (i + k <= di). Only pivots within `max_lookback`
+    bars of di are used. Returns {'signal': -1|0|1, 'type': str|None}.
+    """
+    n = len(prices)
+    if di < 2 * k or di >= n:
+        return {"signal": 0, "type": None}
+    lo = max(k, di - max_lookback)
+    highs: list[tuple[int, float, float]] = []
+    lows: list[tuple[int, float, float]] = []
+    for i in range(lo, di - k + 1):          # i + k <= di  => confirmed by di
+        if osc[i] is None:
+            continue
+        w = prices[i - k:i + k + 1]
+        pv = prices[i]
+        if pv == max(w) and w.count(pv) == 1:
+            highs.append((i, pv, osc[i]))
+        if pv == min(w) and w.count(pv) == 1:
+            lows.append((i, pv, osc[i]))
+
+    cands: list[tuple[int, int, str]] = []   # (pivot_index, signal, type)
+    if len(highs) >= 2:
+        (_, p1, o1), (i2, p2, o2) = highs[-2], highs[-1]
+        if p2 > p1 and o2 < o1:
+            cands.append((i2, -1, "regular_bearish"))
+        elif p2 < p1 and o2 > o1:
+            cands.append((i2, -1, "hidden_bearish"))
+    if len(lows) >= 2:
+        (_, p1, o1), (i2, p2, o2) = lows[-2], lows[-1]
+        if p2 < p1 and o2 > o1:
+            cands.append((i2, 1, "regular_bullish"))
+        elif p2 > p1 and o2 < o1:
+            cands.append((i2, 1, "hidden_bullish"))
+    if not cands:
+        return {"signal": 0, "type": None}
+    cands.sort(key=lambda c: c[0])           # most recent pivot wins
+    _, sig, typ = cands[-1]
+    return {"signal": sig, "type": typ}
 
 
 def stdev(values: list[float]) -> float:
