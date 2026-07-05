@@ -52,6 +52,8 @@ class LivePaperEngine:
         min_entry_sec: float = 45.0,
         log: Optional[TextIO] = None,
         emit_heartbeat: bool = True,
+        bankroll: float = 100.0,
+        stake_usd: float = 10.0,
     ):
         self.entry_threshold = entry_threshold
         self.entry_price = entry_price
@@ -60,11 +62,17 @@ class LivePaperEngine:
         self.min_entry_sec = min_entry_sec
         self.log = log
         self.emit_heartbeat = emit_heartbeat
+        self.bankroll = bankroll          # starting account balance ($)
+        self.stake_usd = stake_usd        # dollars deployed per trade
 
         self.decided: set[int] = set()          # rounds we've made a call on
         self.positions: dict[int, dict[str, Any]] = {}
         self.settled: set[int] = set()
-        self.stats = {"trades": 0, "wins": 0, "pnl": 0.0}
+        self.stats = {"trades": 0, "wins": 0, "pnl": 0.0, "pnl_usd": 0.0}
+
+    @property
+    def balance(self) -> float:
+        return self.bankroll + self.stats["pnl_usd"]
 
     def _emit(self, ev: dict[str, Any]) -> dict[str, Any]:
         if self.log is not None:
@@ -89,14 +97,23 @@ class LivePaperEngine:
             pos = self.positions[rs]
             win = pos["side"] == actual
             pnl = (1.0 - self.entry_price) if win else -self.entry_price
+            # Dollar economics: spend `stake_usd` buying shares at entry_price.
+            # Win pays $1/share; loss forfeits the stake.
+            stake = pos.get("stake_usd", self.stake_usd)
+            # Round to whole cents so the running balance always equals the sum of
+            # the per-trade figures the user sees (no sub-cent drift).
+            pnl_usd = round(stake * (1.0 - self.entry_price) / self.entry_price, 2) if win else -stake
             self.stats["trades"] += 1
             self.stats["wins"] += 1 if win else 0
             self.stats["pnl"] += pnl
+            self.stats["pnl_usd"] += pnl_usd
             self.settled.add(rs)
             events.append(self._emit({
                 "ts": int(now), "type": "settle", "round": rs, "side": pos["side"],
                 "actual": actual, "result": "win" if win else "loss",
                 "pnl": round(pnl, 4), "cum_pnl": round(self.stats["pnl"], 4),
+                "pnl_usd": round(pnl_usd, 2), "balance": round(self.balance, 2),
+                "stake_usd": round(stake, 2),
                 "trades": self.stats["trades"],
                 "winrate": round(self.stats["wins"] / self.stats["trades"], 4),
             }))
@@ -118,11 +135,12 @@ class LivePaperEngine:
                     self.positions[cur] = {
                         "side": sig.direction, "entry_price": self.entry_price,
                         "confidence": round(sig.confidence, 4), "opened_ts": int(now),
+                        "stake_usd": self.stake_usd,
                     }
                     events.append(self._emit({
                         "ts": int(now), "type": "entry", "round": cur, "side": sig.direction,
                         "entry_price": self.entry_price, "confidence": round(sig.confidence, 4),
-                        "stake_units": 1,
+                        "stake_usd": round(self.stake_usd, 2), "balance": round(self.balance, 2),
                     }))
                 else:
                     events.append(self._emit({
@@ -140,6 +158,7 @@ class LivePaperEngine:
                 "price": round(last_px, 2) if last_px is not None else None,
                 "open_positions": len(self.positions) - len(self.settled),
                 "cum_pnl": round(self.stats["pnl"], 4),
+                "balance": round(self.balance, 2),
             }))
         return events
 
@@ -154,13 +173,16 @@ def format_event(ev: dict[str, Any]) -> str:
         return (f"{clk}Z  ? PREDICT {ev['direction'] or '--'} conf={ev['confidence']:.2f} "
                 f"move=${ev['btc_move_usd']:+.0f} rsi={ev['rsi_1m']} ({ev['seconds_left']:.0f}s left)")
     if t == "entry":
-        return f"{clk}Z  ▲ ENTER {ev['side']} @ ${ev['entry_price']:.2f}  conf={ev['confidence']:.2f}"
+        stake = ev.get("stake_usd")
+        stake_s = f" ${stake:.2f}" if stake is not None else ""
+        return f"{clk}Z  ▲ ENTER {ev['side']}{stake_s} @ ${ev['entry_price']:.2f}  conf={ev['confidence']:.2f}"
     if t == "skip":
         return f"{clk}Z  – skip ({ev['reason']}, conf={ev['confidence']:.2f})"
     if t == "settle":
         mark = "[WIN] " if ev["result"] == "win" else "[LOSS]"
+        usd = f"  ${ev['pnl_usd']:+.2f} -> bal ${ev['balance']:.2f}" if "pnl_usd" in ev else ""
         return (f"{clk}Z  {mark} SETTLE {ev['side']} -> {ev['actual']} {ev['result'].upper()} "
-                f"pnl={ev['pnl']:+.3f}  cum={ev['cum_pnl']:+.3f}  "
+                f"pnl={ev['pnl']:+.3f}{usd}  "
                 f"wr={ev['winrate']:.1%} ({ev['trades']} trades)")
     return f"{clk}Z  {t} {ev}"
 
@@ -179,6 +201,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--poll", type=float, default=3.0, help="Seconds between polls")
     ap.add_argument("--entry-threshold", type=float, default=0.60, help="Min confidence to open a paper position")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
+    ap.add_argument("--bankroll", type=float, default=100.0, help="Starting paper account balance in USD")
+    ap.add_argument("--stake-usd", type=float, default=10.0, help="USD deployed per trade")
     ap.add_argument("--history-min", type=int, default=180, help="Minutes of 1m history to fetch each poll")
     ap.add_argument("--log", metavar="PATH", help="Append JSONL event stream to this file")
     ap.add_argument("--max-steps", type=int, default=None, help="Stop after N polls (default: run forever)")
@@ -194,9 +218,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     engine = LivePaperEngine(
         entry_threshold=args.entry_threshold, entry_price=args.entry_price, log=logf,
+        bankroll=args.bankroll, stake_usd=args.stake_usd,
     )
     print(f"# live paper trader | provider={args.provider} poll={args.poll}s "
           f"entry_threshold={args.entry_threshold} entry_price=${args.entry_price:.2f} "
+          f"bankroll=${args.bankroll:.2f} stake=${args.stake_usd:.2f} "
           f"| PAPER MODE (no real orders)", file=sys.stderr)
 
     n = 0
@@ -220,9 +246,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     finally:
         s = engine.stats
         wr = (s["wins"] / s["trades"]) if s["trades"] else 0.0
-        print(f"# summary: {s['trades']} settled trades, winrate {wr:.1%}, "
-              f"cum_pnl {s['pnl']:+.3f} units (breakeven winrate {args.entry_price:.0%})",
-              file=sys.stderr)
+        print(f"# summary: {s['trades']} settled trades, winrate {wr:.1%} "
+              f"(breakeven {args.entry_price:.0%}), "
+              f"account ${engine.balance:.2f} (started ${args.bankroll:.2f}, "
+              f"pnl ${s['pnl_usd']:+.2f})", file=sys.stderr)
         if logf:
             logf.close()
     return 0

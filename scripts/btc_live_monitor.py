@@ -37,12 +37,19 @@ SHOW_CURSOR = "\033[?25h"
 RECENT_N = 12
 
 
-def new_state() -> dict[str, Any]:
+def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: float = 0.85) -> dict[str, Any]:
     return {
-        "trades": 0, "wins": 0, "pnl": 0.0,
+        "trades": 0, "wins": 0, "pnl": 0.0, "pnl_usd": 0.0,
+        "bankroll": bankroll, "stake_usd": stake_usd, "entry_price": entry_price,
+        "balance": bankroll, "peak_bal": bankroll, "max_dd_usd": 0.0,
         "last_hb": None, "last_pred": None, "last_entry": None,
         "recent": [], "peak_pnl": 0.0, "max_drawdown": 0.0,
     }
+
+
+def _unit_to_usd(unit_pnl: float, stake_usd: float, entry_price: float) -> float:
+    # shares bought = stake/entry; per-share pnl is unit_pnl -> dollars = unit_pnl*shares.
+    return unit_pnl * stake_usd / entry_price if entry_price else 0.0
 
 
 def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
@@ -57,8 +64,22 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         state["trades"] += 1
         state["wins"] += 1 if ev.get("result") == "win" else 0
         state["pnl"] += float(ev.get("pnl", 0.0))
+        # Prefer the trader's own dollar figure; else derive from the unit pnl so
+        # the account view works even on logs written before dollars were added.
+        if "pnl_usd" in ev:
+            pnl_usd = float(ev["pnl_usd"])
+        else:
+            pnl_usd = _unit_to_usd(float(ev.get("pnl", 0.0)), state["stake_usd"], state["entry_price"])
+        state["pnl_usd"] += pnl_usd
+        state["balance"] = state["bankroll"] + state["pnl_usd"]
         state["peak_pnl"] = max(state["peak_pnl"], state["pnl"])
         state["max_drawdown"] = min(state["max_drawdown"], state["pnl"] - state["peak_pnl"])
+        state["peak_bal"] = max(state["peak_bal"], state["balance"])
+        state["max_dd_usd"] = min(state["max_dd_usd"], state["balance"] - state["peak_bal"])
+        # Attach a derived dollar figure so the recent-trades rows can show it.
+        ev = dict(ev)
+        ev.setdefault("pnl_usd", round(pnl_usd, 2))
+        ev.setdefault("balance", round(state["balance"], 2))
         state["recent"].append(ev)
         state["recent"] = state["recent"][-RECENT_N:]
     return state
@@ -114,10 +135,20 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
 
     lines.append(p.c("  " + "─" * 56, GREY))
 
-    # Headline PnL + record.
-    lines.append(f"  PnL {p.money(pnl, width=9)} units      "
-                 f"peak {p.money(state['peak_pnl'], plus=True)}   "
-                 f"maxDD {p.money(state['max_drawdown'], plus=True)}")
+    # Headline account balance (dollars) — the number the user cares about.
+    bankroll = state["bankroll"]
+    balance = state["balance"]
+    pnl_usd = state["pnl_usd"]
+    bal_col = GREEN if balance >= bankroll else RED
+    bal_s = p.c(f"${balance:,.2f}", bal_col, BOLD)
+    pl_s = p.c(f"${pnl_usd:+,.2f}", bal_col, BOLD)
+    lines.append(f"  account {bal_s}  (start ${bankroll:,.2f}, P/L {pl_s})")
+    peak_s = f"${state['peak_bal']:,.2f}"
+    dd_s = p.c(f"${state['max_dd_usd']:,.2f}", RED)
+    stake_s = f"${state['stake_usd']:.2f}"
+    lines.append(f"  peak {peak_s}   maxDD {dd_s}   stake {stake_s}/trade")
+
+    # Record + winrate vs breakeven.
     wr_col = GREEN if wr >= be else RED
     verdict = "ABOVE breakeven ✓" if wr >= be else "below breakeven"
     lines.append(f"  trades  {p.c(str(trades), BOLD)}   "
@@ -135,9 +166,11 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
             tag = "WIN " if win else "LOSS"
             side = ev.get("side", "?")
             act = ev.get("actual", "?")
+            pnl_usd = float(ev.get("pnl_usd", 0.0))
+            bal = ev.get("balance")
+            bal_s = f"   bal ${bal:,.2f}" if bal is not None else ""
             row = (f"   {clk}  {p.c(tag, col, BOLD)}  {side}->{act}  "
-                   f"{p.money(float(ev.get('pnl', 0.0)), plus=True)}   "
-                   f"cum {p.money(float(ev.get('cum_pnl', 0.0)), plus=True)}")
+                   f"{p.c(f'${pnl_usd:+,.2f}', col, BOLD)}{bal_s}")
             lines.append(row)
     else:
         lines.append(p.c("   (no settled trades yet)", GREY))
@@ -175,6 +208,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--log", default="out/live.jsonl", help="Path to the JSONL stream")
     ap.add_argument("--interval", type=float, default=1.0, help="Redraw interval (seconds)")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Breakeven reference (contract entry price)")
+    ap.add_argument("--bankroll", type=float, default=100.0, help="Starting account balance in USD")
+    ap.add_argument("--stake-usd", type=float, default=10.0, help="USD per trade (for deriving $ from older logs)")
     ap.add_argument("--once", action="store_true", help="Render a single frame and exit (no loop)")
     color_grp = ap.add_mutually_exclusive_group()
     color_grp.add_argument("--color", dest="color", action="store_true", default=None)
@@ -186,7 +221,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
     painter = Painter(color)
 
-    state = new_state()
+    state = new_state(bankroll=args.bankroll, stake_usd=args.stake_usd, entry_price=args.entry_price)
     offset = 0
 
     def refresh() -> None:

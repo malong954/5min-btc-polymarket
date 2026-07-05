@@ -54,12 +54,34 @@ def test_render_colors_wins_and_losses():
     check("render shows winrate label", "winrate" in out)
 
 
+def test_dollar_account_and_backward_compat():
+    # Old-style settle lines (no pnl_usd/balance) must still produce a $ account
+    # via derivation from the unit pnl, using the monitor's stake/entry config.
+    st = new_state(bankroll=100.0, stake_usd=10.0, entry_price=0.85)
+    fold_event(st, settle(1, "UP", "UP", 0.15, 0.15))     # win: +$1.7647
+    fold_event(st, settle(2, "UP", "DOWN", -0.85, -0.70))  # loss: -$10
+    win_usd = 10.0 * (1 - 0.85) / 0.85
+    check("derived $ balance = 100 + win - stake",
+          abs(st["balance"] - (100.0 + win_usd - 10.0)) < 1e-6)
+    out = render(st, 0.85, Painter(color=True))
+    check("render shows account line", "account" in out)
+    check("render shows a dollar figure", "$" in out)
+
+    # New-style lines with explicit pnl_usd/balance are used as-is.
+    st2 = new_state(bankroll=100.0, stake_usd=10.0, entry_price=0.85)
+    ev = {"ts": 1, "type": "settle", "side": "UP", "actual": "UP", "result": "win",
+          "pnl": 0.15, "cum_pnl": 0.15, "pnl_usd": 2.50, "balance": 102.50}
+    fold_event(st2, ev)
+    check("explicit pnl_usd is used verbatim", abs(st2["pnl_usd"] - 2.50) < 1e-9)
+    check("explicit balance reflected", abs(st2["balance"] - 102.50) < 1e-9)
+
+
 def test_render_no_color_is_plain():
     st = new_state()
     fold_event(st, settle(1, "UP", "UP", 0.15, 0.15))
     out = render(st, 0.85, Painter(color=False))
     check("no-color render has no ANSI escapes", "\033[" not in out)
-    check("no-color render still has content", "PnL" in out and "trades" in out)
+    check("no-color render still has content", "account" in out and "trades" in out)
 
 
 def test_breakeven_verdict_flips_color():
@@ -109,6 +131,7 @@ def test_missing_file_is_safe():
 def main():
     test_fold_aggregation()
     test_render_colors_wins_and_losses()
+    test_dollar_account_and_backward_compat()
     test_render_no_color_is_plain()
     test_breakeven_verdict_flips_color()
     test_incremental_read_and_truncation()

@@ -97,6 +97,31 @@ def test_pnl_bookkeeping_consistent():
     check("final PnL matches win/loss economics", abs(running - expected) < 1e-9)
 
 
+def test_dollar_account_bookkeeping():
+    """$100 bankroll, $10 stake: balance must track win/loss economics exactly."""
+    bars = synth_bars(8000, autocorr=0.5, seed=41)
+    eng = LivePaperEngine(entry_threshold=0.5, entry_price=0.85, bankroll=100.0, stake_usd=10.0)
+    events = drive(eng, bars)
+    settles = [e for e in events if e["type"] == "settle"]
+    check("dollar test: some trades settled", len(settles) > 5)
+    # Per-trade dollar economics: win = stake*(1-entry)/entry, loss = -stake.
+    win_usd = 10.0 * (1 - 0.85) / 0.85
+    running = 100.0
+    ok = True
+    for s in settles:
+        expect = win_usd if s["result"] == "win" else -10.0
+        if abs(s["pnl_usd"] - round(expect, 2)) > 0.01:
+            ok = False
+        running += s["pnl_usd"]
+        if abs(round(running, 2) - s["balance"]) > 0.02:
+            ok = False
+    check("per-trade $ pnl matches economics", ok)
+    check("engine.balance equals bankroll + cumulative $ pnl",
+          abs(eng.balance - (100.0 + eng.stats["pnl_usd"])) < 1e-9)
+    # A win must be much smaller than a loss (the 0.85-entry asymmetry).
+    check("win $ is far smaller than loss $ (asymmetry)", win_usd < 10.0 / 4)
+
+
 def test_settle_direction_matches_truth():
     """Each settle's `actual` must equal the real 5m outcome recomputed from the
     full series — proving the engine reads outcomes correctly, no lookahead."""
@@ -135,6 +160,7 @@ def main():
     test_stream_produces_full_lifecycle()
     test_no_double_entry_per_round()
     test_pnl_bookkeeping_consistent()
+    test_dollar_account_bookkeeping()
     test_settle_direction_matches_truth()
     test_threshold_gates_entries()
     test_format_event_smoke()
