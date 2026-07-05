@@ -331,6 +331,18 @@ Note: if the repo lives on an external volume (e.g. `/Volumes/MASTER`), launchd
 may start before the volume mounts at boot — `KeepAlive` retries every 30s until
 it's available. stdout/stderr go to `out/launchd.{out,err}.log`.
 
+## Validate on Real Data (one command)
+Before trusting any indicator, sizing, or threshold, validate on real history:
+```bash
+scripts/validate.sh            # downloads real 1m data + runs the full battery
+ENTRY_PRICE=0.90 scripts/validate.sh    # set to your observed avg real ask
+```
+It runs, in order: **walk-forward** (is there out-of-sample edge?), **ablation**
+(which of the indicators earn weight vs. drag), **sizing comparison**, and — if
+`out/live.jsonl` exists — the live **confidence→winrate** analysis. The honest
+rule it prints: if the walk-forward OOS edge is negative at your real breakeven,
+no indicator/sizing/threshold change fixes it — the signal isn't there yet.
+
 ## AI-Assisted Analysis (Claude Code, your subscription)
 You can have Claude analyze the live log and propose tuning — using your Claude
 Pro/Max **subscription**, not per-call API billing. Install the `claude` CLI on
