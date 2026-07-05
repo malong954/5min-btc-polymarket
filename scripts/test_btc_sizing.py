@@ -45,6 +45,21 @@ def test_kelly_stakes_zero_below_breakeven():
     check("kelly respects cap", s2 <= 100 * 0.25 + 1e-9)
 
 
+def test_kelly_safety_margin():
+    # p_est just above breakeven (0.86 vs c=0.85) is inside the 0.03 margin -> $0.
+    s_barely = stake_for("kelly", bankroll=100, base_stake=10, confidence=0.9,
+                         entry_price=0.85, p_est=0.86, margin=0.03)
+    check("kelly refuses a barely-above-breakeven p (noise cushion)", s_barely == 0.0)
+    # Clear of the margin (0.90 >= 0.85+0.03) -> bets.
+    s_clear = stake_for("kelly", bankroll=100, base_stake=10, confidence=0.9,
+                        entry_price=0.85, p_est=0.90, margin=0.03)
+    check("kelly bets when p clears breakeven + margin", s_clear > 0)
+    # margin=0 recovers the plain p>c behavior.
+    s_nomargin = stake_for("kelly", bankroll=100, base_stake=10, confidence=0.9,
+                           entry_price=0.85, p_est=0.86, margin=0.0)
+    check("margin=0 allows a bet just above breakeven", s_nomargin > 0)
+
+
 def test_confidence_and_flat_modes():
     check("flat mode returns base stake", stake_for("flat", bankroll=100, base_stake=10,
           confidence=0.3, entry_price=0.85) == 10)
@@ -96,6 +111,7 @@ def main():
     test_kelly_signs()
     test_flat_stake_cannot_change_ev_sign()
     test_kelly_stakes_zero_below_breakeven()
+    test_kelly_safety_margin()
     test_confidence_and_flat_modes()
     test_calibrator_monotone_recovery()
     test_simulate_losing_vs_winning_edge()

@@ -269,7 +269,13 @@ python3 scripts/btc_backtest.py --csv data/btc_1m.csv --sizing-report \
 ```
 
 Kelly numbers for this contract at `c = 0.85`: **f\* = −0.21 at p = 81.8%**
-(don't bet) and **+0.20 at p = 88%** (bet ~20%). The live trader accepts
+(don't bet) and **+0.20 at p = 88%** (bet ~20%). Kelly mode also requires a
+safety margin (`p ≥ c + 0.03`, default) because a win rate that only *barely*
+clears breakeven is usually estimation noise — and it's fractional (quarter–half
+Kelly). Note two traps: raw **confidence-scaled sizing enlarges −EV bets** (only
+safe after calibration), and **11 trades tells you almost nothing** — the 95% CI
+on 9/11 spans ~[52%, 95%], straddling breakeven, so distinguishing an 85% from an
+88% edge needs on the order of 1,000+ trades. The live trader accepts
 `--sizing flat|confidence|kelly`, but live kelly uses confidence as an
 *uncalibrated* proxy — validate with `--sizing-report` first. **Sizing amplifies
 edge; it never creates it. If your win-rate is below breakeven, no sizing scheme

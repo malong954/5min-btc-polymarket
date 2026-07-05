@@ -90,21 +90,32 @@ def stake_for(
     kelly_cap: float = 0.25,
     kelly_mult: float = 0.5,
     max_stake_frac: float = 1.0,
+    margin: float = 0.03,
 ) -> float:
     """Return the dollar stake for one trade under `mode`. Never exceeds the
-    bankroll (or max_stake_frac of it)."""
+    bankroll (or max_stake_frac of it).
+
+    `margin` (kelly only): require p_est >= entry_price + margin, not merely
+    p_est > entry_price. A win rate that only *barely* clears breakeven is almost
+    always estimation noise, and over-betting a mis-estimated edge is the classic
+    way a winning system turns into a losing one — so we demand a cushion.
+    """
     cap_usd = bankroll * max_stake_frac
     if bankroll <= 0:
         return 0.0
     if mode == "flat":
         return min(base_stake, cap_usd)
     if mode == "confidence":
+        # NOTE: scaling by RAW confidence enlarges -EV bets — only safe once
+        # confidence has been calibrated to a probability. Prefer kelly mode.
         return min(base_stake * clamp(confidence, 0.0, 1.0), cap_usd)
     if mode == "kelly":
         p = p_est if p_est is not None else confidence
+        if p < entry_price + margin:
+            return 0.0  # below breakeven + safety cushion -> don't bet
         f = kelly_fraction(p, entry_price)
         if f <= 0.0:
-            return 0.0  # p <= c -> don't bet (correct behavior)
+            return 0.0
         f = min(f * kelly_mult, kelly_cap)
         return min(bankroll * f, cap_usd)
     raise ValueError(f"unknown sizing mode {mode!r}")
@@ -120,6 +131,7 @@ def simulate_account(
     kelly_cap: float = 0.25,
     kelly_mult: float = 0.5,
     max_stake_frac: float = 1.0,
+    margin: float = 0.03,
     ruin_floor: float = 1.0,
 ) -> dict[str, Any]:
     """Walk a list of trades (each {confidence, win, p_est?}) through a sizing
@@ -136,7 +148,7 @@ def simulate_account(
         stake = stake_for(
             mode, bankroll=bal, base_stake=base_stake, confidence=float(tr["confidence"]),
             entry_price=entry_price, p_est=p_est, kelly_cap=kelly_cap, kelly_mult=kelly_mult,
-            max_stake_frac=max_stake_frac,
+            max_stake_frac=max_stake_frac, margin=margin,
         )
         if stake <= 0.0:
             continue
