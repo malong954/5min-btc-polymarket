@@ -43,6 +43,7 @@ def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: flo
         "bankroll": bankroll, "stake_usd": stake_usd, "entry_price": entry_price,
         "balance": bankroll, "peak_bal": bankroll, "max_dd_usd": 0.0,
         "entry_sum": 0.0, "entry_n": 0,  # realized entry prices (real varies per trade)
+        "last_stake": stake_usd,          # most recent actual stake (grows with balance)
         "last_hb": None, "last_pred": None, "last_entry": None,
         "recent": [], "peak_pnl": 0.0, "max_drawdown": 0.0,
     }
@@ -76,6 +77,8 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         if ev.get("entry_price") is not None:
             state["entry_sum"] += float(ev["entry_price"])
             state["entry_n"] += 1
+        if ev.get("stake_usd") is not None:
+            state["last_stake"] = float(ev["stake_usd"])
         state["peak_pnl"] = max(state["peak_pnl"], state["pnl"])
         state["max_drawdown"] = min(state["max_drawdown"], state["pnl"] - state["peak_pnl"])
         state["peak_bal"] = max(state["peak_bal"], state["balance"])
@@ -155,7 +158,7 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
     lines.append(f"  account {bal_s}  (start ${bankroll:,.2f}, P/L {pl_s})")
     peak_s = f"${state['peak_bal']:,.2f}"
     dd_s = p.c(f"${state['max_dd_usd']:,.2f}", RED)
-    stake_s = f"${state['stake_usd']:.2f}"
+    stake_s = f"${state.get('last_stake', state['stake_usd']):.2f}"
     lines.append(f"  peak {peak_s}   maxDD {dd_s}   stake {stake_s}/trade")
 
     # Record + winrate vs breakeven (realized avg entry price when available).

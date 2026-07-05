@@ -91,9 +91,13 @@ def stake_for(
     kelly_mult: float = 0.5,
     max_stake_frac: float = 1.0,
     margin: float = 0.03,
+    pct: float = 0.10,
 ) -> float:
     """Return the dollar stake for one trade under `mode`. Never exceeds the
     bankroll (or max_stake_frac of it).
+
+    `percent` mode stakes `pct` of the CURRENT balance (passed as `bankroll`), so
+    the stake grows automatically as the account grows and shrinks in a drawdown.
 
     `margin` (kelly only): require p_est >= entry_price + margin, not merely
     p_est > entry_price. A win rate that only *barely* clears breakeven is almost
@@ -105,6 +109,9 @@ def stake_for(
         return 0.0
     if mode == "flat":
         return min(base_stake, cap_usd)
+    if mode == "percent":
+        # Fraction of the current balance -> auto-scales with the account.
+        return min(bankroll * clamp(pct, 0.0, 1.0), cap_usd)
     if mode == "confidence":
         # NOTE: scaling by RAW confidence enlarges -EV bets — only safe once
         # confidence has been calibrated to a probability. Prefer kelly mode.

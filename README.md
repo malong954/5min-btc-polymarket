@@ -234,9 +234,21 @@ factual — it skips a round it can't price. `--entry-price-source fixed` uses t
 `--entry-price` assumption (e.g. 0.85), which is fine for synthetic/offline runs
 but is *not* a real cost. The dashboard labels breakeven "real" vs "assumed".
 
+**Easiest start** — one command runs the trader in the background (real pricing +
+balance-scaled stake) and opens the red/green dashboard:
 ```bash
-# Stream with REAL Polymarket per-trade pricing (on your PC):
-python3 scripts/btc_live_paper.py --provider binance --poll 2 \
+scripts/start.sh            # start + dashboard   (uses .venv automatically)
+scripts/start.sh stop       # stop the trader
+STAKE_PCT=0.15 scripts/start.sh   # stake 15% of the CURRENT balance per trade
+```
+`--sizing percent --stake-pct 0.15` scales the stake to the live balance, so it
+grows as the account grows — but note it **compounds both ways**: above breakeven
+it grows, below breakeven it decays toward zero. It is not a substitute for a
+real edge.
+
+```bash
+# Or run the trader directly with REAL Polymarket per-trade pricing:
+.venv/bin/python scripts/btc_live_paper.py --provider binance --poll 2 \
     --entry-threshold 0.60 --entry-price-source polymarket --log out/live.jsonl
 
 # In another terminal, tail the machine-readable stream:

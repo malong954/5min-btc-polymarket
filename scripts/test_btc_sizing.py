@@ -67,6 +67,15 @@ def test_confidence_and_flat_modes():
     check("confidence mode scales by confidence", abs(half - 5.0) < 1e-9)
 
 
+def test_percent_mode_scales_with_balance():
+    # 15% of balance: grows as the balance grows.
+    s_100 = stake_for("percent", bankroll=100, base_stake=10, confidence=0.5, entry_price=0.85, pct=0.15)
+    s_200 = stake_for("percent", bankroll=200, base_stake=10, confidence=0.5, entry_price=0.85, pct=0.15)
+    check("percent mode stakes 15% of balance at $100", abs(s_100 - 15.0) < 1e-9)
+    check("percent mode auto-grows to 15% of $200", abs(s_200 - 30.0) < 1e-9)
+    check("percent stake grows with balance", s_200 > s_100)
+
+
 def test_calibrator_monotone_recovery():
     # Build rows where higher confidence really does win more often.
     rows = []
@@ -113,6 +122,7 @@ def main():
     test_kelly_stakes_zero_below_breakeven()
     test_kelly_safety_margin()
     test_confidence_and_flat_modes()
+    test_percent_mode_scales_with_balance()
     test_calibrator_monotone_recovery()
     test_simulate_losing_vs_winning_edge()
     test_oos_sizing_pipeline_runs()
