@@ -89,34 +89,70 @@ case "$CMD" in
     mkdir -p "$PLIST_DIR" "$REPO/out"
     gen_plist > "$PLIST"
     echo "wrote $PLIST"
-    # bootout first in case an old copy is loaded, then bootstrap (modern launchctl).
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
-    launchctl enable "gui/$(id -u)/$LABEL"
-    launchctl kickstart -k "gui/$(id -u)/$LABEL"
-    echo "loaded and started: $LABEL"
+    uid="$(id -u)"
+    # Clear any prior copy (both modern and legacy).
+    launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true
+    launchctl unload "$PLIST" 2>/dev/null || true
+    # Try modern bootstrap; fall back to legacy load -w (more tolerant, e.g. when
+    # HOME is on an external volume where bootstrap throws EIO); then to nohup.
+    if launchctl bootstrap "gui/$uid" "$PLIST" 2>/dev/null; then
+      launchctl enable "gui/$uid/$LABEL" 2>/dev/null || true
+      launchctl kickstart -k "gui/$uid/$LABEL" 2>/dev/null || true
+      echo "loaded and started via launchctl bootstrap: $LABEL"
+    elif launchctl load -w "$PLIST" 2>/dev/null; then
+      echo "loaded and started via legacy launchctl load: $LABEL"
+    else
+      echo ""
+      echo "launchctl could not load the agent (common when HOME is on an external"
+      echo "volume like /Volumes/MASTER). Starting it directly in the background instead:"
+      mkdir -p "$REPO/out"
+      nohup "$PY" "$REPO/scripts/btc_live_paper.py" \
+        --provider "$PROVIDER" --poll "$POLL" --entry-threshold "$THRESHOLD" \
+        --entry-price "$PRICE" --stake-usd "$STAKE" --sizing "$SIZING" \
+        --bankroll "$BANKROLL" --entry-price-source "$PRICE_SOURCE" \
+        --log "$REPO/out/live.jsonl" --quiet \
+        >> "$REPO/out/nohup.log" 2>&1 &
+      echo "started with nohup (pid $!). Note: nohup does NOT survive a reboot."
+      echo "  to add reboot-survival, add a crontab @reboot line (see 'run' below)."
+    fi
     echo "  stream : tail -f $REPO/out/live.jsonl"
-    echo "  errors : tail -f $REPO/out/launchd.err.log"
     echo "  status : scripts/install_launchd.sh status"
     echo "  stop   : scripts/install_launchd.sh uninstall"
     ;;
 
+  run)
+    # Dependency-free always-on: run in the foreground background via nohup.
+    [ -x "$PY" ] || { echo "error: venv python not found at $REPO/.venv"; exit 1; }
+    mkdir -p "$REPO/out"
+    nohup "$PY" "$REPO/scripts/btc_live_paper.py" \
+      --provider "$PROVIDER" --poll "$POLL" --entry-threshold "$THRESHOLD" \
+      --entry-price "$PRICE" --stake-usd "$STAKE" --sizing "$SIZING" \
+      --bankroll "$BANKROLL" --entry-price-source "$PRICE_SOURCE" \
+      --log "$REPO/out/live.jsonl" --quiet \
+      >> "$REPO/out/nohup.log" 2>&1 &
+    echo "started (pid $!). stream: tail -f $REPO/out/live.jsonl ; stop: scripts/install_launchd.sh uninstall"
+    ;;
+
   status)
     if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
-      echo "RUNNING: $LABEL"
+      echo "RUNNING (launchd): $LABEL"
       launchctl print "gui/$(id -u)/$LABEL" | grep -E "state =|pid =|last exit" || true
+    elif pgrep -f "btc_live_paper.py" >/dev/null 2>&1; then
+      echo "RUNNING (nohup): pids $(pgrep -f btc_live_paper.py | tr '\n' ' ')"
     else
-      echo "NOT loaded: $LABEL"
+      echo "NOT running: $LABEL"
     fi
     ;;
 
   uninstall)
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+    launchctl unload "$PLIST" 2>/dev/null || true
+    pkill -f "btc_live_paper.py" 2>/dev/null || true
     rm -f "$PLIST"
-    echo "stopped and removed: $LABEL"
+    echo "stopped and removed: $LABEL (launchd + any nohup process)"
     ;;
 
   *)
-    echo "usage: scripts/install_launchd.sh [install|status|uninstall|print]"; exit 1
+    echo "usage: scripts/install_launchd.sh [install|run|status|uninstall|print]"; exit 1
     ;;
 esac
