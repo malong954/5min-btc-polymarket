@@ -249,6 +249,20 @@ to a dashboard, alerting, or a replay. Real execution stays in
 `scripts/test_btc_5m_session_exit_sl.py` (needs `py_clob_client` + credentials);
 only enable it once the paper stream's out-of-sample PnL clears breakeven.
 
+### Live Color Dashboard
+`scripts/btc_live_monitor.py` reads the JSONL stream and redraws a color panel in
+place — current price + movement prediction, cumulative PnL (**green profit /
+red loss**), win-rate vs breakeven, peak/drawdown, and a colored recent-trades
+list (green wins, red losses). Run it in any terminal alongside the trader:
+
+```bash
+python3 scripts/btc_live_monitor.py --log out/live.jsonl
+```
+
+It reads incrementally (remembers its file offset), so it stays fast as the log
+grows. `--once` renders a single frame; `--no-color` for plain text; the
+`--entry-price` sets the breakeven reference line.
+
 ### Always-on (macOS launchd)
 To keep the paper trader running 24/7 — restarting on crash and after reboot,
 without holding a terminal open — install it as a launchd agent. The installer
