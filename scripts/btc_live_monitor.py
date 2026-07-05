@@ -37,13 +37,16 @@ SHOW_CURSOR = "\033[?25h"
 RECENT_N = 12
 
 
-def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: float = 0.85) -> dict[str, Any]:
+def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: float = 0.85,
+              entry_threshold: float = 0.60) -> dict[str, Any]:
     return {
         "trades": 0, "wins": 0, "pnl": 0.0, "pnl_usd": 0.0,
         "bankroll": bankroll, "stake_usd": stake_usd, "entry_price": entry_price,
+        "entry_threshold": entry_threshold,
         "balance": bankroll, "peak_bal": bankroll, "max_dd_usd": 0.0,
         "entry_sum": 0.0, "entry_n": 0,  # realized entry prices (real varies per trade)
         "last_stake": stake_usd,          # most recent actual stake (grows with balance)
+        "skips_since_trade": 0, "last_skip": None,
         "last_hb": None, "last_pred": None, "last_entry": None,
         "recent": [], "peak_pnl": 0.0, "max_drawdown": 0.0,
     }
@@ -60,8 +63,12 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         state["last_hb"] = ev
     elif t == "prediction":
         state["last_pred"] = ev
+    elif t == "skip":
+        state["skips_since_trade"] += 1
+        state["last_skip"] = ev
     elif t == "entry":
         state["last_entry"] = ev
+        state["skips_since_trade"] = 0
     elif t == "settle":
         state["trades"] += 1
         state["wins"] += 1 if ev.get("result") == "win" else 0
@@ -135,16 +142,26 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
         mv_s = "  move " + p.c(f"{mv:+.0f}", GREEN if mv > 0 else RED if mv < 0 else GREY, BOLD)
     lines.append(f"  price   {p.c(price_s, BOLD)}{mv_s}   round close in {p.c(countdown, YELLOW)}")
 
-    # Current movement prediction.
+    # Current movement prediction + why we are / aren't trading.
+    thr = state.get("entry_threshold", 0.60)
     d = pred.get("direction")
     if d:
         col = GREEN if d == "UP" else RED
         conf = pred.get("confidence", 0.0)
         move = pred.get("btc_move_usd", 0.0)
+        armed = conf >= thr
+        status = p.c(f"ARMED >= {thr:.2f}", GREEN, BOLD) if armed else p.c(f"waiting (need >= {thr:.2f})", YELLOW)
         lines.append(f"  predict {p.c(d, col, BOLD)}  conf {p.c(f'{conf:.2f}', BOLD)}  "
-                     f"move {p.money(move, plus=True)}  rsi {pred.get('rsi_1m')}")
+                     f"move {p.money(move, plus=True)}  rsi {pred.get('rsi_1m')}   {status}")
     else:
-        lines.append(p.c("  predict —  (waiting for next entry window ~2m before close)", GREY))
+        lines.append(p.c(f"  predict —  (evaluates ~2m before each close; enters at conf >= {thr:.2f})", GREY))
+    # Show that it's alive and deliberately skipping, not stuck.
+    skips = state.get("skips_since_trade", 0)
+    if skips:
+        last = state.get("last_skip") or {}
+        reason = last.get("reason", "")
+        lines.append(p.c(f"  no trade in last {skips} decided round(s) "
+                         f"(last skip: {reason or 'below threshold'}) — selectivity is normal", GREY))
 
     lines.append(p.c("  " + "─" * 56, GREY))
 
@@ -171,8 +188,10 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
                  f"({be_label}, {p.c(verdict, wr_col)})")
 
     lines.append(p.c("  " + "─" * 56, GREY))
-    # Column header so the fields are labeled and fixed-width.
-    lines.append(p.c(f"  recent settles (newest first)   {'side':<12}{'cost':<7}{'P/L':<9}bal", BOLD))
+    lines.append(p.c("  recent settles (newest first)", BOLD))
+    # Column header, aligned to the data rows below (prefix is 19 chars:
+    # 3 spaces + 8 time + 2 + 4 tag + 2).
+    lines.append(p.c(" " * 19 + f"{'side':<12}{'cost':<7}{'P/L':<8} bal", GREY))
     if state["recent"]:
         for ev in reversed(state["recent"]):
             clk = time.strftime("%H:%M:%S", time.localtime(ev.get("ts", 0)))
@@ -231,6 +250,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--entry-price", type=float, default=0.85, help="Breakeven reference (contract entry price)")
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting account balance in USD")
     ap.add_argument("--stake-usd", type=float, default=10.0, help="USD per trade (for deriving $ from older logs)")
+    ap.add_argument("--entry-threshold", type=float, default=0.60, help="Confidence needed to trade (shown as ARMED/waiting)")
     ap.add_argument("--once", action="store_true", help="Render a single frame and exit (no loop)")
     color_grp = ap.add_mutually_exclusive_group()
     color_grp.add_argument("--color", dest="color", action="store_true", default=None)
@@ -242,7 +262,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
     painter = Painter(color)
 
-    state = new_state(bankroll=args.bankroll, stake_usd=args.stake_usd, entry_price=args.entry_price)
+    state = new_state(bankroll=args.bankroll, stake_usd=args.stake_usd, entry_price=args.entry_price,
+                      entry_threshold=args.entry_threshold)
     offset = 0
 
     def refresh() -> None:

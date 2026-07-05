@@ -37,7 +37,7 @@ case "${1:-start}" in
     exit 0
     ;;
   dash)
-    exec "$PY" scripts/btc_live_monitor.py --log "$LOG" --bankroll "$BANKROLL"
+    exec "$PY" scripts/btc_live_monitor.py --log "$LOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD"
     ;;
   start) ;;
   *) echo "usage: scripts/start.sh [start|stop|dash]"; exit 1 ;;
@@ -59,4 +59,4 @@ fi
 echo "opening dashboard — Ctrl-C exits the dashboard; the trader keeps running."
 echo "(stop the trader later with: scripts/start.sh stop)"
 sleep 1
-exec "$PY" scripts/btc_live_monitor.py --log "$LOG" --bankroll "$BANKROLL"
+exec "$PY" scripts/btc_live_monitor.py --log "$LOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD"
