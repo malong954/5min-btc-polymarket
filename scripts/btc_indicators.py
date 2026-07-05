@@ -106,6 +106,38 @@ def rolling_mean(values: list[float], period: int) -> list[Optional[float]]:
     return out
 
 
+def bollinger_pctb(values: list[float], period: int = 20, k: float = 2.0) -> list[Optional[float]]:
+    """Bollinger %B = (price - lower) / (upper - lower), where the bands are the
+    SMA +/- k*stdev. ~0.5 = mid-band, >1 = above the upper band, <0 = below the
+    lower. A volatility-relative position signal, distinct from raw RSI/MACD."""
+    n = len(values)
+    out: list[Optional[float]] = [None] * n
+    if period <= 1 or n < period:
+        return out
+    for i in range(period - 1, n):
+        window = values[i - period + 1:i + 1]
+        m = sum(window) / period
+        var = sum((x - m) ** 2 for x in window) / (period - 1)
+        sd = math.sqrt(var)
+        if sd <= 0:
+            out[i] = 0.5
+        else:
+            lower = m - k * sd
+            out[i] = (values[i] - lower) / (2.0 * k * sd)
+    return out
+
+
+def roc(values: list[float], period: int = 5) -> list[Optional[float]]:
+    """Rate of change over `period` bars: (price - price[-period]) / price[-period]."""
+    n = len(values)
+    out: list[Optional[float]] = [None] * n
+    for i in range(period, n):
+        prev = values[i - period]
+        if prev:
+            out[i] = (values[i] - prev) / prev
+    return out
+
+
 def stdev(values: list[float]) -> float:
     n = len(values)
     if n < 2:

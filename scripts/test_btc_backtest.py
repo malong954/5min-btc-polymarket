@@ -8,7 +8,7 @@ import csv
 import os
 import tempfile
 
-from btc_indicators import ema, macd, rsi
+from btc_indicators import ema, macd, rsi, bollinger_pctb, roc
 from btc_backtest import (
     Bar,
     MTFModel,
@@ -51,6 +51,17 @@ def test_indicators():
     accel = [float(i * i) for i in range(1, 60)]
     _, _, hist = macd(accel, 12, 26, 9)
     check("MACD histogram positive on an accelerating uptrend", hist[-1] is not None and hist[-1] > 0)
+
+    # Bollinger %B: a strong close near the top of the band -> %B near/above 1.
+    b = bollinger_pctb(rising, 20, 2.0)
+    check("Bollinger %B high when price rides the upper band", b[-1] is not None and b[-1] > 0.9)
+    flat = [100.0] * 40
+    bf = bollinger_pctb(flat, 20, 2.0)
+    check("Bollinger %B = 0.5 (mid) on a flat series", bf[-1] == 0.5)
+
+    # ROC positive on an uptrend, negative on a downtrend.
+    check("ROC positive on uptrend", roc(rising, 5)[-1] > 0)
+    check("ROC negative on downtrend", roc(falling, 5)[-1] < 0)
 
 
 def test_no_lookahead():
