@@ -55,7 +55,9 @@ class LivePaperEngine:
         bankroll: float = 100.0,
         stake_usd: float = 10.0,
         sizing: str = "flat",
+        require_market_price: bool = False,
     ):
+        self.require_market_price = require_market_price
         self.sizing = sizing
         self.entry_threshold = entry_threshold
         self.entry_price = entry_price
@@ -82,7 +84,8 @@ class LivePaperEngine:
             self.log.flush()
         return ev
 
-    def step(self, now: float, bars_1m: list[Bar], spot: Optional[float] = None) -> list[dict[str, Any]]:
+    def step(self, now: float, bars_1m: list[Bar], spot: Optional[float] = None,
+             entry_prices: Optional[dict[str, float]] = None) -> list[dict[str, Any]]:
         now = float(now)
         cur = bucket_5m(int(now))
         sec_left = (cur + 300) - now
@@ -98,13 +101,16 @@ class LivePaperEngine:
                 continue  # settle data not available yet; retry next poll
             pos = self.positions[rs]
             win = pos["side"] == actual
-            pnl = (1.0 - self.entry_price) if win else -self.entry_price
-            # Dollar economics: spend `stake_usd` buying shares at entry_price.
-            # Win pays $1/share; loss forfeits the stake.
+            # Use THIS trade's actual entry price (real Polymarket ask when
+            # available), not a global assumption.
+            ep = pos.get("entry_price", self.entry_price)
+            pnl = (1.0 - ep) if win else -ep
+            # Dollar economics: spend `stake_usd` buying shares at ep. Win pays
+            # $1/share; loss forfeits the stake.
             stake = pos.get("stake_usd", self.stake_usd)
             # Round to whole cents so the running balance always equals the sum of
             # the per-trade figures the user sees (no sub-cent drift).
-            pnl_usd = round(stake * (1.0 - self.entry_price) / self.entry_price, 2) if win else -stake
+            pnl_usd = round(stake * (1.0 - ep) / ep, 2) if win else -stake
             self.stats["trades"] += 1
             self.stats["wins"] += 1 if win else 0
             self.stats["pnl"] += pnl
@@ -113,6 +119,7 @@ class LivePaperEngine:
             events.append(self._emit({
                 "ts": int(now), "type": "settle", "round": rs, "side": pos["side"],
                 "actual": actual, "result": "win" if win else "loss",
+                "entry_price": round(ep, 4),
                 "pnl": round(pnl, 4), "cum_pnl": round(self.stats["pnl"], 4),
                 "pnl_usd": round(pnl_usd, 2), "balance": round(self.balance, 2),
                 "stake_usd": round(stake, 2),
@@ -135,19 +142,31 @@ class LivePaperEngine:
                 }))
                 if sig.direction and sig.confidence >= self.entry_threshold:
                     from btc_sizing import stake_for
+                    # Real Polymarket ask for the predicted side, if provided.
+                    real = entry_prices.get(sig.direction) if entry_prices else None
+                    real_ok = isinstance(real, (int, float)) and 0.0 < real < 1.0
+                    if self.require_market_price and not real_ok:
+                        events.append(self._emit({
+                            "ts": int(now), "type": "skip", "round": cur,
+                            "reason": "no_market_price", "side": sig.direction,
+                            "confidence": round(sig.confidence, 4),
+                        }))
+                        return events
+                    ep = float(real) if real_ok else self.entry_price
                     stake = round(stake_for(
                         self.sizing, bankroll=self.balance, base_stake=self.stake_usd,
-                        confidence=sig.confidence, entry_price=self.entry_price,
+                        confidence=sig.confidence, entry_price=ep,
                         p_est=sig.confidence,  # live has no calibrator; confidence is a rough proxy
                     ), 2)
                     self.positions[cur] = {
-                        "side": sig.direction, "entry_price": self.entry_price,
+                        "side": sig.direction, "entry_price": ep,
                         "confidence": round(sig.confidence, 4), "opened_ts": int(now),
-                        "stake_usd": stake,
+                        "stake_usd": stake, "price_source": "polymarket" if real_ok else "fixed",
                     }
                     events.append(self._emit({
                         "ts": int(now), "type": "entry", "round": cur, "side": sig.direction,
-                        "entry_price": self.entry_price, "confidence": round(sig.confidence, 4),
+                        "entry_price": round(ep, 4), "price_source": "polymarket" if real_ok else "fixed",
+                        "confidence": round(sig.confidence, 4),
                         "stake_usd": stake, "sizing": self.sizing, "balance": round(self.balance, 2),
                     }))
                 else:
@@ -200,10 +219,10 @@ def format_event(ev: dict[str, Any]) -> str:
         return f"{clk}Z  – skip ({ev['reason']}, conf={ev['confidence']:.2f})"
     if t == "settle":
         mark = "[WIN] " if ev["result"] == "win" else "[LOSS]"
+        ep = f"@${ev['entry_price']:.2f} " if ev.get("entry_price") is not None else ""
         usd = f"  ${ev['pnl_usd']:+.2f} -> bal ${ev['balance']:.2f}" if "pnl_usd" in ev else ""
-        return (f"{clk}Z  {mark} SETTLE {ev['side']} -> {ev['actual']} {ev['result'].upper()} "
-                f"pnl={ev['pnl']:+.3f}{usd}  "
-                f"wr={ev['winrate']:.1%} ({ev['trades']} trades)")
+        return (f"{clk}Z  {mark} SETTLE {ev['side']} -> {ev['actual']} {ep}{ev['result'].upper()}"
+                f"{usd}  wr={ev['winrate']:.1%} ({ev['trades']} trades)")
     return f"{clk}Z  {t} {ev}"
 
 
@@ -235,6 +254,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--stake-usd", type=float, default=10.0, help="Base USD deployed per trade")
     ap.add_argument("--sizing", default="flat", choices=["flat", "confidence", "kelly"],
                     help="Position sizing: flat | confidence-scaled | kelly (live kelly uses confidence as an UNCALIBRATED proxy — validate with backtest --sizing-report first)")
+    ap.add_argument("--entry-price-source", default="fixed", choices=["fixed", "polymarket"],
+                    help="fixed = use --entry-price for every trade (assumption); polymarket = use the REAL CLOB best ask of the predicted side per trade (factual; skips a round if unpriceable)")
     ap.add_argument("--history-min", type=int, default=180, help="Minutes of 1m history to fetch each poll")
     ap.add_argument("--log", metavar="PATH", help="Append JSONL event stream to this file")
     ap.add_argument("--max-steps", type=int, default=None, help="Stop after N polls (default: run forever)")
@@ -248,12 +269,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             os.makedirs(d, exist_ok=True)
         logf = open(args.log, "a")
 
+    use_pm = args.entry_price_source == "polymarket"
     engine = LivePaperEngine(
         entry_threshold=args.entry_threshold, entry_price=args.entry_price, log=logf,
         bankroll=args.bankroll, stake_usd=args.stake_usd, sizing=args.sizing,
+        require_market_price=use_pm,
     )
+    price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
+                  else f"fixed ${args.entry_price:.2f} (assumption)")
     print(f"# live paper trader | provider={args.provider} poll={args.poll}s "
-          f"entry_threshold={args.entry_threshold} entry_price=${args.entry_price:.2f} "
+          f"entry_threshold={args.entry_threshold} price_source={price_desc} "
           f"bankroll=${args.bankroll:.2f} stake=${args.stake_usd:.2f} "
           f"| PAPER MODE (no real orders)", file=sys.stderr)
 
@@ -277,7 +302,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                     bars = fetch_recent_1m(args.provider, args.history_min)
                     last_klines = now
                 spot = fetch_spot(args.provider)  # cheap, every poll -> live price
-                events = engine.step(now, bars, spot=spot)
+                # Real Polymarket prices only when we might actually enter (in the
+                # window) — one extra call, and only then.
+                entry_prices = None
+                if use_pm and in_window:
+                    try:
+                        from btc_polymarket import current_prices
+                        pm = current_prices(now)
+                        if pm:
+                            entry_prices = {"UP": pm.get("UP"), "DOWN": pm.get("DOWN")}
+                    except Exception as e:
+                        print(f"# polymarket price error: {e}", file=sys.stderr)
+                events = engine.step(now, bars, spot=spot, entry_prices=entry_prices)
                 for ev in events:
                     if args.quiet and ev["type"] == "heartbeat":
                         continue

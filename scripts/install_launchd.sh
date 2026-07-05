@@ -33,6 +33,7 @@ POLL="${POLL:-2}"
 STAKE="${STAKE:-10}"
 SIZING="${SIZING:-flat}"
 BANKROLL="${BANKROLL:-100}"
+PRICE_SOURCE="${PRICE_SOURCE:-polymarket}"  # polymarket (real ask) | fixed
 
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/$LABEL.plist"
@@ -56,6 +57,7 @@ gen_plist() {
         <string>--stake-usd</string><string>$STAKE</string>
         <string>--sizing</string><string>$SIZING</string>
         <string>--bankroll</string><string>$BANKROLL</string>
+        <string>--entry-price-source</string><string>$PRICE_SOURCE</string>
         <string>--log</string><string>$REPO/out/live.jsonl</string>
         <string>--quiet</string>
     </array>

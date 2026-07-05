@@ -42,6 +42,7 @@ def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: flo
         "trades": 0, "wins": 0, "pnl": 0.0, "pnl_usd": 0.0,
         "bankroll": bankroll, "stake_usd": stake_usd, "entry_price": entry_price,
         "balance": bankroll, "peak_bal": bankroll, "max_dd_usd": 0.0,
+        "entry_sum": 0.0, "entry_n": 0,  # realized entry prices (real varies per trade)
         "last_hb": None, "last_pred": None, "last_entry": None,
         "recent": [], "peak_pnl": 0.0, "max_drawdown": 0.0,
     }
@@ -72,6 +73,9 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
             pnl_usd = _unit_to_usd(float(ev.get("pnl", 0.0)), state["stake_usd"], state["entry_price"])
         state["pnl_usd"] += pnl_usd
         state["balance"] = state["bankroll"] + state["pnl_usd"]
+        if ev.get("entry_price") is not None:
+            state["entry_sum"] += float(ev["entry_price"])
+            state["entry_n"] += 1
         state["peak_pnl"] = max(state["peak_pnl"], state["pnl"])
         state["max_drawdown"] = min(state["max_drawdown"], state["pnl"] - state["peak_pnl"])
         state["peak_bal"] = max(state["peak_bal"], state["balance"])
@@ -108,7 +112,9 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
     wins = state["wins"]
     losses = trades - wins
     wr = (wins / trades) if trades else 0.0
-    be = entry_price
+    # Breakeven = the entry price. Prefer the REALIZED average entry price when
+    # trades carry real Polymarket prices; otherwise the fixed reference.
+    be = (state["entry_sum"] / state["entry_n"]) if state.get("entry_n") else entry_price
     pnl = state["pnl"]
 
     lines: list[str] = []
@@ -152,13 +158,14 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
     stake_s = f"${state['stake_usd']:.2f}"
     lines.append(f"  peak {peak_s}   maxDD {dd_s}   stake {stake_s}/trade")
 
-    # Record + winrate vs breakeven.
+    # Record + winrate vs breakeven (realized avg entry price when available).
+    be_label = f"breakeven {be:.0%}" + (" real" if state.get("entry_n") else " assumed")
     wr_col = GREEN if wr >= be else RED
     verdict = "ABOVE breakeven ✓" if wr >= be else "below breakeven"
     lines.append(f"  trades  {p.c(str(trades), BOLD)}   "
                  f"{p.c(f'{wins}W', GREEN, BOLD)} / {p.c(f'{losses}L', RED, BOLD)}   "
                  f"winrate {p.c(f'{wr:.1%}', wr_col, BOLD)}  "
-                 f"(breakeven {be:.0%}, {p.c(verdict, wr_col)})")
+                 f"({be_label}, {p.c(verdict, wr_col)})")
 
     lines.append(p.c("  " + "─" * 56, GREY))
     lines.append(p.c("  recent settles (newest first)", BOLD))

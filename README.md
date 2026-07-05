@@ -224,14 +224,20 @@ macOS equivalent of cron) or inside the provided Docker isolation.
 live data in real time and **streams every event** — heartbeat, movement
 prediction (~2 min before each close), paper entry, and settle (win/loss +
 running PnL). It is **paper by default: it never places real orders.** It
-simulates buying the predicted side at `--entry-price` and settling $1/$0 from
-the real BTC move, so you can watch the strategy's live behavior and true PnL
-before risking capital.
+simulates buying the predicted side and settling $1/$0 from the real BTC move,
+so you can watch the strategy's live behavior and true PnL before risking capital.
+
+**Entry price — real vs assumed.** `--entry-price-source polymarket` (default in
+the launchd service) fetches the **real Polymarket CLOB best ask** of the
+predicted side per trade (`scripts/btc_polymarket.py`), so P&L and breakeven are
+factual — it skips a round it can't price. `--entry-price-source fixed` uses the
+`--entry-price` assumption (e.g. 0.85), which is fine for synthetic/offline runs
+but is *not* a real cost. The dashboard labels breakeven "real" vs "assumed".
 
 ```bash
-# Stream to your terminal + a JSONL file:
-python3 scripts/btc_live_paper.py --provider binance --poll 3 \
-    --entry-threshold 0.60 --entry-price 0.85 --log out/live.jsonl
+# Stream with REAL Polymarket per-trade pricing (on your PC):
+python3 scripts/btc_live_paper.py --provider binance --poll 2 \
+    --entry-threshold 0.60 --entry-price-source polymarket --log out/live.jsonl
 
 # In another terminal, tail the machine-readable stream:
 tail -f out/live.jsonl
