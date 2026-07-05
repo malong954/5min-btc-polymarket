@@ -331,6 +331,34 @@ Note: if the repo lives on an external volume (e.g. `/Volumes/MASTER`), launchd
 may start before the volume mounts at boot — `KeepAlive` retries every 30s until
 it's available. stdout/stderr go to `out/launchd.{out,err}.log`.
 
+## AI-Assisted Analysis (Claude Code, your subscription)
+You can have Claude analyze the live log and propose tuning — using your Claude
+Pro/Max **subscription**, not per-call API billing. Install the `claude` CLI on
+the machine, sign in with your subscription account (not an API key), and run it
+inside this repo.
+
+`scripts/btc_analyze.py` turns the raw JSONL into grounded stats (win rate by
+confidence / entry price / hour / side / BTC move, edge vs the real breakeven,
+and flagged observations) so Claude reasons over facts, not raw JSON:
+
+```bash
+python3 scripts/btc_analyze.py --log out/live.jsonl          # human summary
+python3 scripts/btc_analyze.py --log out/live.jsonl --json   # for a program/agent
+```
+
+**Safe loop (do NOT skip the validation step):**
+1. `btc_analyze.py` summarizes the accumulated **real-priced** trades.
+2. Claude reads it and proposes a change (e.g. raise the threshold).
+3. **Validate on the real data first** — `btc_backtest.py --csv <your data> --walk-forward`
+   / `--sizing-report` / `--ablation`. A pattern in a few dozen trades is almost
+   always noise; the walk-forward + leakage guard exist precisely to catch this.
+4. Only then apply the change and keep paper-trading.
+
+Never let an agent auto-change live parameters on an un-validated "trend" — that
+is the overfitting trap this whole toolkit is built to avoid. Also note Claude
+subscriptions have usage limits, so schedule analysis periodically (hourly/daily),
+not in a tight loop.
+
 ## Execution Checklist (Before Live Trade)
 Use this quick pre-flight checklist before any real order:
 
