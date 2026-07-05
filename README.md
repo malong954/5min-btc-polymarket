@@ -184,8 +184,11 @@ the data + backtest layer needs just Python 3 and `requests`.
 ```bash
 # 1. Python 3 (Homebrew) + a virtualenv
 brew install python@3.12
-git clone https://github.com/Novals83/5min-btc-polymarket.git
+# Clone the fork and check out the feature branch (the scripts live there,
+# not on main until merged):
+git clone https://github.com/malong954/5min-btc-polymarket.git
 cd 5min-btc-polymarket
+git checkout claude/bot-trend-detection-06svzm
 python3 -m venv .venv
 source .venv/bin/activate
 pip install requests            # data + backtest layer only
@@ -215,6 +218,36 @@ wire in the execution stack and run `scripts/test_btc_5m_session_exit_sl.py`
 (which additionally needs `py_clob_client` and configured Polymarket credentials).
 For an always-on setup, run the watcher under `launchd` (a `launchd` plist is the
 macOS equivalent of cron) or inside the provided Docker isolation.
+
+## Live Automation + Streaming Log (Paper Mode)
+`scripts/btc_live_paper.py` runs the validated multi-timeframe prediction on
+live data in real time and **streams every event** — heartbeat, movement
+prediction (~2 min before each close), paper entry, and settle (win/loss +
+running PnL). It is **paper by default: it never places real orders.** It
+simulates buying the predicted side at `--entry-price` and settling $1/$0 from
+the real BTC move, so you can watch the strategy's live behavior and true PnL
+before risking capital.
+
+```bash
+# Stream to your terminal + a JSONL file:
+python3 scripts/btc_live_paper.py --provider binance --poll 3 \
+    --entry-threshold 0.60 --entry-price 0.85 --log out/live.jsonl
+
+# In another terminal, tail the machine-readable stream:
+tail -f out/live.jsonl
+```
+
+Sample stream:
+```
+? PREDICT DOWN conf=0.88 move=$-21 rsi=27.5 (120s left)
+▲ ENTER DOWN @ $0.85  conf=0.88
+[WIN]  SETTLE DOWN -> DOWN WIN pnl=+0.150  cum=+0.450  wr=100.0% (3 trades)
+```
+
+Each JSONL line is one event (`heartbeat|prediction|entry|skip|settle`) — pipe it
+to a dashboard, alerting, or a replay. Real execution stays in
+`scripts/test_btc_5m_session_exit_sl.py` (needs `py_clob_client` + credentials);
+only enable it once the paper stream's out-of-sample PnL clears breakeven.
 
 ## Execution Checklist (Before Live Trade)
 Use this quick pre-flight checklist before any real order:
