@@ -249,6 +249,24 @@ to a dashboard, alerting, or a replay. Real execution stays in
 `scripts/test_btc_5m_session_exit_sl.py` (needs `py_clob_client` + credentials);
 only enable it once the paper stream's out-of-sample PnL clears breakeven.
 
+### Always-on (macOS launchd)
+To keep the paper trader running 24/7 — restarting on crash and after reboot,
+without holding a terminal open — install it as a launchd agent. The installer
+auto-detects this repo and its `.venv`:
+
+```bash
+scripts/install_launchd.sh install        # write plist + load + start
+scripts/install_launchd.sh status         # is it running?
+tail -f out/live.jsonl                     # watch the stream anytime
+scripts/install_launchd.sh uninstall      # stop + remove
+```
+
+Tune before installing via env vars, e.g.
+`PROVIDER=cryptocompare THRESHOLD=0.7 scripts/install_launchd.sh install`.
+Note: if the repo lives on an external volume (e.g. `/Volumes/MASTER`), launchd
+may start before the volume mounts at boot — `KeepAlive` retries every 30s until
+it's available. stdout/stderr go to `out/launchd.{out,err}.log`.
+
 ## Execution Checklist (Before Live Trade)
 Use this quick pre-flight checklist before any real order:
 
