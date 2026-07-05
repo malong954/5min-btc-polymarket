@@ -171,7 +171,8 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
                  f"({be_label}, {p.c(verdict, wr_col)})")
 
     lines.append(p.c("  " + "─" * 56, GREY))
-    lines.append(p.c("  recent settles (newest first)", BOLD))
+    # Column header so the fields are labeled and fixed-width.
+    lines.append(p.c(f"  recent settles (newest first)   {'side':<12}{'cost':<7}{'P/L':<9}bal", BOLD))
     if state["recent"]:
         for ev in reversed(state["recent"]):
             clk = time.strftime("%H:%M:%S", time.localtime(ev.get("ts", 0)))
@@ -180,11 +181,17 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
             tag = "WIN " if win else "LOSS"
             side = ev.get("side", "?")
             act = ev.get("actual", "?")
+            pair = f"{side}->{act}"                      # e.g. UP->UP or DOWN->DOWN
+            ep = ev.get("entry_price")
+            cost = f"@{ep:.2f}" if ep is not None else "  -  "  # actual contract price paid
             pnl_usd = float(ev.get("pnl_usd", 0.0))
             bal = ev.get("balance")
-            bal_s = f"   bal ${bal:,.2f}" if bal is not None else ""
-            row = (f"   {clk}  {p.c(tag, col, BOLD)}  {side}->{act}  "
-                   f"{p.c(f'${pnl_usd:+,.2f}', col, BOLD)}{bal_s}")
+            bal_s = f"bal ${bal:,.2f}" if bal is not None else ""
+            pnl_str = f"${pnl_usd:+,.2f}"
+            # Fixed widths so UP->UP and DOWN->DOWN line up; pad before coloring.
+            row = (f"   {clk}  {p.c(tag, col, BOLD)}  "
+                   f"{pair:<12}{cost:<7}"
+                   f"{p.c(f'{pnl_str:<8}', col, BOLD)} {bal_s}")
             lines.append(row)
     else:
         lines.append(p.c("   (no settled trades yet)", GREY))
