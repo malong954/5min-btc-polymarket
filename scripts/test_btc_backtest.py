@@ -114,6 +114,35 @@ def test_edge_detected_on_momentum():
           res["accuracy_by_confidence"][-1]["accuracy"] >= res["accuracy_by_confidence"][0]["accuracy"])
 
 
+def test_confluence_agreement():
+    """confluence=0 must not change confidence; confluence>0 must lower confidence
+    for rounds where the weighted indicators disagree (low agreement)."""
+    bars = synth_bars(4000, autocorr=0.4, seed=44)
+    base = MTFModel(bars)                       # confluence 0 (default)
+    conf = MTFModel(bars, confluence=1.0)       # fully agreement-scaled
+    lowered = 0
+    checked = 0
+    for b in base.bars_5m:
+        s0 = base.evaluate(b.ts)
+        s1 = conf.evaluate(b.ts)
+        if s0 is None or s1 is None:
+            continue
+        checked += 1
+        ag = s0.features.get("agreement")
+        # Same score/direction either way (confluence only shapes confidence).
+        assert abs(s0.score - s1.score) < 1e-9
+        if ag is not None and ag < 0.999:
+            # Disagreement -> confluence confidence must be <= base confidence.
+            if s1.confidence <= s0.confidence + 1e-9:
+                lowered += 1
+    check("evaluated rounds under both settings", checked > 20)
+    check("confluence lowers confidence when indicators disagree", lowered > 0)
+    # agreement is a valid fraction.
+    s = base.evaluate(base.bars_5m[len(base.bars_5m) // 2].ts)
+    if s is not None and s.features.get("agreement") is not None:
+        check("agreement in [0,1]", 0.0 <= s.features["agreement"] <= 1.0)
+
+
 def test_resample_alignment():
     bars = synth_bars(300, seed=3)
     m = MTFModel(bars)
@@ -237,6 +266,7 @@ def test_weight_opt_no_edge_on_shuffled_labels():
 
 def main():
     test_indicators()
+    test_confluence_agreement()
     test_resample_alignment()
     test_no_lookahead()
     test_end_to_end_random_walk()

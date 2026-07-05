@@ -139,12 +139,17 @@ class MTFModel:
         ema_fast: int = 9,
         ema_slow: int = 21,
         entry_threshold: float = 0.20,
+        confluence: float = 0.0,
     ):
         self.bars_1m = sorted(bars_1m, key=lambda b: b.ts)
         self.bars_5m = resample(self.bars_1m, SLOT)
         self.bars_15m = resample(self.bars_1m, 900)
         self.weights = dict(weights or DEFAULT_WEIGHTS)
         self.entry_threshold = entry_threshold
+        # confluence in [0,1]: how strongly to require indicator AGREEMENT for
+        # confidence. 0 = off (net score only); 1 = confidence fully scaled by the
+        # fraction of weighted signal that agrees on direction.
+        self.confluence = clamp(confluence, 0.0, 1.0)
 
         c1 = [b.c for b in self.bars_1m]
         self.rsi_1m = rsi_ind(c1, 14)
@@ -261,13 +266,22 @@ class MTFModel:
             vol_factor = clamp(0.5 + 0.5 * rel, 0.5, 1.5)
             sig.features["rel_volume_1m"] = rel
 
-        raw = sum(self.weights.get(k, 0.0) * v for k, v in subs.items())
+        weighted = [self.weights.get(k, 0.0) * v for k, v in subs.items()]
+        raw = sum(weighted)
         sig.features.update({f"sub_{k}": v for k, v in subs.items()})
         # Stored so a round can be re-weighted later (walk-forward weight tuning)
         # from its sub-signals alone, without recomputing indicators.
         sig.features["vol_factor"] = vol_factor
+        # Confluence / agreement: |net| / sum|parts| in [0,1]. 1 = every weighted
+        # indicator points the same way; ~0 = they conflict and cancel. This is
+        # "indicator correlation" made explicit — high confidence needs agreement,
+        # not one loud indicator.
+        denom = sum(abs(x) for x in weighted)
+        agreement = abs(raw) / denom if denom > 0 else 0.0
+        sig.features["agreement"] = agreement
+        conf_mult = (1.0 - self.confluence) + self.confluence * agreement
         sig.score = math.tanh(raw)
-        sig.confidence = clamp(abs(sig.score) * vol_factor, 0.0, 1.0)
+        sig.confidence = clamp(abs(sig.score) * vol_factor * conf_mult, 0.0, 1.0)
         # Direction is threshold-independent (pure sign of the score); whether a
         # round is actually *traded* is decided later by comparing confidence to
         # the entry threshold. Keeping these separate lets the walk-forward tuner

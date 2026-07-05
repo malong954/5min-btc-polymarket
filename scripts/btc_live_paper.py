@@ -58,6 +58,7 @@ class LivePaperEngine:
         stake_pct: float = 0.10,
         big_conf: float = 0.80,
         big_mult: float = 1.0,
+        confluence: float = 0.0,
         require_market_price: bool = False,
     ):
         self.require_market_price = require_market_price
@@ -65,6 +66,7 @@ class LivePaperEngine:
         self.stake_pct = stake_pct
         self.big_conf = big_conf      # confidence at/above which to size up
         self.big_mult = big_mult      # stake multiplier for high-confidence trades (1.0 = off)
+        self.confluence = confluence  # require indicator agreement for confidence (0..1)
         self.entry_threshold = entry_threshold
         self.entry_price = entry_price
         self.weights = dict(weights or DEFAULT_WEIGHTS)
@@ -96,7 +98,7 @@ class LivePaperEngine:
         cur = bucket_5m(int(now))
         sec_left = (cur + 300) - now
         events: list[dict[str, Any]] = []
-        model = MTFModel(bars_1m, weights=self.weights)
+        model = MTFModel(bars_1m, weights=self.weights, confluence=self.confluence)
 
         # 1) Settle any entered round that has closed.
         for rs in sorted(self.positions):
@@ -270,6 +272,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--stake-pct", type=float, default=0.10, help="Fraction of current balance to stake in --sizing percent (e.g. 0.15 = 15%%)")
     ap.add_argument("--big-conf", type=float, default=0.80, help="Confidence at/above which to size up")
     ap.add_argument("--big-mult", type=float, default=1.0, help="Stake multiplier for confidence >= --big-conf (1.0 = off, e.g. 2.0 = double)")
+    ap.add_argument("--confluence", type=float, default=0.0, help="0..1: require indicator AGREEMENT for confidence (0=off, 1=confidence fully scaled by agreement)")
     ap.add_argument("--entry-price-source", default="fixed", choices=["fixed", "polymarket"],
                     help="fixed = use --entry-price for every trade (assumption); polymarket = use the REAL CLOB best ask of the predicted side per trade (factual; skips a round if unpriceable)")
     ap.add_argument("--history-min", type=int, default=180, help="Minutes of 1m history to fetch each poll")
@@ -290,7 +293,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         entry_threshold=args.entry_threshold, entry_price=args.entry_price, log=logf,
         bankroll=args.bankroll, stake_usd=args.stake_usd, sizing=args.sizing,
         stake_pct=args.stake_pct, big_conf=args.big_conf, big_mult=args.big_mult,
-        require_market_price=use_pm,
+        confluence=args.confluence, require_market_price=use_pm,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")

@@ -26,6 +26,7 @@ STAKE_PCT="${STAKE_PCT:-0.15}"
 PRICE_SOURCE="${PRICE_SOURCE:-polymarket}"
 BIG_CONF="${BIG_CONF:-0.80}"
 BIG_MULT="${BIG_MULT:-1.5}"   # size up 1.5x on confidence >= BIG_CONF (1.0 = off)
+CONFLUENCE="${CONFLUENCE:-0.0}"  # 0..1: require indicator agreement for confidence
 
 if [ ! -x "$PY" ]; then
   echo "No venv found. Create it once:"
@@ -52,7 +53,7 @@ else
   nohup "$PY" scripts/btc_live_paper.py \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
     --entry-price-source "$PRICE_SOURCE" --sizing percent --stake-pct "$STAKE_PCT" \
-    --big-conf "$BIG_CONF" --big-mult "$BIG_MULT" \
+    --big-conf "$BIG_CONF" --big-mult "$BIG_MULT" --confluence "$CONFLUENCE" \
     --bankroll "$BANKROLL" --log "$LOG" --quiet \
     >> out/nohup.log 2>&1 &
   echo "started paper trader (pid $!)  provider=$PROVIDER  sizing=percent ${STAKE_PCT} of balance  price=$PRICE_SOURCE"
