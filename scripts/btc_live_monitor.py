@@ -121,7 +121,7 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
     pnl = state["pnl"]
 
     lines: list[str] = []
-    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    now = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
     lines.append(p.c("  BTC 5m — Live Paper Trader ", BOLD, CYAN) + p.c(f" {now}", GREY))
     lines.append(p.c("  " + "─" * 56, GREY))
 
@@ -174,7 +174,7 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
     lines.append(p.c("  recent settles (newest first)", BOLD))
     if state["recent"]:
         for ev in reversed(state["recent"]):
-            clk = time.strftime("%H:%M:%S", time.gmtime(ev.get("ts", 0)))
+            clk = time.strftime("%H:%M:%S", time.localtime(ev.get("ts", 0)))
             win = ev.get("result") == "win"
             col = GREEN if win else RED
             tag = "WIN " if win else "LOSS"

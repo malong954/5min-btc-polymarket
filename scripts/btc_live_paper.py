@@ -202,30 +202,31 @@ class LivePaperEngine:
 
 def format_event(ev: dict[str, Any]) -> str:
     t = ev["type"]
-    clk = time.strftime("%H:%M:%S", time.gmtime(ev["ts"]))
+    # Local machine time (e.g. US/Eastern), not UTC.
+    clk = time.strftime("%H:%M:%S", time.localtime(ev["ts"]))
     if t == "heartbeat":
         if not ev.get("price"):
-            return f"{clk}Z  · (no price)"
+            return f"{clk}  · (no price)"
         mv = ev.get("round_move")
         mv_s = f" move={mv:+.0f}" if mv is not None else ""
-        return (f"{clk}Z  · ${ev['price']:,.2f}{mv_s}  round+{300 - ev['seconds_left']:.0f}s  "
+        return (f"{clk}  · ${ev['price']:,.2f}{mv_s}  round+{300 - ev['seconds_left']:.0f}s  "
                 f"open={ev['open_positions']} pnl={ev['cum_pnl']:+.3f}")
     if t == "prediction":
-        return (f"{clk}Z  ? PREDICT {ev['direction'] or '--'} conf={ev['confidence']:.2f} "
+        return (f"{clk}  ? PREDICT {ev['direction'] or '--'} conf={ev['confidence']:.2f} "
                 f"move=${ev['btc_move_usd']:+.0f} rsi={ev['rsi_1m']} ({ev['seconds_left']:.0f}s left)")
     if t == "entry":
         stake = ev.get("stake_usd")
         stake_s = f" ${stake:.2f}" if stake is not None else ""
-        return f"{clk}Z  ▲ ENTER {ev['side']}{stake_s} @ ${ev['entry_price']:.2f}  conf={ev['confidence']:.2f}"
+        return f"{clk}  ▲ ENTER {ev['side']}{stake_s} @ ${ev['entry_price']:.2f}  conf={ev['confidence']:.2f}"
     if t == "skip":
-        return f"{clk}Z  – skip ({ev['reason']}, conf={ev['confidence']:.2f})"
+        return f"{clk}  – skip ({ev['reason']}, conf={ev['confidence']:.2f})"
     if t == "settle":
         mark = "[WIN] " if ev["result"] == "win" else "[LOSS]"
         ep = f"@${ev['entry_price']:.2f} " if ev.get("entry_price") is not None else ""
         usd = f"  ${ev['pnl_usd']:+.2f} -> bal ${ev['balance']:.2f}" if "pnl_usd" in ev else ""
-        return (f"{clk}Z  {mark} SETTLE {ev['side']} -> {ev['actual']} {ep}{ev['result'].upper()}"
+        return (f"{clk}  {mark} SETTLE {ev['side']} -> {ev['actual']} {ep}{ev['result'].upper()}"
                 f"{usd}  wr={ev['winrate']:.1%} ({ev['trades']} trades)")
-    return f"{clk}Z  {t} {ev}"
+    return f"{clk}  {t} {ev}"
 
 
 def fetch_recent_1m(provider: str, minutes: int = 180) -> list[Bar]:
