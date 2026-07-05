@@ -151,6 +151,24 @@ def test_threshold_gates_entries():
     check("high threshold trades much less than low threshold", lo_entries > hi_entries)
 
 
+def test_live_spot_heartbeat_and_round_move():
+    """A spot tick passed to step() should drive the heartbeat price live and
+    compute the intra-round move (spot - round open), independent of the last
+    1m candle close."""
+    bars = synth_bars(600, autocorr=0.0, seed=61)
+    eng = LivePaperEngine(entry_threshold=0.99)  # no entries; just heartbeats
+    # 150s into a round so the round's opening 1m bar has already closed (a live
+    # feed would include the forming bar even earlier).
+    now = bars[300].ts + 150
+    cur = bucket_5m(int(now))
+    # Feed a spot far from the last candle close to prove it's used.
+    spot = bars[-1].c + 123.0
+    events = eng.step(now, [b for b in bars if b.ts + 60 <= now], spot=spot)
+    hb = [e for e in events if e["type"] == "heartbeat"][-1]
+    check("heartbeat price uses the live spot tick", abs(hb["price"] - spot) < 0.01)
+    check("heartbeat reports an intra-round move", hb["round_move"] is not None)
+
+
 def test_format_event_smoke():
     ev = {"ts": 1_700_000_000, "type": "settle", "round": 1_700_000_000, "side": "UP",
           "actual": "UP", "result": "win", "pnl": 0.15, "cum_pnl": 0.3, "trades": 2, "winrate": 1.0}
@@ -165,6 +183,7 @@ def main():
     test_dollar_account_bookkeeping()
     test_settle_direction_matches_truth()
     test_threshold_gates_entries()
+    test_live_spot_heartbeat_and_round_move()
     test_format_event_smoke()
     print("\nAll live paper-trading tests passed.")
 

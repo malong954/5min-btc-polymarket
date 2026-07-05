@@ -120,7 +120,11 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
     price_s = f"${price:,.2f}" if price is not None else "—"
     sl = hb.get("seconds_left")
     countdown = f"{sl:.0f}s left" if sl is not None else "—"
-    lines.append(f"  price   {p.c(price_s, BOLD)}      round close in {p.c(countdown, YELLOW)}")
+    mv = hb.get("round_move")
+    mv_s = ""
+    if mv is not None:
+        mv_s = "  move " + p.c(f"{mv:+.0f}", GREEN if mv > 0 else RED if mv < 0 else GREY, BOLD)
+    lines.append(f"  price   {p.c(price_s, BOLD)}{mv_s}   round close in {p.c(countdown, YELLOW)}")
 
     # Current movement prediction.
     d = pred.get("direction")

@@ -27,7 +27,7 @@ PY="$REPO/.venv/bin/python3"
 PROVIDER="${PROVIDER:-binance}"
 THRESHOLD="${THRESHOLD:-0.60}"
 PRICE="${PRICE:-0.85}"
-POLL="${POLL:-3}"
+POLL="${POLL:-2}"
 
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/$LABEL.plist"

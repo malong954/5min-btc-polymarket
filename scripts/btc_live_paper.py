@@ -82,7 +82,7 @@ class LivePaperEngine:
             self.log.flush()
         return ev
 
-    def step(self, now: float, bars_1m: list[Bar]) -> list[dict[str, Any]]:
+    def step(self, now: float, bars_1m: list[Bar], spot: Optional[float] = None) -> list[dict[str, Any]]:
         now = float(now)
         cur = bucket_5m(int(now))
         sec_left = (cur + 300) - now
@@ -157,13 +157,21 @@ class LivePaperEngine:
                         "confidence": round(sig.confidence, 4),
                     }))
 
-        # 3) Heartbeat with the current price and open prediction.
+        # 3) Heartbeat with the live price and the intra-round move building.
         if self.emit_heartbeat:
-            last_px = bars_1m[-1].c if bars_1m else None
+            # Prefer a live spot tick (updates every poll) over the 1m candle close.
+            last_px = spot if spot is not None else (bars_1m[-1].c if bars_1m else None)
+            # Round-open price = open of the 1m bar that started the current round.
+            round_open = None
+            i_open = model.idx_1m.get(cur) if bars_1m else None
+            if i_open is not None:
+                round_open = model.bars_1m[i_open].o
+            round_move = (last_px - round_open) if (last_px is not None and round_open is not None) else None
             events.append(self._emit({
                 "ts": int(now), "type": "heartbeat", "round": cur,
                 "seconds_left": round(sec_left, 1),
                 "price": round(last_px, 2) if last_px is not None else None,
+                "round_move": round(round_move, 2) if round_move is not None else None,
                 "open_positions": len(self.positions) - len(self.settled),
                 "cum_pnl": round(self.stats["pnl"], 4),
                 "balance": round(self.balance, 2),
@@ -175,8 +183,12 @@ def format_event(ev: dict[str, Any]) -> str:
     t = ev["type"]
     clk = time.strftime("%H:%M:%S", time.gmtime(ev["ts"]))
     if t == "heartbeat":
-        return (f"{clk}Z  · ${ev['price']:,.2f}  round+{300 - ev['seconds_left']:.0f}s  "
-                f"open={ev['open_positions']} pnl={ev['cum_pnl']:+.3f}") if ev["price"] else f"{clk}Z  · (no price)"
+        if not ev.get("price"):
+            return f"{clk}Z  · (no price)"
+        mv = ev.get("round_move")
+        mv_s = f" move={mv:+.0f}" if mv is not None else ""
+        return (f"{clk}Z  · ${ev['price']:,.2f}{mv_s}  round+{300 - ev['seconds_left']:.0f}s  "
+                f"open={ev['open_positions']} pnl={ev['cum_pnl']:+.3f}")
     if t == "prediction":
         return (f"{clk}Z  ? PREDICT {ev['direction'] or '--'} conf={ev['confidence']:.2f} "
                 f"move=${ev['btc_move_usd']:+.0f} rsi={ev['rsi_1m']} ({ev['seconds_left']:.0f}s left)")
@@ -202,11 +214,21 @@ def fetch_recent_1m(provider: str, minutes: int = 180) -> list[Bar]:
     return [Bar(r["time"], r["open"], r["high"], r["low"], r["close"], r["volume"]) for r in rows]
 
 
+def fetch_spot(provider: str) -> Optional[float]:
+    """A single cheap spot-price call (updates every poll), separate from the
+    heavier 1m-kline fetch used for indicators."""
+    from btc_price_feeds import build_feeds
+
+    feeds = build_feeds([provider])
+    return feeds[0].spot() if feeds else None
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Live paper-trading + streaming logger (BTC 5m)")
     ap.add_argument("--provider", default="binance", choices=["binance", "cryptocompare"],
                     help="1m data source for live prediction")
-    ap.add_argument("--poll", type=float, default=3.0, help="Seconds between polls")
+    ap.add_argument("--poll", type=float, default=2.0, help="Seconds between polls (live spot price ticks at this cadence)")
+    ap.add_argument("--klines-every", type=float, default=15.0, help="Seconds between the heavier 1m-kline/indicator refreshes")
     ap.add_argument("--entry-threshold", type=float, default=0.60, help="Min confidence to open a paper position")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting paper account balance in USD")
@@ -236,11 +258,26 @@ def main(argv: Optional[list[str]] = None) -> int:
           f"| PAPER MODE (no real orders)", file=sys.stderr)
 
     n = 0
+    bars: list[Bar] = []
+    last_klines = 0.0
     try:
         while args.max_steps is None or n < args.max_steps:
             try:
-                bars = fetch_recent_1m(args.provider, args.history_min)
-                events = engine.step(time.time(), bars)
+                now = time.time()
+                cur = bucket_5m(int(now))
+                sec_left = (cur + 300) - now
+                # Refresh the heavier 1m klines only every --klines-every seconds,
+                # or when we need them fresh: in the entry window, or to settle a
+                # round that has just closed. The spot tick (below) stays live.
+                pending_settle = any(rs + 300 <= now and rs not in engine.settled
+                                     for rs in engine.positions)
+                in_window = engine.min_entry_sec <= sec_left <= engine.entry_window_sec
+                if (not bars or now - last_klines >= args.klines_every
+                        or in_window or pending_settle):
+                    bars = fetch_recent_1m(args.provider, args.history_min)
+                    last_klines = now
+                spot = fetch_spot(args.provider)  # cheap, every poll -> live price
+                events = engine.step(now, bars, spot=spot)
                 for ev in events:
                     if args.quiet and ev["type"] == "heartbeat":
                         continue
