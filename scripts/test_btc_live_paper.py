@@ -104,18 +104,20 @@ def test_dollar_account_bookkeeping():
     events = drive(eng, bars)
     settles = [e for e in events if e["type"] == "settle"]
     check("dollar test: some trades settled", len(settles) > 5)
-    # Per-trade dollar economics: win = stake*(1-entry)/entry, loss = -stake.
-    win_usd = 10.0 * (1 - 0.85) / 0.85
+    # Per-trade dollar economics, using each trade's ACTUAL stake (flat mode caps
+    # the stake at the available balance, so it isn't always exactly $10).
     running = 100.0
     ok = True
     for s in settles:
-        expect = win_usd if s["result"] == "win" else -10.0
-        if abs(s["pnl_usd"] - round(expect, 2)) > 0.01:
+        stake = s["stake_usd"]
+        expect = round(stake * (1 - 0.85) / 0.85, 2) if s["result"] == "win" else -stake
+        if abs(s["pnl_usd"] - expect) > 0.01:
             ok = False
         running += s["pnl_usd"]
         if abs(round(running, 2) - s["balance"]) > 0.02:
             ok = False
     check("per-trade $ pnl matches economics", ok)
+    win_usd = 10.0 * (1 - 0.85) / 0.85
     check("engine.balance equals bankroll + cumulative $ pnl",
           abs(eng.balance - (100.0 + eng.stats["pnl_usd"])) < 1e-9)
     # A win must be much smaller than a loss (the 0.85-entry asymmetry).

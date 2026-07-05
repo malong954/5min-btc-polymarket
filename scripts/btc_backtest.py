@@ -545,6 +545,49 @@ def run_walk_forward(
     }
 
 
+def oos_trades_for_sizing(
+    bars_1m: list[Bar],
+    weights: Optional[dict[str, float]] = None,
+    entry_price: float = 0.85,
+    train: int = 500,
+    test: int = 250,
+    min_trades: int = 15,
+    grid: Optional[list[float]] = None,
+) -> list[dict[str, Any]]:
+    """Walk-forward OOS trades tagged with a calibrated win probability.
+
+    For each fold we pick the entry threshold on the train block, calibrate
+    confidence->win-probability on that same train block, then emit the test
+    block's traded rounds as {confidence, win, p_est}. Because both the threshold
+    and the calibration come only from train, the resulting p_est and outcomes
+    are honest out-of-sample — exactly what sizing must be judged on."""
+    from btc_sizing import Calibrator
+
+    model = MTFModel(bars_1m, weights=weights)
+    rows = sorted(score_rounds(model), key=lambda r: r["round_start"])
+    if grid is None:
+        grid = [round(0.10 + 0.05 * i, 2) for i in range(18)]
+
+    out: list[dict[str, Any]] = []
+    start = train
+    while start + 1 <= len(rows):
+        tr = rows[start - train:start]
+        te = rows[start:start + test]
+        if not te:
+            break
+        thr, _ = _best_threshold(tr, entry_price, grid, min_trades)
+        calib = Calibrator.fit([r for r in tr if r["confidence"] >= thr] or tr)
+        for r in te:
+            if r["confidence"] >= thr:
+                out.append({
+                    "confidence": r["confidence"],
+                    "win": r["pred"] == r["actual"],
+                    "p_est": calib.predict(r["confidence"]),
+                })
+        start += test
+    return out
+
+
 def run_ablation(
     bars_1m: list[Bar],
     weights: Optional[dict[str, float]] = None,
@@ -964,6 +1007,35 @@ def _print_weight_opt_report(res: dict[str, Any]) -> None:
     print("=" * 72)
 
 
+def _print_sizing_report(trades: list[dict[str, Any]], bankroll: float, base_stake: float,
+                        entry_price: float) -> None:
+    from btc_sizing import simulate_account
+    print("=" * 72)
+    print("BTC 5m Position-Sizing Comparison (out-of-sample account trajectory)")
+    print("=" * 72)
+    n = len(trades)
+    wins = sum(1 for t in trades if t["win"])
+    wr = wins / n if n else 0.0
+    print(f"OOS trades           : {n}   winrate {wr:.1%}   breakeven {entry_price:.0%}")
+    print(f"bankroll ${bankroll:.2f}   base stake ${base_stake:.2f}")
+    edge = "POSITIVE (winrate > entry)" if wr > entry_price else "NEGATIVE (winrate <= entry)"
+    print(f"edge                 : {edge}")
+    print("-" * 72)
+    print(f"  {'mode':<14}{'final $':<12}{'return %':<11}{'avg stake':<11}{'maxDD $':<11}{'ruined'}")
+    for mode in ["flat", "confidence", "kelly"]:
+        r = simulate_account(trades, mode, bankroll=bankroll, base_stake=base_stake,
+                             entry_price=entry_price)
+        print(f"  {mode:<14}{r['final_balance']:<12.2f}{r['return_pct']:<+11.2f}"
+              f"{r['avg_stake']:<11.2f}{r['max_drawdown']:<11.2f}{'YES' if r['ruined'] else 'no'}")
+    print("-" * 72)
+    print("Sizing amplifies edge; it never creates it. Flat/confidence scale gains")
+    print("and losses ~linearly. Kelly compounds hardest on a REAL, well-calibrated")
+    print("edge (biggest gains, deep drawdowns) but over-bets NOISE on a marginal")
+    print("edge (biggest losses). If winrate <= breakeven, no mode wins — fix the")
+    print("edge (raise the threshold) before sizing up.")
+    print("=" * 72)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Multi-timeframe BTC 5m backtester")
     src = ap.add_mutually_exclusive_group(required=True)
@@ -980,6 +1052,9 @@ def main() -> int:
     ap.add_argument("--walk-forward", action="store_true", help="Out-of-sample eval: tune the threshold on rolling train blocks, score on the next test block")
     ap.add_argument("--ablation", action="store_true", help="Leave-one-out feature ablation (out-of-sample); shows each indicator's EV contribution")
     ap.add_argument("--optimize-weights", action="store_true", help="Out-of-sample head-to-head: fixed default weights vs per-fold tuned weights")
+    ap.add_argument("--sizing-report", action="store_true", help="Compare flat / confidence / kelly sizing on out-of-sample trades ($ account)")
+    ap.add_argument("--bankroll", type=float, default=100.0, help="Starting account for --sizing-report")
+    ap.add_argument("--base-stake", type=float, default=10.0, help="Base stake for --sizing-report")
     ap.add_argument("--wf-train", type=int, default=500, help="Train window in 5m rounds (walk-forward)")
     ap.add_argument("--wf-test", type=int, default=250, help="Test window in 5m rounds (walk-forward)")
     ap.add_argument("--wf-min-trades", type=int, default=15, help="Min in-sample trades required when tuning a fold's threshold")
@@ -995,6 +1070,23 @@ def main() -> int:
         bars = [Bar(r["time"], r["open"], r["high"], r["low"], r["close"], r["volume"]) for r in rows]
     else:
         bars = synth_bars(args.synth, autocorr=args.autocorr)
+
+    if args.sizing_report:
+        trades = oos_trades_for_sizing(
+            bars, entry_price=args.entry_price, train=args.wf_train,
+            test=args.wf_test, min_trades=args.wf_min_trades,
+        )
+        if args.json:
+            from btc_sizing import simulate_account
+            print(json.dumps({
+                "oos_trades": len(trades),
+                "sizing": {m: simulate_account(trades, m, bankroll=args.bankroll,
+                                               base_stake=args.base_stake, entry_price=args.entry_price)
+                           for m in ["flat", "confidence", "kelly"]},
+            }, indent=2))
+        else:
+            _print_sizing_report(trades, args.bankroll, args.base_stake, args.entry_price)
+        return 0
 
     if args.optimize_weights:
         res = run_weight_optimization(

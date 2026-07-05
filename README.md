@@ -249,6 +249,32 @@ to a dashboard, alerting, or a replay. Real execution stays in
 `scripts/test_btc_5m_session_exit_sl.py` (needs `py_clob_client` + credentials);
 only enable it once the paper stream's out-of-sample PnL clears breakeven.
 
+### Position Sizing
+`scripts/btc_sizing.py` + `btc_backtest.py --sizing-report` compare sizing modes
+on **out-of-sample** trades. The economics are unforgiving: buying at price `c`
+pays $1, so **EV per trade = stake · (p − c) / c**. A flat stake is a pure
+multiplier — it *cannot* change the sign of EV. Only `p > c` (win-rate above the
+entry price) is profitable.
+
+Modes:
+- **flat** — constant stake; scales gains and losses linearly.
+- **confidence** — stake scaled by model confidence.
+- **kelly** — fractional Kelly on a *calibrated* win probability; stakes **zero**
+  when `p ≤ c`. Kelly compounds hardest on a real edge (biggest gains, deep
+  drawdowns) but over-bets *noise* on a marginal edge (biggest losses).
+
+```bash
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --sizing-report \
+    --wf-train 500 --wf-test 250 --bankroll 100 --base-stake 10
+```
+
+Kelly numbers for this contract at `c = 0.85`: **f\* = −0.21 at p = 81.8%**
+(don't bet) and **+0.20 at p = 88%** (bet ~20%). The live trader accepts
+`--sizing flat|confidence|kelly`, but live kelly uses confidence as an
+*uncalibrated* proxy — validate with `--sizing-report` first. **Sizing amplifies
+edge; it never creates it. If your win-rate is below breakeven, no sizing scheme
+wins — raise the threshold first.**
+
 ### Live Color Dashboard
 `scripts/btc_live_monitor.py` reads the JSONL stream and redraws a color panel in
 place — current price + movement prediction, cumulative PnL (**green profit /
