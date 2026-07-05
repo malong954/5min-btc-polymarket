@@ -169,6 +169,39 @@ def test_live_spot_heartbeat_and_round_move():
     check("heartbeat reports an intra-round move", hb["round_move"] is not None)
 
 
+def test_confidence_tier_sizes_up():
+    """With --big-mult > 1, trades at conf >= big_conf get a larger stake; lower-
+    confidence trades keep the base stake."""
+    bars = synth_bars(6000, autocorr=0.6, seed=91)
+    eng = LivePaperEngine(entry_threshold=0.2, sizing="flat", stake_usd=10,
+                          big_conf=0.80, big_mult=2.0)
+    events = drive(eng, bars)
+    entries = [e for e in events if e["type"] == "entry"]
+    check("some entries were made", len(entries) > 3)
+    highs = [e for e in entries if e["confidence"] >= 0.80]
+    lows = [e for e in entries if e["confidence"] < 0.80]
+    if highs:
+        check("high-confidence entries are flagged big_bet", all(e["big_bet"] for e in highs))
+        # stake = min(base*2, balance-at-entry); balance is carried on the event.
+        check("high-confidence stake is 2x base (capped at balance)",
+              all(abs(e["stake_usd"] - min(20.0, e["balance"])) < 0.05 for e in highs))
+    if lows:
+        check("low-confidence stake is base (capped at balance)",
+              all(abs(e["stake_usd"] - min(10.0, e["balance"])) < 0.05 for e in lows))
+        check("low-confidence entries not flagged big", all(not e["big_bet"] for e in lows))
+
+
+def test_new_indicators_feed_the_model():
+    """Bollinger %B and ROC sub-signals should appear in prediction features."""
+    from btc_backtest import MTFModel, score_rounds
+    bars = synth_bars(4000, autocorr=0.5, seed=92)
+    rows = score_rounds(MTFModel(bars))
+    check("model produced rows", len(rows) > 10)
+    feats = rows[len(rows) // 2]["features"]
+    check("Bollinger %B sub-signal present", "sub_bb_1m" in feats)
+    check("ROC sub-signal present", "sub_roc_1m" in feats)
+
+
 def test_format_event_smoke():
     ev = {"ts": 1_700_000_000, "type": "settle", "round": 1_700_000_000, "side": "UP",
           "actual": "UP", "result": "win", "pnl": 0.15, "cum_pnl": 0.3, "trades": 2, "winrate": 1.0}
@@ -184,6 +217,8 @@ def main():
     test_settle_direction_matches_truth()
     test_threshold_gates_entries()
     test_live_spot_heartbeat_and_round_move()
+    test_confidence_tier_sizes_up()
+    test_new_indicators_feed_the_model()
     test_format_event_smoke()
     print("\nAll live paper-trading tests passed.")
 

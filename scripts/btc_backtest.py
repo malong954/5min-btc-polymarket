@@ -48,11 +48,13 @@ import math
 from typing import Any, Optional
 
 from btc_indicators import (
+    bollinger_pctb,
     clamp,
     ema,
     macd as macd_ind,
     pearson,
     rolling_mean,
+    roc as roc_ind,
     rsi as rsi_ind,
     stdev,
 )
@@ -117,6 +119,8 @@ DEFAULT_WEIGHTS = {
     "macd_1m": 0.6,
     "trend_5m": 0.8,
     "trend_15m": 0.6,
+    "bb_1m": 0.3,      # Bollinger %B — validate/tune with --ablation on real data
+    "roc_1m": 0.3,     # rate of change  — same
 }
 
 
@@ -146,6 +150,8 @@ class MTFModel:
         self.rsi_1m = rsi_ind(c1, 14)
         _, _, self.macd_hist = macd_ind(c1, 12, 26, 9)
         self.vol_ma_1m = rolling_mean([b.v for b in self.bars_1m], 20)
+        self.bb_1m = bollinger_pctb(c1, 20, 2.0)   # volatility-relative position
+        self.roc_1m = roc_ind(c1, 5)               # 5-min rate of change
 
         c5 = [b.c for b in self.bars_5m]
         self.ema_f_5m = ema(c5, ema_fast)
@@ -216,6 +222,18 @@ class MTFModel:
         if hh is not None:
             subs["macd_1m"] = math.tanh(hh / (2.0 * vol))
             sig.features["macd_hist_1m"] = hh
+
+        # (3b) Bollinger %B on 1m — position within volatility bands (continuation).
+        bb = self.bb_1m[i1]
+        if bb is not None:
+            subs["bb_1m"] = clamp((bb - 0.5) * 2.0, -1.0, 1.0)
+            sig.features["bb_pctb_1m"] = bb
+
+        # (3c) Rate of change on 1m — 5-minute momentum.
+        rc = self.roc_1m[i1]
+        if rc is not None:
+            subs["roc_1m"] = math.tanh(rc / 0.0015)
+            sig.features["roc_1m"] = rc
 
         # (4) 5m EMA trend (closed bars only).
         j5 = self._last_closed_index(self._starts_5m, SLOT, t_dec)

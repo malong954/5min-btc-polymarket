@@ -56,11 +56,15 @@ class LivePaperEngine:
         stake_usd: float = 10.0,
         sizing: str = "flat",
         stake_pct: float = 0.10,
+        big_conf: float = 0.80,
+        big_mult: float = 1.0,
         require_market_price: bool = False,
     ):
         self.require_market_price = require_market_price
         self.sizing = sizing
         self.stake_pct = stake_pct
+        self.big_conf = big_conf      # confidence at/above which to size up
+        self.big_mult = big_mult      # stake multiplier for high-confidence trades (1.0 = off)
         self.entry_threshold = entry_threshold
         self.entry_price = entry_price
         self.weights = dict(weights or DEFAULT_WEIGHTS)
@@ -155,11 +159,16 @@ class LivePaperEngine:
                         }))
                         return events
                     ep = float(real) if real_ok else self.entry_price
-                    stake = round(stake_for(
+                    stake = stake_for(
                         self.sizing, bankroll=self.balance, base_stake=self.stake_usd,
                         confidence=sig.confidence, entry_price=ep, pct=self.stake_pct,
                         p_est=sig.confidence,  # live has no calibrator; confidence is a rough proxy
-                    ), 2)
+                    )
+                    # Confidence tier: size up on high-conviction trades (capped at balance).
+                    big = self.big_mult > 1.0 and sig.confidence >= self.big_conf
+                    if big:
+                        stake = min(stake * self.big_mult, self.balance)
+                    stake = round(stake, 2)
                     self.positions[cur] = {
                         "side": sig.direction, "entry_price": ep,
                         "confidence": round(sig.confidence, 4), "opened_ts": int(now),
@@ -169,7 +178,8 @@ class LivePaperEngine:
                         "ts": int(now), "type": "entry", "round": cur, "side": sig.direction,
                         "entry_price": round(ep, 4), "price_source": "polymarket" if real_ok else "fixed",
                         "confidence": round(sig.confidence, 4),
-                        "stake_usd": stake, "sizing": self.sizing, "balance": round(self.balance, 2),
+                        "stake_usd": stake, "sizing": self.sizing, "big_bet": big,
+                        "balance": round(self.balance, 2),
                     }))
                 else:
                     events.append(self._emit({
@@ -258,6 +268,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--sizing", default="flat", choices=["flat", "percent", "confidence", "kelly"],
                     help="Position sizing: flat | percent (of current balance, auto-grows) | confidence-scaled | kelly (live kelly uses confidence as an UNCALIBRATED proxy)")
     ap.add_argument("--stake-pct", type=float, default=0.10, help="Fraction of current balance to stake in --sizing percent (e.g. 0.15 = 15%%)")
+    ap.add_argument("--big-conf", type=float, default=0.80, help="Confidence at/above which to size up")
+    ap.add_argument("--big-mult", type=float, default=1.0, help="Stake multiplier for confidence >= --big-conf (1.0 = off, e.g. 2.0 = double)")
     ap.add_argument("--entry-price-source", default="fixed", choices=["fixed", "polymarket"],
                     help="fixed = use --entry-price for every trade (assumption); polymarket = use the REAL CLOB best ask of the predicted side per trade (factual; skips a round if unpriceable)")
     ap.add_argument("--history-min", type=int, default=180, help="Minutes of 1m history to fetch each poll")
@@ -277,7 +289,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     engine = LivePaperEngine(
         entry_threshold=args.entry_threshold, entry_price=args.entry_price, log=logf,
         bankroll=args.bankroll, stake_usd=args.stake_usd, sizing=args.sizing,
-        stake_pct=args.stake_pct, require_market_price=use_pm,
+        stake_pct=args.stake_pct, big_conf=args.big_conf, big_mult=args.big_mult,
+        require_market_price=use_pm,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")
