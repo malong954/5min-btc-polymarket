@@ -11,7 +11,9 @@
 #   scripts/install_launchd.sh print       # print the plist (no changes)
 #
 # Tune via env vars before running install:
-#   PROVIDER=binance|cryptocompare  THRESHOLD=0.60  PRICE=0.85  POLL=3
+#   PROVIDER=binance|cryptocompare  THRESHOLD=0.60  PRICE=0.85  POLL=2
+#   STAKE=10  SIZING=flat|confidence|kelly  BANKROLL=100
+#   e.g.  STAKE=15 SIZING=confidence scripts/install_launchd.sh install
 #
 set -euo pipefail
 
@@ -28,6 +30,9 @@ PROVIDER="${PROVIDER:-binance}"
 THRESHOLD="${THRESHOLD:-0.60}"
 PRICE="${PRICE:-0.85}"
 POLL="${POLL:-2}"
+STAKE="${STAKE:-10}"
+SIZING="${SIZING:-flat}"
+BANKROLL="${BANKROLL:-100}"
 
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/$LABEL.plist"
@@ -48,6 +53,9 @@ gen_plist() {
         <string>--poll</string><string>$POLL</string>
         <string>--entry-threshold</string><string>$THRESHOLD</string>
         <string>--entry-price</string><string>$PRICE</string>
+        <string>--stake-usd</string><string>$STAKE</string>
+        <string>--sizing</string><string>$SIZING</string>
+        <string>--bankroll</string><string>$BANKROLL</string>
         <string>--log</string><string>$REPO/out/live.jsonl</string>
         <string>--quiet</string>
     </array>
