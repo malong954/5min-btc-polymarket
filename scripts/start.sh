@@ -51,8 +51,11 @@ case "${1:-start}" in
   dash)
     exec "$PY" scripts/btc_live_monitor.py --log "$LOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD"
     ;;
+  history)
+    exec "$PY" scripts/btc_live_monitor.py --log "$LOG" --bankroll "$BANKROLL" --history
+    ;;
   start) ;;
-  *) echo "usage: scripts/start.sh [start|stop|dash]"; exit 1 ;;
+  *) echo "usage: scripts/start.sh [start|stop|dash|history]"; exit 1 ;;
 esac
 
 mkdir -p out

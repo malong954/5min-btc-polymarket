@@ -50,8 +50,10 @@ case "${1:-start}" in
     exec "$PY" scripts/btc_analyze.py --log "$LOG" ;;
   dash)
     exec "$PY" scripts/btc_live_monitor.py --log "$LOG" --bankroll 100 --entry-threshold "$THRESHOLD" ;;
+  history)
+    exec "$PY" scripts/btc_live_monitor.py --log "$LOG" --bankroll 100 --history ;;
   start) ;;
-  *) echo "usage: scripts/measure.sh [start|status|analyze|dash|stop]"; exit 1 ;;
+  *) echo "usage: scripts/measure.sh [start|status|analyze|dash|history|stop]"; exit 1 ;;
 esac
 
 mkdir -p out
