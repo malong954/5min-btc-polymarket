@@ -257,6 +257,48 @@ def _print_crossing(rows: list[dict[str, Any]]) -> None:
     print("=" * 74)
 
 
+def label_risk(events: list[dict[str, Any]],
+               bands: tuple = (1.0, 2.0, 5.0, 10.0)) -> dict[str, Any]:
+    """How exposed are our win/loss labels to FEED DISAGREEMENT? We settle with
+    Binance spot; Polymarket resolves on Chainlink Data Streams. The two can
+    only disagree when the round closes nearly flat — |close - open| within a
+    few dollars. This reports what fraction of rounds are that marginal."""
+    moves = []
+    for e in events:
+        if e.get("type") == "result" and e.get("open") is not None and e.get("close") is not None:
+            moves.append(abs(float(e["close"]) - float(e["open"])))
+    out: dict[str, Any] = {"n": len(moves)}
+    if moves:
+        out["bands"] = [{"within_usd": b,
+                         "n": sum(1 for m in moves if m <= b),
+                         "pct": round(sum(1 for m in moves if m <= b) / len(moves), 4)}
+                        for b in bands]
+        out["median_abs_move"] = round(sorted(moves)[len(moves) // 2], 2)
+    return out
+
+
+def _print_label_risk(res: dict[str, Any]) -> None:
+    print("=" * 68)
+    print("LABEL-RISK  (rounds flat enough for feed disagreement to flip them)")
+    print("=" * 68)
+    if not res.get("n"):
+        print("no settled rounds in the log yet.")
+        print("=" * 68)
+        return
+    print(f"  rounds: {res['n']}   median |close-open|: ${res['median_abs_move']}")
+    for b in res["bands"]:
+        print(f"  within ${b['within_usd']:<5.0f} {b['n']:<5} ({b['pct']:.1%} of rounds)")
+    tight = res["bands"][0]["pct"]
+    print("-" * 68)
+    if tight >= 0.05:
+        print("  A meaningful share of rounds are near-flat -> Binance-vs-Chainlink")
+        print("  label noise is material; wiring the Chainlink feed is worth it.")
+    else:
+        print("  Very few rounds are near-flat -> label noise is minor; the Chainlink")
+        print("  feed would sharpen the ruler but won't change any conclusion.")
+    print("=" * 68)
+
+
 EDGE_MARGINS = [0.0, 0.02, 0.05, 0.10]
 
 
@@ -508,6 +550,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="First-crossing table: buy at the first moment confidence reaches each threshold")
     ap.add_argument("--edge-gate", action="store_true",
                     help="Edge-gate table: buy at the first moment confidence >= ask + margin (price as hurdle)")
+    ap.add_argument("--label-risk", action="store_true",
+                    help="Fraction of near-flat rounds where Binance-vs-Chainlink settle labels could differ")
     ap.add_argument("--conf-offset", type=float, default=120.0,
                     help="Seconds-left decision point for --by-confidence (default 120)")
     ap.add_argument("--fee-rate", type=float, default=0.0,
@@ -517,6 +561,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     events = load(args.log)
+    if args.label_risk:
+        res = label_risk(events)
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        _print_label_risk(res)
+        return 0
     if args.edge_gate:
         rows = edge_gate_analysis(events, fee_rate=args.fee_rate)
         if args.json:

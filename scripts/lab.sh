@@ -72,6 +72,8 @@ case "${1:-start}" in
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --edge-gate         || true
       echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --label-risk        || true
+      echo
       for v in vel_15s vel_30s; do
         "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side "$v"       || true
         echo
