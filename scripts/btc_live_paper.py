@@ -102,8 +102,8 @@ class LivePaperEngine:
         entry_threshold: float = 0.60,
         entry_price: float = 0.85,
         weights: Optional[dict[str, float]] = None,
-        entry_window_sec: float = 120.0,
-        min_entry_sec: float = 45.0,
+        entry_window_sec: float = 150.0,
+        min_entry_sec: float = 30.0,
         log: Optional[TextIO] = None,
         emit_heartbeat: bool = True,
         bankroll: float = 100.0,
@@ -138,6 +138,10 @@ class LivePaperEngine:
         # money) so the timeline records whether each skip was correct.
         self.shadows: dict[int, dict[str, Any]] = {}
         self.shadow_settled: set[int] = set()
+        # Pending book: rounds whose signal cleared the threshold but had no
+        # market price at decision time. We keep retrying the price on later
+        # polls (while inside the window) instead of throwing the round away.
+        self.pending: dict[int, dict[str, Any]] = {}
         self.stats = {"trades": 0, "wins": 0, "pnl": 0.0, "pnl_usd": 0.0}
 
     @property
@@ -149,6 +153,43 @@ class LivePaperEngine:
             self.log.write(json.dumps(ev, separators=(",", ":")) + "\n")
             self.log.flush()
         return ev
+
+    def _try_enter(self, cur: int, now: float, side: str, confidence: float,
+                   feat: dict[str, Any], note: str,
+                   entry_prices: Optional[dict[str, float]],
+                   retries: int = 0) -> Optional[dict[str, Any]]:
+        """Open the position if we can price it. Returns the entry event, or
+        None when require_market_price is on and no valid ask is available yet
+        (the caller keeps the round pending and retries next poll)."""
+        real = entry_prices.get(side) if entry_prices else None
+        real_ok = isinstance(real, (int, float)) and 0.0 < real < 1.0
+        if self.require_market_price and not real_ok:
+            return None
+        ep = float(real) if real_ok else self.entry_price
+        from btc_sizing import stake_for
+        stake = stake_for(
+            self.sizing, bankroll=self.balance, base_stake=self.stake_usd,
+            confidence=confidence, entry_price=ep, pct=self.stake_pct,
+            p_est=confidence,  # live has no calibrator; confidence is a rough proxy
+        )
+        big = self.big_mult > 1.0 and confidence >= self.big_conf
+        if big:
+            stake = min(stake * self.big_mult, self.balance)
+        stake = round(stake, 2)
+        self.positions[cur] = {
+            "side": side, "entry_price": ep,
+            "confidence": round(confidence, 4), "opened_ts": int(now),
+            "stake_usd": stake, "price_source": "polymarket" if real_ok else "fixed",
+        }
+        return self._emit({
+            "ts": int(now), "type": "entry", "round": cur, "side": side,
+            "entry_price": round(ep, 4), "price_source": "polymarket" if real_ok else "fixed",
+            "confidence": round(confidence, 4),
+            "stake_usd": stake, "sizing": self.sizing, "big_bet": big,
+            "balance": round(self.balance, 2),
+            "price_retries": retries,
+            "features": feat, "note": note,
+        })
 
     def step(self, now: float, bars_1m: list[Bar], spot: Optional[float] = None,
              entry_prices: Optional[dict[str, float]] = None) -> list[dict[str, Any]]:
@@ -212,6 +253,35 @@ class LivePaperEngine:
                 "features": sh.get("features"), "note": sh.get("note"),
             }))
 
+        # 1c) Retry pricing for rounds whose signal was ARMED but unpriceable at
+        # decision time. Fill as soon as a valid ask appears; if the window runs
+        # out, only then record the final no_market_price skip (+ shadow).
+        for rs in list(self.pending):
+            pend = self.pending[rs]
+            rs_left = (rs + 300) - now
+            if rs == cur and rs_left >= self.min_entry_sec:
+                ev = self._try_enter(rs, now, pend["side"], pend["confidence"],
+                                     pend["features"], pend["note"], entry_prices,
+                                     retries=pend["retries"])
+                if ev is not None:
+                    events.append(ev)
+                    del self.pending[rs]
+                else:
+                    pend["retries"] += 1
+            else:
+                # Window closed (or round rolled over) without ever pricing it.
+                del self.pending[rs]
+                self.shadows[rs] = {"side": pend["side"], "reason": "no_market_price",
+                                    "confidence": pend["confidence"],
+                                    "features": pend["features"], "note": pend["note"]}
+                events.append(self._emit({
+                    "ts": int(now), "type": "skip", "round": rs,
+                    "reason": "no_market_price", "side": pend["side"],
+                    "confidence": pend["confidence"],
+                    "price_retries": pend["retries"],
+                    "features": pend["features"], "note": pend["note"],
+                }))
+
         # 2) One prediction / entry decision per round, inside the entry window.
         if cur not in self.decided and self.min_entry_sec <= sec_left <= self.entry_window_sec:
             sig = model.evaluate(cur)
@@ -229,46 +299,17 @@ class LivePaperEngine:
                     "features": feat, "note": note,
                 }))
                 if sig.direction and sig.confidence >= self.entry_threshold:
-                    from btc_sizing import stake_for
-                    # Real Polymarket ask for the predicted side, if provided.
-                    real = entry_prices.get(sig.direction) if entry_prices else None
-                    real_ok = isinstance(real, (int, float)) and 0.0 < real < 1.0
-                    if self.require_market_price and not real_ok:
-                        if sig.direction:
-                            self.shadows[cur] = {"side": sig.direction, "reason": "no_market_price",
-                                                 "confidence": round(sig.confidence, 4),
-                                                 "features": feat, "note": note}
-                        events.append(self._emit({
-                            "ts": int(now), "type": "skip", "round": cur,
-                            "reason": "no_market_price", "side": sig.direction,
-                            "confidence": round(sig.confidence, 4),
-                            "features": feat, "note": note,
-                        }))
-                        return events
-                    ep = float(real) if real_ok else self.entry_price
-                    stake = stake_for(
-                        self.sizing, bankroll=self.balance, base_stake=self.stake_usd,
-                        confidence=sig.confidence, entry_price=ep, pct=self.stake_pct,
-                        p_est=sig.confidence,  # live has no calibrator; confidence is a rough proxy
-                    )
-                    # Confidence tier: size up on high-conviction trades (capped at balance).
-                    big = self.big_mult > 1.0 and sig.confidence >= self.big_conf
-                    if big:
-                        stake = min(stake * self.big_mult, self.balance)
-                    stake = round(stake, 2)
-                    self.positions[cur] = {
-                        "side": sig.direction, "entry_price": ep,
-                        "confidence": round(sig.confidence, 4), "opened_ts": int(now),
-                        "stake_usd": stake, "price_source": "polymarket" if real_ok else "fixed",
-                    }
-                    events.append(self._emit({
-                        "ts": int(now), "type": "entry", "round": cur, "side": sig.direction,
-                        "entry_price": round(ep, 4), "price_source": "polymarket" if real_ok else "fixed",
-                        "confidence": round(sig.confidence, 4),
-                        "stake_usd": stake, "sizing": self.sizing, "big_bet": big,
-                        "balance": round(self.balance, 2),
-                        "features": feat, "note": note,
-                    }))
+                    ev = self._try_enter(cur, now, sig.direction, sig.confidence,
+                                         feat, note, entry_prices)
+                    if ev is not None:
+                        events.append(ev)
+                    else:
+                        # ARMED but unpriceable right now — don't throw the round
+                        # away; retry the price on later polls inside the window.
+                        self.pending[cur] = {"side": sig.direction,
+                                             "confidence": round(sig.confidence, 4),
+                                             "features": feat, "note": note,
+                                             "retries": 1}
                 else:
                     # Skipped: still log the SHADOW decision (side it would have
                     # taken) + reason + full features, so a skipped round is just
@@ -359,6 +400,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--poll", type=float, default=2.0, help="Seconds between polls (live spot price ticks at this cadence)")
     ap.add_argument("--klines-every", type=float, default=15.0, help="Seconds between the heavier 1m-kline/indicator refreshes")
     ap.add_argument("--entry-threshold", type=float, default=0.60, help="Min confidence to open a paper position")
+    ap.add_argument("--entry-window", type=float, default=150.0, help="Start deciding when this many seconds remain in the round")
+    ap.add_argument("--min-entry", type=float, default=30.0, help="Stop entering/retrying prices below this many seconds left")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting paper account balance in USD")
     ap.add_argument("--stake-usd", type=float, default=10.0, help="Base USD deployed per trade")
@@ -386,6 +429,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     use_pm = args.entry_price_source == "polymarket"
     engine = LivePaperEngine(
         entry_threshold=args.entry_threshold, entry_price=args.entry_price, log=logf,
+        entry_window_sec=args.entry_window, min_entry_sec=args.min_entry,
         bankroll=args.bankroll, stake_usd=args.stake_usd, sizing=args.sizing,
         stake_pct=args.stake_pct, big_conf=args.big_conf, big_mult=args.big_mult,
         confluence=args.confluence, require_market_price=use_pm,

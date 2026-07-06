@@ -202,6 +202,52 @@ def test_new_indicators_feed_the_model():
     check("ROC sub-signal present", "sub_roc_1m" in feats)
 
 
+def drive_prices(engine, all_bars, price_fn, poll=30):
+    """Like drive(), but supplies entry_prices per poll via price_fn(sec_left)."""
+    start = all_bars[0].ts
+    end = all_bars[-1].ts + 60
+    events = []
+    now = start + 40 * 60
+    while now <= end:
+        cur = bucket_5m(int(now))
+        sec_left = (cur + 300) - now
+        events.extend(engine.step(now, visible_bars(all_bars, now),
+                                  entry_prices=price_fn(sec_left)))
+        now += poll
+    return events
+
+
+def test_no_market_price_retries_then_fills():
+    # Prices only become available late in the window (sec_left < 80). The armed
+    # signal must WAIT and fill on a later poll instead of skipping the round.
+    bars = synth_bars(700, autocorr=0.5, seed=31)
+    eng = LivePaperEngine(entry_threshold=0.05, require_market_price=True)
+    events = drive_prices(eng, bars,
+                          lambda sl: {"UP": 0.9, "DOWN": 0.9} if sl < 80 else None)
+    entries = [e for e in events for _ in [0] if e["type"] == "entry"]
+    check("retry: entries happen despite late prices", len(entries) > 0)
+    check("retry: fills record their retry count",
+          all(e.get("price_retries", 0) >= 1 for e in entries))
+    check("retry: no premature no_market_price skips for filled rounds",
+          not any(e["type"] == "skip" and e.get("reason") == "no_market_price"
+                  and e["round"] in {en["round"] for en in entries} for e in events))
+
+
+def test_no_market_price_expires_to_skip():
+    # Prices NEVER appear: every armed round must end as a final no_market_price
+    # skip (with retries recorded) and be shadow-settled — never entered.
+    bars = synth_bars(700, autocorr=0.5, seed=31)
+    eng = LivePaperEngine(entry_threshold=0.05, require_market_price=True)
+    events = drive_prices(eng, bars, lambda sl: None)
+    check("expiry: no entries without a price",
+          not any(e["type"] == "entry" for e in events))
+    skips = [e for e in events if e["type"] == "skip" and e.get("reason") == "no_market_price"]
+    check("expiry: unpriceable rounds end as no_market_price skips", len(skips) > 0)
+    check("expiry: skips record retry attempts", all(s.get("price_retries", 0) >= 1 for s in skips))
+    check("expiry: skipped rounds shadow-settle",
+          any(e["type"] == "shadow_settle" for e in events))
+
+
 def test_format_event_smoke():
     ev = {"ts": 1_700_000_000, "type": "settle", "round": 1_700_000_000, "side": "UP",
           "actual": "UP", "result": "win", "pnl": 0.15, "cum_pnl": 0.3, "trades": 2, "winrate": 1.0}
@@ -219,6 +265,8 @@ def main():
     test_live_spot_heartbeat_and_round_move()
     test_confidence_tier_sizes_up()
     test_new_indicators_feed_the_model()
+    test_no_market_price_retries_then_fills()
+    test_no_market_price_expires_to_skip()
     test_format_event_smoke()
     print("\nAll live paper-trading tests passed.")
 
