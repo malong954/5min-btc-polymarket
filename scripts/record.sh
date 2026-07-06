@@ -34,10 +34,12 @@ case "${1:-start}" in
     exit 0 ;;
   analyze)
     exec "$PY" scripts/btc_entry_timing.py --log "$LOG" ;;
+  overround)
+    exec "$PY" scripts/btc_overround.py --log "$LOG" ;;
   dash)
     exec "$PY" scripts/btc_record_monitor.py --log "$LOG" ;;
   start) ;;
-  *) echo "usage: scripts/record.sh [start|dash|status|analyze|stop]"; exit 1 ;;
+  *) echo "usage: scripts/record.sh [start|dash|status|analyze|overround|stop]"; exit 1 ;;
 esac
 
 mkdir -p out
