@@ -59,6 +59,11 @@ mkdir -p out
 if pgrep -f "btc_live_paper.py" >/dev/null 2>&1; then
   echo "paper trader already running (pid $(pgrep -f btc_live_paper.py | tr '\n' ' '))"
 else
+  # Fresh start = fresh $100 account. Archive any prior session so its trades
+  # don't mix into this run's balance on the dashboard (a restart otherwise
+  # shows old losses plus a reset newest row). Reopening the dashboard with
+  # `start.sh dash` does NOT hit this path, so it won't wipe a live run.
+  [ -f "$LOG" ] && mv "$LOG" "out/live-prev.jsonl" && echo "archived prior session -> out/live-prev.jsonl"
   nohup "$PY" scripts/btc_live_paper.py \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
     --entry-price-source "$PRICE_SOURCE" --sizing "$SIZING" \

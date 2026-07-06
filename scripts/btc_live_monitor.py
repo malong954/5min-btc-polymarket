@@ -49,6 +49,7 @@ def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: flo
         "skips_since_trade": 0, "last_skip": None,
         "total_skips": 0, "total_decided": 0,   # cumulative: skipped vs decided rounds
         "last_hb": None, "last_pred": None, "last_entry": None,
+        "open_positions": {}, "recent_entries": [],  # entered, awaiting close
         "recent": [], "peak_pnl": 0.0, "max_drawdown": 0.0,
     }
 
@@ -72,6 +73,11 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
     elif t == "entry":
         state["last_entry"] = ev
         state["skips_since_trade"] = 0
+        rnd = ev.get("round")
+        if rnd is not None:
+            state["open_positions"][rnd] = ev   # live until its round settles
+        state["recent_entries"].append(ev)
+        state["recent_entries"] = state["recent_entries"][-RECENT_N:]
     elif t == "settle":
         state["trades"] += 1
         state["wins"] += 1 if ev.get("result") == "win" else 0
@@ -96,7 +102,12 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         # Attach a derived dollar figure so the recent-trades rows can show it.
         ev = dict(ev)
         ev.setdefault("pnl_usd", round(pnl_usd, 2))
-        ev.setdefault("balance", round(state["balance"], 2))
+        # Always use the monitor's own cumulative balance for the row — never the
+        # trader-emitted one. A trader RESTART resets its balance to the bankroll,
+        # which otherwise makes the newest row jump (e.g. $64 -> $100) while the
+        # account panel stays correct. Monitor-cumulative keeps them in sync.
+        ev["balance"] = round(state["balance"], 2)
+        state["open_positions"].pop(ev.get("round"), None)  # closed -> no longer open
         state["recent"].append(ev)
         state["recent"] = state["recent"][-RECENT_N:]
     return state
@@ -197,6 +208,30 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
                      f"{p.c(str(entered), GREEN)} entered   "
                      f"{p.c(str(state.get('total_skips', 0)), GREY)} skipped "
                      f"({rate:.0%})")
+
+    # Open positions: entered and waiting for the round to close. This is where
+    # you watch a trade the moment it's placed, before it wins or loses.
+    opens = state.get("open_positions", {})
+    lines.append(p.c("  " + "─" * 56, GREY))
+    lines.append(p.c(f"  open positions ({len(opens)} live) — entered, awaiting close", BOLD))
+    if opens:
+        for rnd in sorted(opens):
+            e = opens[rnd]
+            clk = time.strftime("%H:%M:%S", time.localtime(e.get("ts", 0)))
+            side = e.get("side", "?")
+            col = GREEN if side == "UP" else RED
+            ep = e.get("entry_price")
+            cost = f"@{ep:.2f}" if ep is not None else "  -  "
+            conf = e.get("confidence")
+            conf_s = f"conf {conf:.2f}" if conf is not None else ""
+            stake = e.get("stake_usd")
+            stake_s = f"${stake:.2f}" if stake is not None else ""
+            big = p.c(" BIG", YELLOW, BOLD) if e.get("big_bet") else ""
+            side_s = p.c(f"{side:<5}", col, BOLD)
+            lines.append(f"   {clk}  {p.c('ENTER', col, BOLD)} {side_s} "
+                         f"{cost:<7}{stake_s:<8}{conf_s}{big}")
+    else:
+        lines.append(p.c("   (none open — waiting for the next ARMED signal)", GREY))
 
     lines.append(p.c("  " + "─" * 56, GREY))
     lines.append(p.c("  recent settles (newest first)", BOLD))
