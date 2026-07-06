@@ -96,8 +96,18 @@ def _side_and_price(s: dict[str, Any], side_source: str, min_conf: Optional[floa
     return side, float(price)
 
 
+def taker_fee_frac(price: float, fee_rate: float) -> float:
+    """Polymarket taker fee as a fraction of the dollars STAKED.
+
+    Per the fee schedule fee = contracts * rate * p * (1-p); staking $1 buys
+    1/price contracts, so fee/stake = rate * (1 - price). Largest near p=0.5,
+    negligible near the extremes. Makers pay zero (post limit orders instead)."""
+    return fee_rate * (1.0 - price)
+
+
 def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_BINS,
-            side_source: str = "move", min_conf: Optional[float] = None) -> list[dict[str, Any]]:
+            side_source: str = "move", min_conf: Optional[float] = None,
+            fee_rate: float = 0.0) -> list[dict[str, Any]]:
     samples, results = _split(events)
     rows = []
     for lo, hi in bins:
@@ -123,9 +133,12 @@ def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_
             avg_price = sum(p for _, p in recs) / n
             # EV per $1 staked = (winrate - price)/price; edge = winrate - price.
             ev_pct = (wr - avg_price) / avg_price if avg_price else 0.0
+            fee = taker_fee_frac(avg_price, fee_rate)   # per $1 staked (0 if maker/no fee)
+            net_ev = ev_pct - fee
             rows.append({"offset": [lo, hi], "n": n, "winrate": round(wr, 4),
                          "avg_price": round(avg_price, 4), "edge": round(wr - avg_price, 4),
-                         "ev_pct": round(ev_pct, 4)})
+                         "ev_pct": round(ev_pct, 4), "fee_pct": round(fee, 4),
+                         "net_ev_pct": round(net_ev, 4)})
     return rows
 
 
@@ -164,30 +177,45 @@ def confidence_bands(events: list[dict[str, Any]], ref_sec: float = 120.0,
     return rows
 
 
-def _print_offsets(rows, side_source, min_conf):
+def _print_offsets(rows, side_source, min_conf, fee_rate):
     tag = f"side={side_source}" + (f" min-conf={min_conf}" if min_conf is not None else "")
-    print("=" * 68)
+    fee_on = fee_rate > 0
+    if fee_on:
+        tag += f" taker-fee-rate={fee_rate}"
+    print("=" * 74)
     print(f"ENTRY-TIME ANALYSIS  ({tag})")
-    print("=" * 68)
+    print("=" * 74)
     if not rows:
         print("no complete rounds match — let scripts/btc_record.py run longer"
               + (" (or lower --min-conf)." if min_conf is not None else "."))
         return
-    print(f"  {'sec left':<12}{'n':<6}{'winrate':<10}{'avg price':<11}{'edge':<9}{'EV/trade'}")
-    for r in rows:
-        print(f"  {str(r['offset']):<12}{r['n']:<6}{r['winrate']:<10.1%}{r['avg_price']:<11.3f}"
-              f"{r['edge']:<+9.3f}{r['ev_pct']:+.1%}")
-    best = max(rows, key=lambda r: r["edge"])
-    print("-" * 68)
-    if best["edge"] > 0:
+    if fee_on:
+        print(f"  {'sec left':<12}{'n':<6}{'winrate':<10}{'avg price':<11}"
+              f"{'grossEV':<10}{'fee':<9}{'NET EV/trade'}")
+        for r in rows:
+            print(f"  {str(r['offset']):<12}{r['n']:<6}{r['winrate']:<10.1%}{r['avg_price']:<11.3f}"
+                  f"{r['ev_pct']:<+10.1%}{r['fee_pct']:<9.1%}{r['net_ev_pct']:+.1%}")
+        key, label = "net_ev_pct", "NET EV (after taker fee)"
+    else:
+        print(f"  {'sec left':<12}{'n':<6}{'winrate':<10}{'avg price':<11}{'edge':<9}{'EV/trade'}")
+        for r in rows:
+            print(f"  {str(r['offset']):<12}{r['n']:<6}{r['winrate']:<10.1%}{r['avg_price']:<11.3f}"
+                  f"{r['edge']:<+9.3f}{r['ev_pct']:+.1%}")
+        key, label = "ev_pct", "EV"
+    best = max(rows, key=lambda r: r[key])
+    print("-" * 74)
+    if best[key] > 0:
         print(f"BEST entry: {best['offset'][0]}-{best['offset'][1]}s left  ->  "
               f"winrate {best['winrate']:.0%} @ price {best['avg_price']:.2f}  "
-              f"edge {best['edge']:+.3f}  (EV {best['ev_pct']:+.1%}/trade)")
+              f"{label} {best[key]:+.1%}/trade")
         print("Earlier = cheaper but less certain; this offset balances the two best.")
     else:
-        print("EVERY entry time has NEGATIVE edge -> the market is efficiently priced;")
-        print("no entry timing makes this rule profitable on this data.")
-    print("=" * 68)
+        neg = "NET (after fee) " if fee_on else ""
+        print(f"EVERY entry time has NEGATIVE {neg}EV -> the market is efficiently priced;")
+        print("no entry timing makes this taker rule profitable on this data.")
+        if fee_on:
+            print("(The taker fee only widens the loss — the maker side is the structural fix.)")
+    print("=" * 74)
 
 
 def _print_bands(rows, ref_sec):
@@ -232,6 +260,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Instead of the entry-time table, show edge bucketed by indicator confidence")
     ap.add_argument("--conf-offset", type=float, default=120.0,
                     help="Seconds-left decision point for --by-confidence (default 120)")
+    ap.add_argument("--fee-rate", type=float, default=0.0,
+                    help="Polymarket TAKER fee rate (fee=contracts*rate*p*(1-p)). 0=off. "
+                         "Read the REAL rate from the CLOB market data, don't hardcode. Makers pay 0.")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -244,11 +275,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         _print_bands(rows, args.conf_offset)
         return 0
 
-    rows = analyze(events, side_source=args.side, min_conf=args.min_conf)
+    rows = analyze(events, side_source=args.side, min_conf=args.min_conf, fee_rate=args.fee_rate)
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
-    _print_offsets(rows, args.side, args.min_conf)
+    _print_offsets(rows, args.side, args.min_conf, args.fee_rate)
     return 0
 
 
