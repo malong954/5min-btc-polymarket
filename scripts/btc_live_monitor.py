@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from typing import Any, Optional
@@ -30,7 +31,8 @@ RED = "\033[31m"
 YELLOW = "\033[33m"
 CYAN = "\033[36m"
 GREY = "\033[90m"
-CLEAR = "\033[H\033[J"  # cursor home + clear to end
+CLEAR = "\033[H\033[J"          # cursor home + clear to end
+CLEAR_SCROLLBACK = "\033[3J"    # also drop scrollback so old frames can't stack
 HIDE_CURSOR = "\033[?25l"
 SHOW_CURSOR = "\033[?25h"
 
@@ -170,10 +172,17 @@ def _activity_row(ev: dict[str, Any], p: Painter) -> str:
         reason = ev.get("reason", "") or "below_threshold"
         conf = ev.get("confidence")
         conf_s = f"conf {conf:.2f}" if conf is not None else "conf  -  "  # show conf even on skips
+        # The SHADOW call: what it WOULD have bet had the threshold allowed it.
+        side = ev.get("side")
+        if side in ("UP", "DOWN"):
+            scol = GREEN if side == "UP" else RED
+            side_s = p.c(f"{side + '?':<6}", scol)
+        else:
+            side_s = " " * 6
         note = ev.get("note")
         note_s = p.c(f"  [{note}]", GREY) if note else ""   # why: high RSI, hidden divergence, ...
-        return (f"   {clk}  {p.c('SKIP ', GREY, BOLD)} {p.c(f'{reason:<16}', GREY)} "
-                f"{p.c(conf_s, GREY)}{note_s}")
+        return (f"   {clk}  {p.c('SKIP ', GREY, BOLD)} {side_s}"
+                f"{p.c(f'{reason:<16}', GREY)} {p.c(conf_s, GREY)}{note_s}")
     # settle
     win = ev.get("result") == "win"
     col = GREEN if win else RED
@@ -191,7 +200,8 @@ def _activity_row(ev: dict[str, Any], p: Painter) -> str:
             f"{p.c(f'{pnl_str:<8}', col, BOLD)} {bal_s}")
 
 
-def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
+def render(state: dict[str, Any], entry_price: float, p: Painter,
+           max_rows: Optional[int] = None) -> str:
     hb = state["last_hb"] or {}
     pred = state["last_pred"] or {}
     trades = state["trades"]
@@ -277,7 +287,10 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
     lines.append(p.c("  " + "─" * 56, GREY))
     lines.append(p.c(f"  open positions ({len(opens)} live) — entered, awaiting close", BOLD))
     if opens:
-        for rnd in sorted(opens):
+        show = sorted(opens)[-4:]           # cap; >1-2 live is abnormal anyway
+        if len(opens) > len(show):
+            lines.append(p.c(f"   … {len(opens) - len(show)} older not shown", GREY))
+        for rnd in show:
             e = opens[rnd]
             clk = time.strftime("%H:%M:%S", time.localtime(e.get("ts", 0)))
             side = e.get("side", "?")
@@ -299,6 +312,12 @@ def render(state: dict[str, Any], entry_price: float, p: Painter) -> str:
     # newest first. Bounded to --recent for the live redraw; the FULL history is
     # `scripts/btc_live_monitor.py --history` (or `start.sh history`).
     recent_n = state.get("recent_n", RECENT_N)
+    # Fit the frame inside the terminal: if it would scroll, the in-place redraw
+    # stacks stale frames in scrollback instead of updating one panel. Shrink
+    # the activity list so header + feed + footer always fit the window height.
+    if max_rows:
+        budget = max_rows - len(lines) - 5   # activity header + footer + margin
+        recent_n = max(3, min(recent_n, budget))
     act = state.get("activity", [])
     e = state.get("total_entries", 0)
     w = state.get("total_wins", 0)
@@ -421,8 +440,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         while True:
             refresh()
-            frame = render(state, args.entry_price, painter)
-            sys.stdout.write(CLEAR + frame)
+            term = shutil.get_terminal_size(fallback=(100, 40))
+            frame = render(state, args.entry_price, painter, max_rows=term.lines)
+            sys.stdout.write(CLEAR + CLEAR_SCROLLBACK + frame)
             sys.stdout.flush()
             time.sleep(args.interval)
     except KeyboardInterrupt:
