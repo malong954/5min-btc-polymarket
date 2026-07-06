@@ -38,6 +38,60 @@ def bucket_5m(ts: int) -> int:
     return ts - (ts % 300)
 
 
+def _rnd(v: Any, nd: int) -> Optional[float]:
+    return round(v, nd) if isinstance(v, (int, float)) else None
+
+
+def feature_snapshot(sig: Any) -> dict[str, Any]:
+    """Compact, analysis-ready dump of the indicator readings behind a signal —
+    logged on every prediction/entry/skip so the timeline can be correlated with
+    outcomes later (RSI, MACD, Bollinger, ROC, divergence, EMA trend, volume,
+    agreement)."""
+    f = sig.features
+    return {
+        "rsi_1m": _rnd(f.get("rsi_1m"), 1),
+        "macd_hist_1m": _rnd(f.get("macd_hist_1m"), 4),
+        "bb_pctb_1m": _rnd(f.get("bb_pctb_1m"), 3),
+        "roc_1m": _rnd(f.get("roc_1m"), 5),
+        "divergence": f.get("divergence_type"),            # e.g. 'regular_bearish'
+        "div_signal": _rnd(f.get("sub_divergence_1m"), 0),  # -1 / 0 / +1
+        "ema_gap_5m": _rnd(f.get("ema_gap_5m"), 2),
+        "ema_gap_15m": _rnd(f.get("ema_gap_15m"), 2),
+        "rel_volume_1m": _rnd(f.get("rel_volume_1m"), 2),
+        "agreement": _rnd(f.get("agreement"), 3),
+        "vol_factor": _rnd(f.get("vol_factor"), 3),
+        "btc_move_usd": _rnd(f.get("btc_move_usd"), 2),
+        "score": _rnd(sig.score, 4),
+    }
+
+
+def describe_signal(sig: Any) -> str:
+    """Human-readable reason string, e.g. 'high RSI 72, regular bearish, MACD-,
+    move +45, agree 80%'. Logged even on skips so every round in the timeline
+    carries what the bot saw and would have done."""
+    f = sig.features
+    parts: list[str] = []
+    if sig.direction:
+        parts.append(f"lean {sig.direction}")
+    rsi = f.get("rsi_1m")
+    if isinstance(rsi, (int, float)):
+        tag = "high RSI" if rsi >= 70 else "low RSI" if rsi <= 30 else "RSI"
+        parts.append(f"{tag} {rsi:.0f}")
+    div = f.get("divergence_type")
+    if div:
+        parts.append(div.replace("_", " "))
+    mh = f.get("macd_hist_1m")
+    if isinstance(mh, (int, float)):
+        parts.append("MACD+" if mh > 0 else "MACD-")
+    mv = f.get("btc_move_usd")
+    if isinstance(mv, (int, float)):
+        parts.append(f"move {mv:+.0f}")
+    ag = f.get("agreement")
+    if isinstance(ag, (int, float)):
+        parts.append(f"agree {ag:.0%}")
+    return ", ".join(parts)
+
+
 class LivePaperEngine:
     """Deterministic core: feed it (now, recent_1m_bars) via step() and it emits
     events and maintains paper-trade state. No network or clock of its own, so it
@@ -80,6 +134,10 @@ class LivePaperEngine:
         self.decided: set[int] = set()          # rounds we've made a call on
         self.positions: dict[int, dict[str, Any]] = {}
         self.settled: set[int] = set()
+        # Shadow book: rounds we PREDICTED but skipped. We settle them too (no
+        # money) so the timeline records whether each skip was correct.
+        self.shadows: dict[int, dict[str, Any]] = {}
+        self.shadow_settled: set[int] = set()
         self.stats = {"trades": 0, "wins": 0, "pnl": 0.0, "pnl_usd": 0.0}
 
     @property
@@ -135,18 +193,40 @@ class LivePaperEngine:
                 "winrate": round(self.stats["wins"] / self.stats["trades"], 4),
             }))
 
+        # 1b) Settle SHADOW rounds (predicted but skipped) — no money, just record
+        # whether the call would have won, so skips are analyzable after the fact.
+        for rs in sorted(self.shadows):
+            if rs in self.shadow_settled or now < rs + 300:
+                continue
+            actual = outcome_direction(model, rs)
+            if actual not in ("UP", "DOWN"):
+                continue
+            sh = self.shadows[rs]
+            would_win = sh["side"] == actual
+            self.shadow_settled.add(rs)
+            events.append(self._emit({
+                "ts": int(now), "type": "shadow_settle", "round": rs,
+                "side": sh["side"], "actual": actual,
+                "result": "win" if would_win else "loss",
+                "reason": sh.get("reason"), "confidence": sh.get("confidence"),
+                "features": sh.get("features"), "note": sh.get("note"),
+            }))
+
         # 2) One prediction / entry decision per round, inside the entry window.
         if cur not in self.decided and self.min_entry_sec <= sec_left <= self.entry_window_sec:
             sig = model.evaluate(cur)
             if sig is not None:
                 self.decided.add(cur)
                 rsi = sig.features.get("rsi_1m")
+                feat = feature_snapshot(sig)
+                note = describe_signal(sig)
                 events.append(self._emit({
                     "ts": int(now), "type": "prediction", "round": cur,
                     "seconds_left": round(sec_left, 1), "direction": sig.direction,
                     "confidence": round(sig.confidence, 4), "score": round(sig.score, 4),
                     "btc_move_usd": round(sig.features.get("btc_move_usd", 0.0), 2),
                     "rsi_1m": round(rsi, 1) if rsi is not None else None,
+                    "features": feat, "note": note,
                 }))
                 if sig.direction and sig.confidence >= self.entry_threshold:
                     from btc_sizing import stake_for
@@ -154,10 +234,15 @@ class LivePaperEngine:
                     real = entry_prices.get(sig.direction) if entry_prices else None
                     real_ok = isinstance(real, (int, float)) and 0.0 < real < 1.0
                     if self.require_market_price and not real_ok:
+                        if sig.direction:
+                            self.shadows[cur] = {"side": sig.direction, "reason": "no_market_price",
+                                                 "confidence": round(sig.confidence, 4),
+                                                 "features": feat, "note": note}
                         events.append(self._emit({
                             "ts": int(now), "type": "skip", "round": cur,
                             "reason": "no_market_price", "side": sig.direction,
                             "confidence": round(sig.confidence, 4),
+                            "features": feat, "note": note,
                         }))
                         return events
                     ep = float(real) if real_ok else self.entry_price
@@ -182,12 +267,22 @@ class LivePaperEngine:
                         "confidence": round(sig.confidence, 4),
                         "stake_usd": stake, "sizing": self.sizing, "big_bet": big,
                         "balance": round(self.balance, 2),
+                        "features": feat, "note": note,
                     }))
                 else:
+                    # Skipped: still log the SHADOW decision (side it would have
+                    # taken) + reason + full features, so a skipped round is just
+                    # as analyzable as a traded one — and register it to settle.
+                    reason = "below_threshold" if sig.direction else "no_direction"
+                    if sig.direction:
+                        self.shadows[cur] = {"side": sig.direction, "reason": reason,
+                                             "confidence": round(sig.confidence, 4),
+                                             "features": feat, "note": note}
                     events.append(self._emit({
                         "ts": int(now), "type": "skip", "round": cur,
-                        "reason": "below_threshold" if sig.direction else "no_direction",
-                        "confidence": round(sig.confidence, 4),
+                        "reason": reason,
+                        "side": sig.direction, "confidence": round(sig.confidence, 4),
+                        "features": feat, "note": note,
                     }))
 
         # 3) Heartbeat with the live price and the intra-round move building.

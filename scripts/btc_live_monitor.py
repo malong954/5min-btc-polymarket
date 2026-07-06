@@ -162,14 +162,18 @@ def _activity_row(ev: dict[str, Any], p: Painter) -> str:
         stake = ev.get("stake_usd")
         stake_s = f"${stake:.2f}" if stake is not None else ""
         big = p.c(" BIG", YELLOW, BOLD) if ev.get("big_bet") else ""
+        note = ev.get("note")
+        note_s = p.c(f"  [{note}]", GREY) if note else ""
         return (f"   {clk}  {p.c('ENTER', CYAN, BOLD)} {p.c(f'{side:<5}', col, BOLD)} "
-                f"{cost:<7}{stake_s:<8}{conf_s}{big}")
+                f"{cost:<7}{stake_s:<8}{conf_s}{big}{note_s}")
     if t == "skip":
         reason = ev.get("reason", "") or "below_threshold"
         conf = ev.get("confidence")
         conf_s = f"conf {conf:.2f}" if conf is not None else "conf  -  "  # show conf even on skips
+        note = ev.get("note")
+        note_s = p.c(f"  [{note}]", GREY) if note else ""   # why: high RSI, hidden divergence, ...
         return (f"   {clk}  {p.c('SKIP ', GREY, BOLD)} {p.c(f'{reason:<16}', GREY)} "
-                f"{p.c(conf_s, GREY)}")
+                f"{p.c(conf_s, GREY)}{note_s}")
     # settle
     win = ev.get("result") == "win"
     col = GREEN if win else RED
