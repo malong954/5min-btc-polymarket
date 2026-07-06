@@ -2,7 +2,8 @@
 """Offline tests for the entry-timing analyzer. Run:
     python3 scripts/test_btc_entry_timing.py"""
 
-from btc_entry_timing import analyze, confidence_bands, crossing_analysis, fade_analysis
+from btc_entry_timing import (analyze, confidence_bands, crossing_analysis,
+                              edge_gate_analysis, fade_analysis)
 
 
 def check(desc, cond):
@@ -179,6 +180,25 @@ def test_crossing_first_moment():
     check("crossing avg sec_left ordered", by[0.5]["avg_sec_left"] > by[0.9]["avg_sec_left"])
 
 
+def test_edge_gate_price_is_hurdle():
+    # Round shape: early sample conf 0.85 at ask 0.70 (conf clears ask), late
+    # sample conf 0.95 at ask 0.98 (conf can NEVER clear). Margin 0 must buy the
+    # EARLY cheap moment; margin 0.20 must find no qualifying moment at all.
+    evs = []
+    for i in range(10):
+        evs.append({"type": "sample", "round": i, "sec_left": 120, "move": 20,
+                    "up_ask": 0.70, "dn_ask": 0.30, "ind_dir": "UP", "ind_conf": 0.85})
+        evs.append({"type": "sample", "round": i, "sec_left": 60, "move": 40,
+                    "up_ask": 0.98, "dn_ask": 0.02, "ind_dir": "UP", "ind_conf": 0.95})
+        evs.append({"type": "result", "round": i, "outcome": "UP"})
+    rows = edge_gate_analysis(evs, margins=[0.0, 0.20])
+    by = {r["margin"]: r for r in rows}
+    check("edge-gate margin 0 buys the cheap qualifying moment",
+          by[0.0]["n"] == 10 and abs(by[0.0]["avg_price"] - 0.70) < 1e-9)
+    check("edge-gate buys early (120s left)", by[0.0]["avg_sec_left"] == 120)
+    check("edge-gate huge margin finds nothing", by[0.20]["n"] == 0)
+
+
 def test_empty_and_missing():
     check("empty log -> no rows", analyze([]) == [])
     # samples without a result round are ignored.
@@ -195,6 +215,7 @@ def main():
     test_fade_divergence()
     test_fade_no_setups()
     test_crossing_first_moment()
+    test_edge_gate_price_is_hurdle()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")
 

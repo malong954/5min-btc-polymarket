@@ -114,7 +114,16 @@ class LivePaperEngine:
         big_mult: float = 1.0,
         confluence: float = 0.0,
         require_market_price: bool = False,
+        entry_rule: str = "threshold",
+        edge_margin: float = 0.03,
     ):
+        # entry_rule 'threshold': enter when confidence >= entry_threshold.
+        # entry_rule 'edge': enter when confidence >= THE ASK + edge_margin —
+        # the market price is the hurdle, so expensive (near-decided) rounds
+        # demand near-certainty while cheap early asks need only modest
+        # conviction. Edge = our probability minus their price, made literal.
+        self.entry_rule = entry_rule
+        self.edge_margin = edge_margin
         self.require_market_price = require_market_price
         self.sizing = sizing
         self.stake_pct = stake_pct
@@ -347,7 +356,15 @@ class LivePaperEngine:
                     if conf > self.watch["conf"]:   # peak snapshot for the skip record
                         self.watch.update({"side": sig.direction, "conf": conf,
                                            "features": feat, "note": note})
-                if sig.direction and sig.confidence >= self.entry_threshold:
+                if self.entry_rule == "edge":
+                    # Hurdle = the live ask + margin. No valid ask this poll ->
+                    # not armed; the live loop just re-checks next poll.
+                    ask = entry_prices.get(sig.direction) if (entry_prices and sig.direction) else None
+                    armed = (isinstance(ask, (int, float)) and 0.0 < ask < 1.0
+                             and sig.confidence >= ask + self.edge_margin)
+                else:
+                    armed = bool(sig.direction) and sig.confidence >= self.entry_threshold
+                if armed:
                     ev = self._try_enter(cur, now, sig.direction, sig.confidence,
                                          feat, note, entry_prices, sec_left=sec_left)
                     if ev is not None:
@@ -438,7 +455,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="1m data source for live prediction")
     ap.add_argument("--poll", type=float, default=2.0, help="Seconds between polls (live spot price ticks at this cadence)")
     ap.add_argument("--klines-every", type=float, default=15.0, help="Seconds between the heavier 1m-kline/indicator refreshes")
-    ap.add_argument("--entry-threshold", type=float, default=0.60, help="Min confidence to open a paper position")
+    ap.add_argument("--entry-threshold", type=float, default=0.60, help="Min confidence to open a paper position (entry-rule threshold)")
+    ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge"],
+                    help="threshold: conf >= --entry-threshold | edge: conf >= live ask + --edge-margin (the price is the hurdle)")
+    ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
     ap.add_argument("--entry-window", type=float, default=150.0, help="Start deciding when this many seconds remain in the round")
     ap.add_argument("--min-entry", type=float, default=30.0, help="Stop entering/retrying prices below this many seconds left")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
@@ -472,6 +492,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         bankroll=args.bankroll, stake_usd=args.stake_usd, sizing=args.sizing,
         stake_pct=args.stake_pct, big_conf=args.big_conf, big_mult=args.big_mult,
         confluence=args.confluence, require_market_price=use_pm,
+        entry_rule=args.entry_rule, edge_margin=args.edge_margin,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")

@@ -16,6 +16,8 @@
 #   scripts/lab.sh stop         stop everything
 #
 # Tunables (env): PROVIDER=binance THRESHOLD=0.60 STAKE=10 BANKROLL=100
+#                 RULE=threshold|edge EDGE_MARGIN=0.03
+#   RULE=edge enters when confidence >= live ask + EDGE_MARGIN (price = hurdle).
 #
 set -euo pipefail
 
@@ -25,6 +27,8 @@ TLOG="out/live.jsonl"        # trader stream
 RLOG="out/trajectory.jsonl"  # recorder stream
 PROVIDER="${PROVIDER:-binance}"
 THRESHOLD="${THRESHOLD:-0.60}"
+RULE="${RULE:-threshold}"
+EDGE_MARGIN="${EDGE_MARGIN:-0.03}"
 STAKE="${STAKE:-10}"
 BANKROLL="${BANKROLL:-100}"
 
@@ -65,6 +69,8 @@ case "${1:-start}" in
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-confidence     || true
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --crossing          || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --edge-gate         || true
       echo
       for v in vel_15s vel_30s; do
         "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side "$v"       || true
@@ -108,11 +114,16 @@ else
   [ -f "$TLOG" ] && mv "$TLOG" "out/live-prev.jsonl" && echo "archived prior session -> out/live-prev.jsonl"
   nohup "$PY" scripts/btc_live_paper.py \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
+    --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" \
     --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
     >> out/nohup.log 2>&1 &
-  echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing"
+  if [ "$RULE" = "edge" ]; then
+    echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
+  else
+    echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${THRESHOLD})"
+  fi
 fi
 
 echo

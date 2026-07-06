@@ -257,6 +257,94 @@ def _print_crossing(rows: list[dict[str, Any]]) -> None:
     print("=" * 74)
 
 
+EDGE_MARGINS = [0.0, 0.02, 0.05, 0.10]
+
+
+def edge_gate_analysis(events: list[dict[str, Any]],
+                       margins: list[float] = EDGE_MARGINS,
+                       fee_rate: float = 0.0) -> list[dict[str, Any]]:
+    """EDGE-GATE rule: enter at the FIRST moment confidence >= ask + margin —
+    the market price itself is the hurdle. Expensive near-decided rounds demand
+    near-certainty; cheap early asks need only modest conviction. This is
+    'edge = our probability minus their price' as an entry rule; the table
+    shows which margin (if any) is profitable."""
+    samples: dict[int, list[dict[str, Any]]] = {}
+    results: dict[int, dict[str, Any]] = {}
+    for e in events:
+        t = e.get("type")
+        if t == "sample":
+            samples.setdefault(e["round"], []).append(e)
+        elif t == "result":
+            results[e["round"]] = e
+
+    rows = []
+    for m in margins:
+        recs: list[tuple[bool, float, float]] = []   # (won, price, sec_left)
+        for r, samps in samples.items():
+            res = results.get(r)
+            if not res:
+                continue
+            for s in sorted(samps, key=lambda q: -(q.get("sec_left") or 0)):
+                c = s.get("ind_conf")
+                side = s.get("ind_dir")
+                if c is None or side not in ("UP", "DOWN"):
+                    continue
+                price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
+                if not isinstance(price, (int, float)) or not (0.0 < price < 1.0):
+                    continue
+                if c >= price + m:
+                    recs.append((side == res["outcome"], float(price),
+                                 float(s.get("sec_left") or 0)))
+                    break   # first qualifying moment only
+        if recs:
+            n = len(recs)
+            wr = sum(1 for w, _, _ in recs if w) / n
+            avg_price = sum(p for _, p, _ in recs) / n
+            avg_sl = sum(sl for _, _, sl in recs) / n
+            ev = (wr - avg_price) / avg_price if avg_price else 0.0
+            fee = taker_fee_frac(avg_price, fee_rate)
+            rows.append({"margin": m, "n": n, "winrate": round(wr, 4),
+                         "avg_price": round(avg_price, 4),
+                         "avg_sec_left": round(avg_sl, 1),
+                         "edge": round(wr - avg_price, 4),
+                         "ev_pct": round(ev, 4), "fee_pct": round(fee, 4),
+                         "net_ev_pct": round(ev - fee, 4)})
+        else:
+            rows.append({"margin": m, "n": 0})
+    return rows
+
+
+def _print_edge_gate(rows: list[dict[str, Any]]) -> None:
+    print("=" * 74)
+    print("EDGE-GATE ANALYSIS  (enter when confidence >= ask + margin)")
+    print("=" * 74)
+    traded = [r for r in rows if r.get("n")]
+    if not traded:
+        print("no qualifying moments yet — either not enough recorder data, or our")
+        print("confidence never exceeds the ask (the book stays ahead of the model).")
+        print("=" * 74)
+        return
+    print(f"  {'margin':<9}{'n':<5}{'avg sec left':<14}{'winrate':<10}{'price then':<12}"
+          f"{'edge':<9}{'NET EV'}")
+    for r in rows:
+        if not r.get("n"):
+            print(f"  {r['margin']:<9.2f}0    (no moment where conf cleared ask+margin)")
+            continue
+        print(f"  {r['margin']:<9.2f}{r['n']:<5}{r['avg_sec_left']:<14.0f}{r['winrate']:<10.1%}"
+              f"{r['avg_price']:<12.3f}{r['edge']:<+9.3f}{r['net_ev_pct']:+.1%}")
+    best = max(traded, key=lambda r: r["net_ev_pct"])
+    print("-" * 74)
+    if best["net_ev_pct"] > 0:
+        print(f"BEST margin so far: {best['margin']:.2f}  ->  win {best['winrate']:.0%} "
+              f"@ {best['avg_price']:.2f} (~{best['avg_sec_left']:.0f}s left), "
+              f"NET {best['net_ev_pct']:+.1%}/trade")
+        print(f"Run the trader with it:  RULE=edge EDGE_MARGIN={best['margin']:.2f} scripts/lab.sh")
+    else:
+        print("Every margin is NEGATIVE -> when our confidence clears the ask, we're")
+        print("still wrong too often; the model's conviction isn't beating the book.")
+    print("=" * 74)
+
+
 def fade_analysis(events: list[dict[str, Any]], ref_lo: float = 60.0, ref_hi: float = 150.0,
                   max_price: float = 0.40, min_price: float = 0.03,
                   fee_rate: float = 0.0) -> dict[str, Any]:
@@ -418,6 +506,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="E3: trailing-side divergence fade — buy the CHEAP side when divergence opposes the move")
     ap.add_argument("--crossing", action="store_true",
                     help="First-crossing table: buy at the first moment confidence reaches each threshold")
+    ap.add_argument("--edge-gate", action="store_true",
+                    help="Edge-gate table: buy at the first moment confidence >= ask + margin (price as hurdle)")
     ap.add_argument("--conf-offset", type=float, default=120.0,
                     help="Seconds-left decision point for --by-confidence (default 120)")
     ap.add_argument("--fee-rate", type=float, default=0.0,
@@ -427,6 +517,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     events = load(args.log)
+    if args.edge_gate:
+        rows = edge_gate_analysis(events, fee_rate=args.fee_rate)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        _print_edge_gate(rows)
+        return 0
     if args.crossing:
         rows = crossing_analysis(events, fee_rate=args.fee_rate)
         if args.json:
