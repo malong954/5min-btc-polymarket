@@ -4,8 +4,14 @@
 # efficiently priced, or is there exploitable mispricing (a lagging/thin book)?
 #
 # Uses REAL per-trade Polymarket pricing, a FLAT stake (so every trade weighs
-# equally in the EV), NO confidence tiering, NO percent compounding, and a
-# moderate threshold. Logs to a dedicated file so nothing contaminates it.
+# equally in the EV), NO confidence tiering, NO percent compounding, and a LOW
+# threshold. Logs to a dedicated file so nothing contaminates it.
+#
+# Threshold is deliberately LOW (0.50) here: this is a MEASUREMENT run, not a
+# trading run. A low bar takes many rounds across the whole confidence range so
+# `analyze` / --by-confidence can show whether ANY confidence band is actually
+# profitable. Do NOT read the flat P/L of this run as "the strategy" — read the
+# per-band edge. (For an actual trading config use scripts/start.sh, flat $10.)
 #
 #   scripts/measure.sh            # start the measurement run (background)
 #   scripts/measure.sh status     # is it running? how many trades so far?
@@ -13,14 +19,14 @@
 #   scripts/measure.sh dash       # live color dashboard for this run
 #   scripts/measure.sh stop       # stop it
 #
-# Tunables (env): THRESHOLD=0.60  STAKE=10  PROVIDER=binance|cryptocompare
+# Tunables (env): THRESHOLD=0.50  STAKE=10  PROVIDER=binance|cryptocompare
 #
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root
 PY=".venv/bin/python"
 LOG="out/measure.jsonl"
-THRESHOLD="${THRESHOLD:-0.60}"
+THRESHOLD="${THRESHOLD:-0.50}"
 STAKE="${STAKE:-10}"
 PROVIDER="${PROVIDER:-binance}"
 
@@ -64,7 +70,8 @@ nohup "$PY" scripts/btc_live_paper.py \
   >> out/measure-nohup.log 2>&1 &
 
 echo "started CLEAN measurement run (pid $!)"
-echo "  real pricing, flat \$${STAKE} stake, threshold ${THRESHOLD}, no tiering"
+echo "  real pricing, flat \$${STAKE} stake, threshold ${THRESHOLD} (LOW = samples the whole"
+echo "  confidence range for measurement), no tiering"
 echo "  log: $LOG"
 echo
 echo "let it run 1-2 days, then:"

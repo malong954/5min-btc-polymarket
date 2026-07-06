@@ -81,6 +81,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             return None, None, None
         return sig.direction, round(sig.confidence, 4), round(sig.score, 4)
 
+    # Rolling spot buffer -> sub-minute velocity (dollars moved over the last
+    # N seconds). This is the "faster timeframe" signal: does a 5s/15s/30s BTC
+    # move lead the settle beyond what the order-book price already reflects?
+    spot_buf: list = []   # (ts, spot), newest last
+
+    def push_spot(ts: float, px: float) -> None:
+        spot_buf.append((ts, px))
+        cutoff = ts - 120.0
+        while len(spot_buf) > 2 and spot_buf[0][0] < cutoff:
+            spot_buf.pop(0)
+
+    def velocity(now: float, window: float):
+        """Dollars BTC moved over the last `window` seconds (spot_now - spot_then),
+        using the buffered sample closest to now-window. None if not enough span."""
+        if len(spot_buf) < 2:
+            return None
+        target = now - window
+        older = [s for s in spot_buf if s[0] <= target]
+        ref = older[-1] if older else spot_buf[0]
+        if now - ref[0] < window * 0.5:   # not enough history to fill the window
+            return None
+        return round(spot_buf[-1][1] - ref[1], 2)
+
     def emit(o: dict) -> None:
         logf.write(json.dumps(o, separators=(",", ":")) + "\n")
         logf.flush()
@@ -112,6 +135,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 spot = feed.spot()
                 if spot is not None:
                     last_spot = spot
+                    push_spot(now, spot)
                 in_window = args.min_left <= sec_left <= args.max_left
                 # Refresh the heavier 1m klines periodically (and lazily on first use),
                 # so the indicator signal stays current without a fetch every poll.
@@ -129,6 +153,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                               "move": round(spot - round_open, 2), "spot": round(spot, 2),
                               "up_ask": pm.get("UP"), "dn_ask": pm.get("DOWN"),
                               "ind_dir": idir, "ind_conf": iconf, "ind_score": iscore,
+                              "vel_5s": velocity(now, 5), "vel_15s": velocity(now, 15),
+                              "vel_30s": velocity(now, 30), "vel_60s": velocity(now, 60),
                               "ts": int(now)})
             except Exception as e:
                 print(f"# record error: {e}", file=sys.stderr)

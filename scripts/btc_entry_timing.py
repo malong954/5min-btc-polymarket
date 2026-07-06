@@ -66,9 +66,12 @@ def _split(events: list[dict[str, Any]]):
     return samples, results
 
 
+VEL_FIELDS = {"vel_5s": "vel_5s", "vel_15s": "vel_15s", "vel_30s": "vel_30s", "vel_60s": "vel_60s"}
+
+
 def _side_and_price(s: dict[str, Any], side_source: str, min_conf: Optional[float]):
     """Resolve (side, price) for one sample under the chosen rule, or (None, None)
-    to skip it."""
+    to skip it. side_source: move | indicator | vel_5s | vel_15s | vel_30s | vel_60s."""
     if side_source == "indicator":
         if min_conf is not None:
             c = s.get("ind_conf")
@@ -77,6 +80,11 @@ def _side_and_price(s: dict[str, Any], side_source: str, min_conf: Optional[floa
         side = s.get("ind_dir")
         if side not in ("UP", "DOWN"):
             return None, None
+    elif side_source in VEL_FIELDS:
+        v = s.get(VEL_FIELDS[side_source])
+        if v is None or v == 0:
+            return None, None
+        side = "UP" if v > 0 else "DOWN"
     else:
         move = s.get("move", 0.0)
         if move == 0:
@@ -214,8 +222,10 @@ def _print_bands(rows, ref_sec):
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Optimal entry-time + confidence-band analysis from a trajectory log")
     ap.add_argument("--log", default="out/trajectory.jsonl")
-    ap.add_argument("--side", choices=["move", "indicator"], default="move",
-                    help="Which direction to buy: raw BTC move sign (default) or the indicator model's call")
+    ap.add_argument("--side", choices=["move", "indicator", "vel_5s", "vel_15s", "vel_30s", "vel_60s"],
+                    default="move",
+                    help="Which direction to buy: raw round move (default), the indicator model's call, "
+                         "or the sign of a sub-minute velocity (vel_5s..vel_60s) to compare fast timeframes")
     ap.add_argument("--min-conf", type=float, default=None,
                     help="With --side indicator: only take samples with indicator confidence >= this")
     ap.add_argument("--by-confidence", action="store_true",
