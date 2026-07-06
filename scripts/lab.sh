@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+#
+# ONE command for the whole lab. No juggling multiple scripts.
+#
+#   scripts/lab.sh              start EVERYTHING (recorder + paper trader) and
+#                               open the live dashboard. Ctrl-C leaves both
+#                               running in the background.
+#   scripts/lab.sh analyze      the FULL analysis battery in one report:
+#                               entry timing, indicator side, confidence bands,
+#                               sub-minute velocities, overround (E2),
+#                               divergence fade (E3), timeline correlations
+#   scripts/lab.sh dash         reopen the trader dashboard
+#   scripts/lab.sh recdash      reopen the recorder (price-ladder) dashboard
+#   scripts/lab.sh history      full entered/skipped/win/loss timeline
+#   scripts/lab.sh status       what is running + how much data so far
+#   scripts/lab.sh stop         stop everything
+#
+# Tunables (env): PROVIDER=binance THRESHOLD=0.60 STAKE=10 BANKROLL=100
+#
+set -euo pipefail
+
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root
+PY=".venv/bin/python"
+TLOG="out/live.jsonl"        # trader stream
+RLOG="out/trajectory.jsonl"  # recorder stream
+PROVIDER="${PROVIDER:-binance}"
+THRESHOLD="${THRESHOLD:-0.60}"
+STAKE="${STAKE:-10}"
+BANKROLL="${BANKROLL:-100}"
+
+[ -x "$PY" ] || { echo "create the venv first: python3 -m venv .venv && .venv/bin/pip install requests"; exit 1; }
+
+trader_up()   { pgrep -f "btc_live_paper.py" >/dev/null 2>&1; }
+recorder_up() { pgrep -f "btc_record.py"     >/dev/null 2>&1; }
+
+case "${1:-start}" in
+  stop)
+    trader_up   && pkill -f "btc_live_paper.py" && echo "stopped the paper trader" || echo "trader not running"
+    recorder_up && pkill -f "btc_record.py"     && echo "stopped the recorder"     || echo "recorder not running"
+    exit 0 ;;
+
+  status)
+    trader_up   && echo "trader:   RUNNING (pid $(pgrep -f btc_live_paper.py | tr '\n' ' '))" || echo "trader:   not running"
+    recorder_up && echo "recorder: RUNNING (pid $(pgrep -f btc_record.py | tr '\n' ' '))"     || echo "recorder: not running"
+    echo "trades settled:  $([ -f "$TLOG" ] && grep -c '"type":"settle"' "$TLOG" 2>/dev/null || echo 0)"
+    echo "rounds recorded: $([ -f "$RLOG" ] && grep -c '"type":"result"' "$RLOG" 2>/dev/null || echo 0)   (want 100+ before judging)"
+    exit 0 ;;
+
+  dash)
+    exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD" ;;
+
+  recdash)
+    exec "$PY" scripts/btc_record_monitor.py --log "$RLOG" ;;
+
+  history)
+    exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --history ;;
+
+  analyze)
+    echo; echo "################ FULL ANALYSIS BATTERY ################"; echo
+    if [ -f "$RLOG" ]; then
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG"                      || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side indicator     || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-confidence     || true
+      echo
+      for v in vel_15s vel_30s; do
+        "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side "$v"       || true
+        echo
+      done
+      "$PY" scripts/btc_overround.py --log "$RLOG"                        || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --fade              || true
+      echo
+    else
+      echo "(no recorder data yet: $RLOG missing)"
+    fi
+    if [ -f "$TLOG" ]; then
+      "$PY" scripts/btc_timeline_analyze.py --log "$TLOG"                 || true
+    else
+      echo "(no trader data yet: $TLOG missing)"
+    fi
+    echo; echo "######################## END ##########################"
+    exit 0 ;;
+
+  start) ;;
+  *) echo "usage: scripts/lab.sh [start|analyze|dash|recdash|history|status|stop]"; exit 1 ;;
+esac
+
+mkdir -p out
+
+# --- recorder (observer: prices + indicators + velocities per round) ---
+if recorder_up; then
+  echo "recorder already running"
+else
+  nohup "$PY" scripts/btc_record.py --provider "$PROVIDER" --poll 5 --log "$RLOG" \
+    >> out/record-nohup.log 2>&1 &
+  echo "started recorder (pid $!) -> $RLOG"
+fi
+
+# --- paper trader (flat stake, real pricing, enriched logging) ---
+if trader_up; then
+  echo "trader already running"
+else
+  # Fresh trader session = fresh $100 account (prior log archived).
+  [ -f "$TLOG" ] && mv "$TLOG" "out/live-prev.jsonl" && echo "archived prior session -> out/live-prev.jsonl"
+  nohup "$PY" scripts/btc_live_paper.py \
+    --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
+    --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
+    --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
+    --log "$TLOG" --quiet \
+    >> out/nohup.log 2>&1 &
+  echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing"
+fi
+
+echo
+echo "opening dashboard — Ctrl-C exits the dashboard; everything keeps running."
+echo "later:  scripts/lab.sh analyze   (full report)   scripts/lab.sh stop"
+sleep 1
+exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD"

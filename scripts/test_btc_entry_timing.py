@@ -2,7 +2,7 @@
 """Offline tests for the entry-timing analyzer. Run:
     python3 scripts/test_btc_entry_timing.py"""
 
-from btc_entry_timing import analyze, confidence_bands
+from btc_entry_timing import analyze, confidence_bands, fade_analysis
 
 
 def check(desc, cond):
@@ -118,6 +118,46 @@ def test_confidence_bands_edge_rises():
     check("low band edge below top band", by[(0.5, 0.6)]["edge"] < by[(0.9, 1.01)]["edge"])
 
 
+def test_fade_divergence():
+    # BTC leads UP (move>0) but bearish divergence (-1) says DOWN. The DOWN ask is
+    # cheap (0.20). In 30 rounds the fade wins 12 (40% winrate at a 0.20 price =
+    # +0.20 edge, +100% EV). Also: rounds where divergence AGREES with the move
+    # must not be counted, and expensive trailing asks are excluded.
+    evs = []
+    r = 0
+    for i in range(30):
+        r += 1
+        win = i % 5 < 2   # 12/30 = 40% fade winrate
+        evs.append({"type": "sample", "round": r, "sec_left": 100, "move": 30,
+                    "up_ask": 0.80, "dn_ask": 0.20, "ind_div": -1})
+        evs.append({"type": "result", "round": r, "outcome": "DOWN" if win else "UP"})
+    # agreeing divergence -> ignored
+    r += 1
+    evs.append({"type": "sample", "round": r, "sec_left": 100, "move": 30,
+                "up_ask": 0.80, "dn_ask": 0.20, "ind_div": 1})
+    evs.append({"type": "result", "round": r, "outcome": "UP"})
+    # opposing but trailing ask too expensive (0.60 > 0.40 band) -> counted opposing, not traded
+    r += 1
+    evs.append({"type": "sample", "round": r, "sec_left": 100, "move": 30,
+                "up_ask": 0.40, "dn_ask": 0.60, "ind_div": -1})
+    evs.append({"type": "result", "round": r, "outcome": "UP"})
+    res = fade_analysis(evs)
+    check("fade counts opposing rounds", res["n_opposing"] == 31)
+    check("fade trades only the cheap band", res["n_traded"] == 30)
+    check("fade winrate 40%", abs(res["winrate"] - 0.40) < 1e-9)
+    check("fade edge positive (0.40 win at 0.20 cost)", res["edge"] > 0.15)
+    check("fade EV strongly positive", res["ev_pct"] > 0.5)
+
+
+def test_fade_no_setups():
+    # No divergence anywhere -> no rows, no crash.
+    evs = [{"type": "sample", "round": 1, "sec_left": 100, "move": 30,
+            "up_ask": 0.8, "dn_ask": 0.2, "ind_div": 0},
+           {"type": "result", "round": 1, "outcome": "UP"}]
+    res = fade_analysis(evs)
+    check("no fade setups handled", res["n_traded"] == 0 and res.get("winrate") is None)
+
+
 def test_empty_and_missing():
     check("empty log -> no rows", analyze([]) == [])
     # samples without a result round are ignored.
@@ -131,6 +171,8 @@ def main():
     test_efficient_market_negative_edge()
     test_indicator_side_and_min_conf()
     test_confidence_bands_edge_rises()
+    test_fade_divergence()
+    test_fade_no_setups()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")
 

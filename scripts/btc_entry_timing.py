@@ -177,6 +177,82 @@ def confidence_bands(events: list[dict[str, Any]], ref_sec: float = 120.0,
     return rows
 
 
+def fade_analysis(events: list[dict[str, Any]], ref_lo: float = 60.0, ref_hi: float = 150.0,
+                  max_price: float = 0.40, min_price: float = 0.03,
+                  fee_rate: float = 0.0) -> dict[str, Any]:
+    """E3 — trailing-side DIVERGENCE FADE.
+
+    When the RSI divergence (our one OOS-validated leading signal) OPPOSES the
+    side BTC is currently leading, buy the CHEAP trailing side the divergence
+    points to. The payoff asymmetry flips in our favor: entry 0.05-0.40, so
+    losses are small and wins pay 1.5-30x. Decision taken at the sample nearest
+    the middle of [ref_lo, ref_hi] seconds-left. Pass: winrate - avg_price > +3%
+    net of fee with a few hundred rounds.
+    """
+    samples, results = _split(events)
+    recs: list[tuple[bool, float]] = []       # fade trades: (won, price)
+    n_opposing = 0
+    ref_mid = (ref_lo + ref_hi) / 2.0
+    for r, samps in samples.items():
+        res = results.get(r)
+        if not res:
+            continue
+        inwin = [s for s in samps if ref_lo <= (s.get("sec_left") or 0) <= ref_hi
+                 and s.get("ind_div") not in (None, 0)]
+        if not inwin:
+            continue
+        s = min(inwin, key=lambda x: abs((x.get("sec_left") or 0) - ref_mid))
+        div = s.get("ind_div")                 # +1 bullish -> UP, -1 bearish -> DOWN
+        move = s.get("move", 0.0)
+        fade_side = "UP" if div > 0 else "DOWN"
+        lead_side = "UP" if move > 0 else "DOWN" if move < 0 else None
+        if lead_side is None or fade_side == lead_side:
+            continue                           # divergence must OPPOSE the leading side
+        n_opposing += 1
+        price = s.get("up_ask") if fade_side == "UP" else s.get("dn_ask")
+        if not isinstance(price, (int, float)) or not (min_price <= price <= max_price):
+            continue                           # only the CHEAP trailing side
+        recs.append((fade_side == res["outcome"], float(price)))
+
+    n = len(recs)
+    out: dict[str, Any] = {"n_opposing": n_opposing, "n_traded": n,
+                           "window": [ref_lo, ref_hi], "price_band": [min_price, max_price]}
+    if n:
+        wr = sum(1 for w, _ in recs if w) / n
+        avg_price = sum(p for _, p in recs) / n
+        fee = taker_fee_frac(avg_price, fee_rate)
+        ev = (wr - avg_price) / avg_price if avg_price else 0.0
+        out.update({"winrate": round(wr, 4), "avg_price": round(avg_price, 4),
+                    "edge": round(wr - avg_price, 4), "ev_pct": round(ev, 4),
+                    "fee_pct": round(fee, 4), "net_ev_pct": round(ev - fee, 4)})
+    return out
+
+
+def _print_fade(res: dict[str, Any]) -> None:
+    print("=" * 68)
+    print("TRAILING-SIDE DIVERGENCE FADE  (E3)")
+    print("=" * 68)
+    print(f"  window {res['window'][0]:.0f}-{res['window'][1]:.0f}s left, "
+          f"price band {res['price_band'][0]:.2f}-{res['price_band'][1]:.2f}")
+    print(f"  rounds where divergence OPPOSED the leading side: {res['n_opposing']}")
+    print(f"  of those, trailing ask inside the cheap band:     {res['n_traded']}")
+    if res.get("winrate") is None:
+        print("  not enough fade setups yet — divergence-vs-move is rare; keep recording.")
+    else:
+        print(f"  winrate {res['winrate']:.1%}   avg price {res['avg_price']:.3f}   "
+              f"edge {res['edge']:+.3f}")
+        print(f"  EV/trade {res['ev_pct']:+.1%}   fee {res['fee_pct']:.2%}   "
+              f"NET {res['net_ev_pct']:+.1%}")
+        print("-" * 68)
+        if res["net_ev_pct"] > 0.03:
+            print("  PASS so far: edge clears the +3% bar — keep gathering to n>=300.")
+        elif res["net_ev_pct"] > 0:
+            print("  Marginally positive — below the +3% bar; needs more data.")
+        else:
+            print("  NEGATIVE — the fade loses too; divergence doesn't beat the cheap ask.")
+    print("=" * 68)
+
+
 def _print_offsets(rows, side_source, min_conf, fee_rate):
     tag = f"side={side_source}" + (f" min-conf={min_conf}" if min_conf is not None else "")
     fee_on = fee_rate > 0
@@ -258,6 +334,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="With --side indicator: only take samples with indicator confidence >= this")
     ap.add_argument("--by-confidence", action="store_true",
                     help="Instead of the entry-time table, show edge bucketed by indicator confidence")
+    ap.add_argument("--fade", action="store_true",
+                    help="E3: trailing-side divergence fade — buy the CHEAP side when divergence opposes the move")
     ap.add_argument("--conf-offset", type=float, default=120.0,
                     help="Seconds-left decision point for --by-confidence (default 120)")
     ap.add_argument("--fee-rate", type=float, default=0.0,
@@ -267,6 +345,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     events = load(args.log)
+    if args.fade:
+        res = fade_analysis(events, fee_rate=args.fee_rate)
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        _print_fade(res)
+        return 0
     if args.by_confidence:
         rows = confidence_bands(events, ref_sec=args.conf_offset)
         if args.json:

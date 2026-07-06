@@ -69,17 +69,21 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     def indicator_signal(round_start: int, now: float):
         """What the indicator model says AS OF now, earlier in the round.
-        Returns (direction, confidence, score) or (None, None, None)."""
+        Returns (direction, confidence, score, divergence) or Nones.
+        divergence: -1 bearish / 0 none / +1 bullish — the raw leading signal,
+        logged so the trailing-side FADE experiment (E3) can be analyzed."""
         if not bars:
-            return None, None, None
+            return None, None, None, None
         as_of = (int(now) // 60) * 60   # close time of the last fully-closed 1m bar
         try:
             sig = MTFModel(bars, weights=DEFAULT_WEIGHTS).evaluate(round_start, as_of_ts=as_of)
         except Exception:
-            return None, None, None
+            return None, None, None, None
         if sig is None:
-            return None, None, None
-        return sig.direction, round(sig.confidence, 4), round(sig.score, 4)
+            return None, None, None, None
+        div = sig.features.get("sub_divergence_1m")
+        div = int(div) if isinstance(div, (int, float)) else None
+        return sig.direction, round(sig.confidence, 4), round(sig.score, 4), div
 
     # Rolling spot buffer -> sub-minute velocity (dollars moved over the last
     # N seconds). This is the "faster timeframe" signal: does a 5s/15s/30s BTC
@@ -148,11 +152,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if in_window and round_open is not None and spot is not None:
                     pm = current_prices(now)
                     if pm:
-                        idir, iconf, iscore = indicator_signal(r, now)
+                        idir, iconf, iscore, idiv = indicator_signal(r, now)
                         emit({"type": "sample", "round": r, "sec_left": round(sec_left, 1),
                               "move": round(spot - round_open, 2), "spot": round(spot, 2),
                               "up_ask": pm.get("UP"), "dn_ask": pm.get("DOWN"),
                               "ind_dir": idir, "ind_conf": iconf, "ind_score": iscore,
+                              "ind_div": idiv,
                               "vel_5s": velocity(now, 5), "vel_15s": velocity(now, 15),
                               "vel_30s": velocity(now, 30), "vel_60s": velocity(now, 60),
                               "ts": int(now)})
