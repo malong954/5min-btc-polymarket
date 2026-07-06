@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 """
-Find the optimal entry time from a trajectory log (scripts/btc_record.py).
+Find the optimal entry time (and test confidence-based sizing) from a trajectory
+log (scripts/btc_record.py).
 
-For each entry offset (seconds before close), it simulates the momentum rule —
-"buy the side BTC is already leading, at that side's ask right then" — and reports
-the win rate, the average price you'd pay, and the resulting edge. Earlier entries
-are cheaper but less certain; later entries are surer but pricier. The sweet spot
-is the offset with the highest edge.
+Two questions this answers:
 
-    python3 scripts/btc_entry_timing.py --log out/trajectory.jsonl
+1. ENTRY TIME. For each offset (seconds before close) it simulates the rule "buy
+   the leading side, at that side's ask right then" and reports win rate, average
+   price paid, and the resulting edge. Earlier = cheaper but less certain; later
+   = surer but pricier. The sweet spot is the offset with the highest edge.
+       python3 scripts/btc_entry_timing.py --log out/trajectory.jsonl
 
-edge = winrate - avg_entry_price. Because breakeven win-rate equals the price,
-a POSITIVE edge means that entry time is profitable; negative means it loses.
+   With --side indicator it buys the INDICATOR model's called direction (impulse
+   + divergence) instead of the raw move sign, and --min-conf filters to samples
+   where the indicator confidence clears a bar. That tests the real thesis:
+   "enter earlier, on a strong indicator signal, before the book reprices."
+       python3 scripts/btc_entry_timing.py --side indicator --min-conf 0.7
+
+2. CONFIDENCE SIZING. --by-confidence buckets each round (at one decision offset)
+   by the indicator's confidence and shows edge per bucket. Confidence-based lot
+   sizing only pays if EDGE (not just win rate) RISES with confidence — otherwise
+   sizing up on high confidence just bets more on the same (or worse) edge.
+       python3 scripts/btc_entry_timing.py --by-confidence
+
+edge = winrate - avg_entry_price. Because breakeven win-rate equals the price, a
+POSITIVE edge means that entry is profitable; negative means it loses.
 """
 
 from __future__ import annotations
@@ -37,8 +50,11 @@ def load(path: str) -> list[dict[str, Any]]:
 DEFAULT_BINS = [(30, 60), (60, 90), (90, 120), (120, 150),
                 (150, 180), (180, 210), (210, 240), (240, 270)]
 
+DEFAULT_CONF_BANDS = [(0.0, 0.5), (0.5, 0.6), (0.6, 0.7),
+                      (0.7, 0.8), (0.8, 0.9), (0.9, 1.01)]
 
-def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_BINS) -> list[dict[str, Any]]:
+
+def _split(events: list[dict[str, Any]]):
     samples: dict[int, list[dict[str, Any]]] = {}
     results: dict[int, dict[str, Any]] = {}
     for e in events:
@@ -47,7 +63,34 @@ def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_
             samples.setdefault(e["round"], []).append(e)
         elif t == "result":
             results[e["round"]] = e
+    return samples, results
 
+
+def _side_and_price(s: dict[str, Any], side_source: str, min_conf: Optional[float]):
+    """Resolve (side, price) for one sample under the chosen rule, or (None, None)
+    to skip it."""
+    if side_source == "indicator":
+        if min_conf is not None:
+            c = s.get("ind_conf")
+            if c is None or c < min_conf:
+                return None, None
+        side = s.get("ind_dir")
+        if side not in ("UP", "DOWN"):
+            return None, None
+    else:
+        move = s.get("move", 0.0)
+        if move == 0:
+            return None, None
+        side = "UP" if move > 0 else "DOWN"
+    price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
+    if price is None or not (0.0 < price < 1.0):
+        return None, None
+    return side, float(price)
+
+
+def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_BINS,
+            side_source: str = "move", min_conf: Optional[float] = None) -> list[dict[str, Any]]:
+    samples, results = _split(events)
     rows = []
     for lo, hi in bins:
         recs: list[tuple[bool, float]] = []
@@ -61,14 +104,10 @@ def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_
                 continue
             mid = (lo + hi) / 2.0
             s = min(inbin, key=lambda x: abs(x["sec_left"] - mid))
-            move = s.get("move", 0.0)
-            if move == 0:
+            side, price = _side_and_price(s, side_source, min_conf)
+            if side is None:
                 continue
-            side = "UP" if move > 0 else "DOWN"
-            price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
-            if price is None or not (0.0 < price < 1.0):
-                continue
-            recs.append((side == outcome, float(price)))
+            recs.append((side == outcome, price))
         if recs:
             n = len(recs)
             wins = sum(1 for w, _ in recs if w)
@@ -82,29 +121,56 @@ def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_
     return rows
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Optimal entry-time analysis from a trajectory log")
-    ap.add_argument("--log", default="out/trajectory.jsonl")
-    ap.add_argument("--json", action="store_true")
-    args = ap.parse_args(argv)
+def confidence_bands(events: list[dict[str, Any]], ref_sec: float = 120.0,
+                     bands: list[tuple[float, float]] = DEFAULT_CONF_BANDS) -> list[dict[str, Any]]:
+    """One decision per round, taken at the sample nearest `ref_sec` seconds-left,
+    bucketed by the indicator's confidence. Answers: does EDGE rise with
+    confidence (the premise of confidence-based sizing)?"""
+    samples, results = _split(events)
+    picked: list[tuple[float, bool, float]] = []  # (conf, won, price)
+    for r, samps in samples.items():
+        res = results.get(r)
+        if not res:
+            continue
+        withconf = [s for s in samps if s.get("ind_conf") is not None and s.get("ind_dir") in ("UP", "DOWN")]
+        if not withconf:
+            continue
+        s = min(withconf, key=lambda x: abs((x.get("sec_left") or 0) - ref_sec))
+        side, price = _side_and_price(s, "indicator", None)
+        if side is None:
+            continue
+        picked.append((float(s["ind_conf"]), side == res["outcome"], price))
 
-    rows = analyze(load(args.log))
-    if args.json:
-        print(json.dumps(rows, indent=2))
-        return 0
+    rows = []
+    for lo, hi in bands:
+        band = [(w, p) for c, w, p in picked if lo <= c < hi]
+        if not band:
+            continue
+        n = len(band)
+        wr = sum(1 for w, _ in band if w) / n
+        avg_price = sum(p for _, p in band) / n
+        ev_pct = (wr - avg_price) / avg_price if avg_price else 0.0
+        rows.append({"band": [lo, hi], "n": n, "winrate": round(wr, 4),
+                     "avg_price": round(avg_price, 4), "edge": round(wr - avg_price, 4),
+                     "ev_pct": round(ev_pct, 4)})
+    return rows
 
-    print("=" * 66)
-    print("ENTRY-TIME ANALYSIS  (buy the leading side at each offset)")
-    print("=" * 66)
+
+def _print_offsets(rows, side_source, min_conf):
+    tag = f"side={side_source}" + (f" min-conf={min_conf}" if min_conf is not None else "")
+    print("=" * 68)
+    print(f"ENTRY-TIME ANALYSIS  ({tag})")
+    print("=" * 68)
     if not rows:
-        print("no complete rounds yet — let scripts/btc_record.py run longer.")
-        return 0
+        print("no complete rounds match — let scripts/btc_record.py run longer"
+              + (" (or lower --min-conf)." if min_conf is not None else "."))
+        return
     print(f"  {'sec left':<12}{'n':<6}{'winrate':<10}{'avg price':<11}{'edge':<9}{'EV/trade'}")
     for r in rows:
         print(f"  {str(r['offset']):<12}{r['n']:<6}{r['winrate']:<10.1%}{r['avg_price']:<11.3f}"
               f"{r['edge']:<+9.3f}{r['ev_pct']:+.1%}")
     best = max(rows, key=lambda r: r["edge"])
-    print("-" * 66)
+    print("-" * 68)
     if best["edge"] > 0:
         print(f"BEST entry: {best['offset'][0]}-{best['offset'][1]}s left  ->  "
               f"winrate {best['winrate']:.0%} @ price {best['avg_price']:.2f}  "
@@ -112,8 +178,67 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("Earlier = cheaper but less certain; this offset balances the two best.")
     else:
         print("EVERY entry time has NEGATIVE edge -> the market is efficiently priced;")
-        print("no entry timing makes the momentum rule profitable on this data.")
-    print("=" * 66)
+        print("no entry timing makes this rule profitable on this data.")
+    print("=" * 68)
+
+
+def _print_bands(rows, ref_sec):
+    print("=" * 68)
+    print(f"CONFIDENCE-BAND ANALYSIS  (one decision/round at ~{ref_sec:.0f}s left)")
+    print("=" * 68)
+    if not rows:
+        print("no rounds with an indicator confidence yet — the recorder logs")
+        print("ind_conf; let it run, or check the provider fetched klines.")
+        return
+    print(f"  {'confidence':<14}{'n':<6}{'winrate':<10}{'avg price':<11}{'edge':<9}{'EV/trade'}")
+    for r in rows:
+        lo, hi = r["band"]
+        label = f"{lo:.2f}-{min(hi, 1.0):.2f}"
+        print(f"  {label:<14}{r['n']:<6}{r['winrate']:<10.1%}{r['avg_price']:<11.3f}"
+              f"{r['edge']:<+9.3f}{r['ev_pct']:+.1%}")
+    print("-" * 68)
+    # Does edge rise with confidence? Compare the highest-confidence band to the lowest.
+    lowest, highest = rows[0], rows[-1]
+    if highest["edge"] > lowest["edge"] and highest["edge"] > 0:
+        print(f"Edge RISES with confidence ({lowest['edge']:+.3f} -> {highest['edge']:+.3f}) and the")
+        print("top band is POSITIVE -> confidence-based sizing is justified: bet more there.")
+    elif highest["edge"] > lowest["edge"]:
+        print(f"Edge rises with confidence ({lowest['edge']:+.3f} -> {highest['edge']:+.3f}) but the top")
+        print("band is still NEGATIVE -> higher confidence loses less, not profits; don't size up.")
+    else:
+        print(f"Edge does NOT rise with confidence ({lowest['edge']:+.3f} -> {highest['edge']:+.3f})")
+        print("-> confidence is not tracking edge; confidence-based sizing would not help.")
+    print("=" * 68)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="Optimal entry-time + confidence-band analysis from a trajectory log")
+    ap.add_argument("--log", default="out/trajectory.jsonl")
+    ap.add_argument("--side", choices=["move", "indicator"], default="move",
+                    help="Which direction to buy: raw BTC move sign (default) or the indicator model's call")
+    ap.add_argument("--min-conf", type=float, default=None,
+                    help="With --side indicator: only take samples with indicator confidence >= this")
+    ap.add_argument("--by-confidence", action="store_true",
+                    help="Instead of the entry-time table, show edge bucketed by indicator confidence")
+    ap.add_argument("--conf-offset", type=float, default=120.0,
+                    help="Seconds-left decision point for --by-confidence (default 120)")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+
+    events = load(args.log)
+    if args.by_confidence:
+        rows = confidence_bands(events, ref_sec=args.conf_offset)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        _print_bands(rows, args.conf_offset)
+        return 0
+
+    rows = analyze(events, side_source=args.side, min_conf=args.min_conf)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    _print_offsets(rows, args.side, args.min_conf)
     return 0
 
 

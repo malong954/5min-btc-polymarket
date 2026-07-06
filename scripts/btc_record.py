@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Record the Polymarket UP/DOWN ask trajectory + BTC move through each 5m round.
+Record the Polymarket UP/DOWN ask trajectory + BTC move + INDICATOR signal
+through each 5m round.
 
 Purpose: find the OPTIMAL entry time. Entering earlier is CHEAPER (the contract
 hasn't run up to $0.99 yet) but less certain; entering later is surer but you pay
@@ -8,9 +9,14 @@ near $1 for almost no profit. To find the sweet spot we need the price at many
 points in the round — which the trader never logged (it prices once, ~2m left).
 
 This is a pure OBSERVER: it places no trades. For each round it samples, every
---poll seconds while `--min-left <= seconds_left <= --max-left`, the live BTC
-move and the real Polymarket UP/DOWN best asks, then records the round's outcome.
-Feed the log to scripts/btc_entry_timing.py.
+--poll seconds while `--min-left <= seconds_left <= --max-left`:
+  - the live BTC move (spot - round open),
+  - the real Polymarket UP/DOWN best asks, and
+  - what the INDICATOR model (impulse + divergence, the same brain the trader
+    uses) says AS OF that instant — direction / confidence / score.
+then records the round's outcome. Logging the indicator signal at each moment is
+what lets scripts/btc_entry_timing.py test the real thesis: "enter earlier, on a
+strong indicator signal, before the order book reprices." Feed it that log.
 
     python3 scripts/btc_record.py --provider binance --log out/trajectory.jsonl
 """
@@ -30,11 +36,13 @@ def bucket_5m(ts: int) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Record Polymarket price + BTC move trajectory per 5m round")
+    ap = argparse.ArgumentParser(description="Record Polymarket price + BTC move + indicator trajectory per 5m round")
     ap.add_argument("--provider", default="binance", choices=["binance", "cryptocompare", "coinbase", "kraken"])
     ap.add_argument("--poll", type=float, default=5.0, help="Seconds between samples")
     ap.add_argument("--min-left", type=float, default=30.0, help="Start sampling when this many seconds remain")
     ap.add_argument("--max-left", type=float, default=280.0, help="Stop sampling above this many seconds remaining")
+    ap.add_argument("--klines-every", type=float, default=20.0, help="Seconds between the heavier 1m-kline/indicator refreshes")
+    ap.add_argument("--history-min", type=int, default=180, help="Minutes of 1m history to fetch for indicators")
     ap.add_argument("--log", default="out/trajectory.jsonl")
     ap.add_argument("--max-steps", type=int, default=None)
     args = ap.parse_args(argv)
@@ -44,6 +52,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     from btc_price_feeds import build_feeds
     from btc_polymarket import current_prices
+    from btc_backtest import Bar, DEFAULT_WEIGHTS, MTFModel
+    from btc_history import fetch_history
 
     feeds = build_feeds([args.provider])
     if not feeds:
@@ -51,16 +61,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     feed = feeds[0]
 
+    bars: list = []
+
+    def fetch_bars() -> list:
+        rows = fetch_history(args.provider, days=args.history_min / 1440.0)
+        return [Bar(r["time"], r["open"], r["high"], r["low"], r["close"], r["volume"]) for r in rows]
+
+    def indicator_signal(round_start: int, now: float):
+        """What the indicator model says AS OF now, earlier in the round.
+        Returns (direction, confidence, score) or (None, None, None)."""
+        if not bars:
+            return None, None, None
+        as_of = (int(now) // 60) * 60   # close time of the last fully-closed 1m bar
+        try:
+            sig = MTFModel(bars, weights=DEFAULT_WEIGHTS).evaluate(round_start, as_of_ts=as_of)
+        except Exception:
+            return None, None, None
+        if sig is None:
+            return None, None, None
+        return sig.direction, round(sig.confidence, 4), round(sig.score, 4)
+
     def emit(o: dict) -> None:
         logf.write(json.dumps(o, separators=(",", ":")) + "\n")
         logf.flush()
 
     print(f"# trajectory recorder | provider={args.provider} poll={args.poll}s "
-          f"window={args.min_left}-{args.max_left}s left | OBSERVER (no trades)", file=sys.stderr)
+          f"window={args.min_left}-{args.max_left}s left | +indicator signal | "
+          f"OBSERVER (no trades)", file=sys.stderr)
 
     cur_round: Optional[int] = None
     round_open: Optional[float] = None
     last_spot: Optional[float] = None
+    last_klines = 0.0
     n = 0
     try:
         while args.max_steps is None or n < args.max_steps:
@@ -80,12 +112,24 @@ def main(argv: Optional[list[str]] = None) -> int:
                 spot = feed.spot()
                 if spot is not None:
                     last_spot = spot
-                if args.min_left <= sec_left <= args.max_left and round_open is not None and spot is not None:
+                in_window = args.min_left <= sec_left <= args.max_left
+                # Refresh the heavier 1m klines periodically (and lazily on first use),
+                # so the indicator signal stays current without a fetch every poll.
+                if in_window and (not bars or now - last_klines >= args.klines_every):
+                    try:
+                        bars = fetch_bars()
+                        last_klines = now
+                    except Exception as e:
+                        print(f"# kline fetch error: {e}", file=sys.stderr)
+                if in_window and round_open is not None and spot is not None:
                     pm = current_prices(now)
                     if pm:
+                        idir, iconf, iscore = indicator_signal(r, now)
                         emit({"type": "sample", "round": r, "sec_left": round(sec_left, 1),
                               "move": round(spot - round_open, 2), "spot": round(spot, 2),
-                              "up_ask": pm.get("UP"), "dn_ask": pm.get("DOWN"), "ts": int(now)})
+                              "up_ask": pm.get("UP"), "dn_ask": pm.get("DOWN"),
+                              "ind_dir": idir, "ind_conf": iconf, "ind_score": iscore,
+                              "ts": int(now)})
             except Exception as e:
                 print(f"# record error: {e}", file=sys.stderr)
             n += 1

@@ -189,13 +189,20 @@ class MTFModel:
                 break
         return best
 
-    def evaluate(self, round_start: int) -> Optional[Signal]:
+    def evaluate(self, round_start: int, as_of_ts: Optional[int] = None) -> Optional[Signal]:
         """Compute the signal for the 5m round beginning at `round_start`.
 
-        Returns None if there isn't enough closed history / data at the decision
-        instant (round is skipped, not counted as a trade).
+        By default the decision instant is frozen at `round_start + DECISION_OFFSET`
+        (the trader's no-lookahead discipline). Pass `as_of_ts` to instead evaluate
+        the indicators AS OF an arbitrary instant within the round — used by the
+        entry-time recorder to ask "what do the indicators say right now, earlier
+        in the round?" `as_of_ts` must be a 1m-bar CLOSE time (i.e. a minute
+        boundary) that has a closed bar in history; otherwise this returns None.
+
+        Returns None if there isn't enough closed history / data at that instant
+        (round is skipped, not counted as a trade).
         """
-        t_dec = round_start + DECISION_OFFSET
+        t_dec = round_start + DECISION_OFFSET if as_of_ts is None else int(as_of_ts)
 
         # 1m bar closing exactly at the decision instant must exist.
         dec_min_ts = t_dec - 60  # this 1m bar's OPEN ts (closes at t_dec)

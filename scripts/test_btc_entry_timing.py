@@ -2,7 +2,7 @@
 """Offline tests for the entry-timing analyzer. Run:
     python3 scripts/test_btc_entry_timing.py"""
 
-from btc_entry_timing import analyze
+from btc_entry_timing import analyze, confidence_bands
 
 
 def check(desc, cond):
@@ -68,6 +68,56 @@ def test_efficient_market_negative_edge():
     check("priced-fair market shows ~zero edge", all(r["edge"] <= 0.05 for r in rows))
 
 
+def build_ind(rounds):
+    """rounds: list of (samples, outcome), samples = [(sec_left, up, dn, ind_dir, ind_conf), ...]."""
+    evs = []
+    for i, (samps, outcome) in enumerate(rounds):
+        for sl, up, dn, idir, iconf in samps:
+            evs.append({"type": "sample", "round": i, "sec_left": sl, "move": 1.0,
+                        "up_ask": up, "dn_ask": dn, "ind_dir": idir, "ind_conf": iconf})
+        evs.append({"type": "result", "round": i, "outcome": outcome})
+    return evs
+
+
+def test_indicator_side_and_min_conf():
+    # Indicator calls UP at 0.82 early. When it's confident (conf>=0.7) it is
+    # right; when unsure (conf<0.7) it is often wrong. min-conf should raise edge.
+    rounds = []
+    for i in range(20):
+        confident = i % 2 == 0
+        conf = 0.85 if confident else 0.55
+        idir = "UP"
+        outcome = "UP" if confident else "DOWN"   # confident calls win, unsure lose
+        rounds.append(([(70, 0.82, 0.18, idir, conf)], outcome))
+    evs = build_ind(rounds)
+    all_rows = analyze(evs, side_source="indicator")
+    hi_rows = analyze(evs, side_source="indicator", min_conf=0.7)
+    by_all = {tuple(r["offset"]): r for r in all_rows}
+    by_hi = {tuple(r["offset"]): r for r in hi_rows}
+    check("indicator side produces rows", (60, 90) in by_all)
+    check("min-conf filters to the confident (winning) subset",
+          by_hi[(60, 90)]["winrate"] > by_all[(60, 90)]["winrate"])
+    check("min-conf edge beats unfiltered edge",
+          by_hi[(60, 90)]["edge"] > by_all[(60, 90)]["edge"])
+
+
+def test_confidence_bands_edge_rises():
+    # High-confidence rounds priced 0.80 win 100%; low-confidence priced 0.80 win
+    # 50%. Edge should be strongly positive in the top band, negative in the low.
+    rounds = []
+    for i in range(40):
+        if i < 20:
+            rounds.append(([(120, 0.80, 0.20, "UP", 0.90)], "UP"))          # high conf, always right
+        else:
+            outcome = "UP" if i % 2 == 0 else "DOWN"                          # low conf, coin flip
+            rounds.append(([(120, 0.80, 0.20, "UP", 0.55)], outcome))
+    rows = confidence_bands(build_ind(rounds))
+    by = {tuple(r["band"]): r for r in rows}
+    check("both confidence bands present", (0.5, 0.6) in by and (0.9, 1.01) in by)
+    check("top band edge positive", by[(0.9, 1.01)]["edge"] > 0)
+    check("low band edge below top band", by[(0.5, 0.6)]["edge"] < by[(0.9, 1.01)]["edge"])
+
+
 def test_empty_and_missing():
     check("empty log -> no rows", analyze([]) == [])
     # samples without a result round are ignored.
@@ -79,6 +129,8 @@ def main():
     test_price_rises_toward_close()
     test_early_less_certain()
     test_efficient_market_negative_edge()
+    test_indicator_side_and_min_conf()
+    test_confidence_bands_edge_rises()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")
 
