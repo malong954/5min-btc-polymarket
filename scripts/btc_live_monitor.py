@@ -228,12 +228,16 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
         mv_s = "  move " + p.c(f"{mv:+.0f}", GREEN if mv > 0 else RED if mv < 0 else GREY, BOLD)
     lines.append(f"  price   {p.c(price_s, BOLD)}{mv_s}   round close in {p.c(countdown, YELLOW)}")
 
-    # Current movement prediction + why we are / aren't trading.
+    # Current movement prediction + why we are / aren't trading. Prefer the
+    # heartbeat's LIVE confidence (ticks with the spot every poll) over the
+    # round's initial prediction snapshot.
     thr = state.get("entry_threshold", 0.60)
-    d = pred.get("direction")
+    live = hb.get("confidence") is not None and hb.get("round") == pred.get("round")
+    d = (hb.get("direction") if live else None) or pred.get("direction")
     if d:
         col = GREEN if d == "UP" else RED
-        conf = pred.get("confidence", 0.0)
+        conf = hb.get("confidence") if live else pred.get("confidence", 0.0)
+        conf = conf if conf is not None else 0.0
         move = pred.get("btc_move_usd", 0.0)
         armed = conf >= thr
         status = p.c(f"ARMED >= {thr:.2f}", GREEN, BOLD) if armed else p.c(f"waiting (need >= {thr:.2f})", YELLOW)

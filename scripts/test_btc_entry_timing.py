@@ -2,7 +2,7 @@
 """Offline tests for the entry-timing analyzer. Run:
     python3 scripts/test_btc_entry_timing.py"""
 
-from btc_entry_timing import analyze, confidence_bands, fade_analysis
+from btc_entry_timing import analyze, confidence_bands, crossing_analysis, fade_analysis
 
 
 def check(desc, cond):
@@ -158,6 +158,27 @@ def test_fade_no_setups():
     check("no fade setups handled", res["n_traded"] == 0 and res.get("winrate") is None)
 
 
+def test_crossing_first_moment():
+    # Confidence climbs through each round: 0.55 @200s (ask 0.80), 0.75 @120s
+    # (ask 0.90), 0.95 @60s (ask 0.98). Crossing X=0.7 must buy at the 120s
+    # sample (0.90), X=0.9 at the 60s sample (0.98) — the FIRST qualifying
+    # moment, not the best or last one.
+    evs = []
+    for i in range(10):
+        for sl, c, ask in [(200, 0.55, 0.80), (120, 0.75, 0.90), (60, 0.95, 0.98)]:
+            evs.append({"type": "sample", "round": i, "sec_left": sl, "move": 20,
+                        "up_ask": ask, "dn_ask": round(1 - ask, 2),
+                        "ind_dir": "UP", "ind_conf": c})
+        evs.append({"type": "result", "round": i, "outcome": "UP"})
+    rows = crossing_analysis(evs, thresholds=[0.5, 0.7, 0.9])
+    by = {r["threshold"]: r for r in rows}
+    check("crossing 0.5 fills at the earliest sample", abs(by[0.5]["avg_price"] - 0.80) < 1e-9)
+    check("crossing 0.7 fills at the 120s sample", abs(by[0.7]["avg_price"] - 0.90) < 1e-9)
+    check("crossing 0.9 fills at the 60s sample", abs(by[0.9]["avg_price"] - 0.98) < 1e-9)
+    check("earlier crossing is cheaper", by[0.5]["avg_price"] < by[0.9]["avg_price"])
+    check("crossing avg sec_left ordered", by[0.5]["avg_sec_left"] > by[0.9]["avg_sec_left"])
+
+
 def test_empty_and_missing():
     check("empty log -> no rows", analyze([]) == [])
     # samples without a result round are ignored.
@@ -173,6 +194,7 @@ def main():
     test_confidence_bands_edge_rises()
     test_fade_divergence()
     test_fade_no_setups()
+    test_crossing_first_moment()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")
 

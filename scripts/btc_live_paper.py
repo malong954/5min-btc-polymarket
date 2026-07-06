@@ -142,6 +142,12 @@ class LivePaperEngine:
         # market price at decision time. We keep retrying the price on later
         # polls (while inside the window) instead of throwing the round away.
         self.pending: dict[int, dict[str, Any]] = {}
+        # Live watch: the CURRENT round's evolving signal. Confidence is
+        # re-evaluated every poll (impulse updated with the live spot) and we
+        # enter at the FIRST threshold crossing; the peak snapshot becomes the
+        # skip record if the window closes without one.
+        self.watch: Optional[dict[str, Any]] = None
+        self.skipped: set[int] = set()
         self.stats = {"trades": 0, "wins": 0, "pnl": 0.0, "pnl_usd": 0.0}
 
     @property
@@ -157,7 +163,7 @@ class LivePaperEngine:
     def _try_enter(self, cur: int, now: float, side: str, confidence: float,
                    feat: dict[str, Any], note: str,
                    entry_prices: Optional[dict[str, float]],
-                   retries: int = 0) -> Optional[dict[str, Any]]:
+                   retries: int = 0, sec_left: Optional[float] = None) -> Optional[dict[str, Any]]:
         """Open the position if we can price it. Returns the entry event, or
         None when require_market_price is on and no valid ask is available yet
         (the caller keeps the round pending and retries next poll)."""
@@ -185,6 +191,7 @@ class LivePaperEngine:
             "ts": int(now), "type": "entry", "round": cur, "side": side,
             "entry_price": round(ep, 4), "price_source": "polymarket" if real_ok else "fixed",
             "confidence": round(confidence, 4),
+            "seconds_left": round(sec_left, 1) if sec_left is not None else None,
             "stake_usd": stake, "sizing": self.sizing, "big_bet": big,
             "balance": round(self.balance, 2),
             "price_retries": retries,
@@ -262,7 +269,7 @@ class LivePaperEngine:
             if rs == cur and rs_left >= self.min_entry_sec:
                 ev = self._try_enter(rs, now, pend["side"], pend["confidence"],
                                      pend["features"], pend["note"], entry_prices,
-                                     retries=pend["retries"])
+                                     retries=pend["retries"], sec_left=rs_left)
                 if ev is not None:
                     events.append(ev)
                     del self.pending[rs]
@@ -271,6 +278,7 @@ class LivePaperEngine:
             else:
                 # Window closed (or round rolled over) without ever pricing it.
                 del self.pending[rs]
+                self.skipped.add(rs)
                 self.shadows[rs] = {"side": pend["side"], "reason": "no_market_price",
                                     "confidence": pend["confidence"],
                                     "features": pend["features"], "note": pend["note"]}
@@ -282,49 +290,75 @@ class LivePaperEngine:
                     "features": pend["features"], "note": pend["note"],
                 }))
 
-        # 2) One prediction / entry decision per round, inside the entry window.
-        if cur not in self.decided and self.min_entry_sec <= sec_left <= self.entry_window_sec:
-            sig = model.evaluate(cur)
+        # 2) LIVE decision loop. The signal is re-evaluated EVERY poll inside the
+        # window — impulse fed the live spot tick, so confidence climbs (or dies)
+        # in real time — and we enter at the FIRST threshold crossing. The race
+        # is reaching conviction while the ask is still cheap; a fixed decision
+        # instant forfeits it.
+        in_window = self.min_entry_sec <= sec_left <= self.entry_window_sec
+
+        # 2a) Watched round ended (rolled over / window closed) without an entry
+        # -> final skip carrying the PEAK confidence snapshot + shadow-settle it.
+        w = self.watch
+        if w is not None and (w["round"] != cur or sec_left < self.min_entry_sec):
+            rs = w["round"]
+            if rs not in self.positions and rs not in self.pending and rs not in self.skipped:
+                reason = "below_threshold" if w.get("side") else "no_direction"
+                self.skipped.add(rs)
+                if w.get("side"):
+                    self.shadows[rs] = {"side": w["side"], "reason": reason,
+                                        "confidence": w["conf"],
+                                        "features": w["features"], "note": w["note"]}
+                events.append(self._emit({
+                    "ts": int(now), "type": "skip", "round": rs, "reason": reason,
+                    "side": w.get("side"), "confidence": w.get("conf"),
+                    "features": w.get("features"), "note": w.get("note"),
+                }))
+            if w["round"] != cur:
+                self.watch = None
+
+        if (in_window and cur not in self.positions
+                and cur not in self.pending and cur not in self.skipped):
+            as_of = (int(now) // 60) * 60   # close of the last fully-closed 1m bar
+            sig = model.evaluate(cur, as_of_ts=as_of, spot=spot)
             if sig is not None:
-                self.decided.add(cur)
-                rsi = sig.features.get("rsi_1m")
                 feat = feature_snapshot(sig)
                 note = describe_signal(sig)
-                events.append(self._emit({
-                    "ts": int(now), "type": "prediction", "round": cur,
-                    "seconds_left": round(sec_left, 1), "direction": sig.direction,
-                    "confidence": round(sig.confidence, 4), "score": round(sig.score, 4),
-                    "btc_move_usd": round(sig.features.get("btc_move_usd", 0.0), 2),
-                    "rsi_1m": round(rsi, 1) if rsi is not None else None,
-                    "features": feat, "note": note,
-                }))
+                conf = round(sig.confidence, 4)
+                if self.watch is None or self.watch["round"] != cur:
+                    # First evaluable poll of the round -> the one 'prediction'
+                    # event (keeps round counting stable for the dashboard).
+                    self.watch = {"round": cur, "side": sig.direction, "conf": conf,
+                                  "cur_side": sig.direction, "cur_conf": conf,
+                                  "features": feat, "note": note}
+                    self.decided.add(cur)
+                    rsi = sig.features.get("rsi_1m")
+                    events.append(self._emit({
+                        "ts": int(now), "type": "prediction", "round": cur,
+                        "seconds_left": round(sec_left, 1), "direction": sig.direction,
+                        "confidence": conf, "score": round(sig.score, 4),
+                        "btc_move_usd": round(sig.features.get("btc_move_usd", 0.0), 2),
+                        "rsi_1m": round(rsi, 1) if rsi is not None else None,
+                        "features": feat, "note": note,
+                    }))
+                else:
+                    self.watch["cur_side"] = sig.direction
+                    self.watch["cur_conf"] = conf
+                    if conf > self.watch["conf"]:   # peak snapshot for the skip record
+                        self.watch.update({"side": sig.direction, "conf": conf,
+                                           "features": feat, "note": note})
                 if sig.direction and sig.confidence >= self.entry_threshold:
                     ev = self._try_enter(cur, now, sig.direction, sig.confidence,
-                                         feat, note, entry_prices)
+                                         feat, note, entry_prices, sec_left=sec_left)
                     if ev is not None:
                         events.append(ev)
                     else:
                         # ARMED but unpriceable right now — don't throw the round
                         # away; retry the price on later polls inside the window.
                         self.pending[cur] = {"side": sig.direction,
-                                             "confidence": round(sig.confidence, 4),
+                                             "confidence": conf,
                                              "features": feat, "note": note,
                                              "retries": 1}
-                else:
-                    # Skipped: still log the SHADOW decision (side it would have
-                    # taken) + reason + full features, so a skipped round is just
-                    # as analyzable as a traded one — and register it to settle.
-                    reason = "below_threshold" if sig.direction else "no_direction"
-                    if sig.direction:
-                        self.shadows[cur] = {"side": sig.direction, "reason": reason,
-                                             "confidence": round(sig.confidence, 4),
-                                             "features": feat, "note": note}
-                    events.append(self._emit({
-                        "ts": int(now), "type": "skip", "round": cur,
-                        "reason": reason,
-                        "side": sig.direction, "confidence": round(sig.confidence, 4),
-                        "features": feat, "note": note,
-                    }))
 
         # 3) Heartbeat with the live price and the intra-round move building.
         if self.emit_heartbeat:
@@ -336,7 +370,7 @@ class LivePaperEngine:
             if i_open is not None:
                 round_open = model.bars_1m[i_open].o
             round_move = (last_px - round_open) if (last_px is not None and round_open is not None) else None
-            events.append(self._emit({
+            hb = {
                 "ts": int(now), "type": "heartbeat", "round": cur,
                 "seconds_left": round(sec_left, 1),
                 "price": round(last_px, 2) if last_px is not None else None,
@@ -344,7 +378,12 @@ class LivePaperEngine:
                 "open_positions": len(self.positions) - len(self.settled),
                 "cum_pnl": round(self.stats["pnl"], 4),
                 "balance": round(self.balance, 2),
-            }))
+            }
+            # Live confidence ticking with the spot (dashboard shows it climb).
+            if self.watch is not None and self.watch["round"] == cur:
+                hb["direction"] = self.watch.get("cur_side")
+                hb["confidence"] = self.watch.get("cur_conf")
+            events.append(self._emit(hb))
         return events
 
 

@@ -64,6 +64,8 @@ case "${1:-start}" in
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-confidence     || true
       echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --crossing          || true
+      echo
       for v in vel_15s vel_30s; do
         "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side "$v"       || true
         echo

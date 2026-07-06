@@ -177,6 +177,86 @@ def confidence_bands(events: list[dict[str, Any]], ref_sec: float = 120.0,
     return rows
 
 
+CROSS_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
+
+
+def crossing_analysis(events: list[dict[str, Any]],
+                      thresholds: list[float] = CROSS_THRESHOLDS,
+                      fee_rate: float = 0.0) -> list[dict[str, Any]]:
+    """FIRST-CROSSING analysis: for each confidence threshold X, find the first
+    sample in each round where the indicator confidence reaches X, buy the
+    indicator's side at THAT moment's ask, and score it. This is the 'get to
+    high confidence faster' hypothesis made measurable — it shows how early each
+    conviction level arrives, what the contract costs right then, and whether
+    buying at the crossing beats that price."""
+    samples: dict[int, list[dict[str, Any]]] = {}
+    results: dict[int, dict[str, Any]] = {}
+    for e in events:
+        t = e.get("type")
+        if t == "sample":
+            samples.setdefault(e["round"], []).append(e)
+        elif t == "result":
+            results[e["round"]] = e
+
+    rows = []
+    for x in thresholds:
+        recs: list[tuple[bool, float, float]] = []   # (won, price, sec_left at crossing)
+        for r, samps in samples.items():
+            res = results.get(r)
+            if not res:
+                continue
+            # chronological = decreasing sec_left
+            for s in sorted(samps, key=lambda q: -(q.get("sec_left") or 0)):
+                c = s.get("ind_conf")
+                side = s.get("ind_dir")
+                if c is None or side not in ("UP", "DOWN") or c < x:
+                    continue
+                price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
+                if isinstance(price, (int, float)) and 0.0 < price < 1.0:
+                    recs.append((side == res["outcome"], float(price),
+                                 float(s.get("sec_left") or 0)))
+                break   # first crossing only
+        if recs:
+            n = len(recs)
+            wr = sum(1 for w, _, _ in recs if w) / n
+            avg_price = sum(p for _, p, _ in recs) / n
+            avg_sl = sum(sl for _, _, sl in recs) / n
+            ev = (wr - avg_price) / avg_price if avg_price else 0.0
+            fee = taker_fee_frac(avg_price, fee_rate)
+            rows.append({"threshold": x, "n": n, "winrate": round(wr, 4),
+                         "avg_price": round(avg_price, 4),
+                         "avg_sec_left": round(avg_sl, 1),
+                         "edge": round(wr - avg_price, 4),
+                         "ev_pct": round(ev, 4), "fee_pct": round(fee, 4),
+                         "net_ev_pct": round(ev - fee, 4)})
+    return rows
+
+
+def _print_crossing(rows: list[dict[str, Any]]) -> None:
+    print("=" * 74)
+    print("CONFIDENCE-CROSSING ANALYSIS  (buy at the FIRST moment conf >= X)")
+    print("=" * 74)
+    if not rows:
+        print("no crossings yet — needs recorder samples with ind_conf; let it run.")
+        return
+    print(f"  {'conf >=':<9}{'n':<5}{'avg sec left':<14}{'winrate':<10}{'price then':<12}"
+          f"{'edge':<9}{'NET EV'}")
+    for r in rows:
+        print(f"  {r['threshold']:<9.2f}{r['n']:<5}{r['avg_sec_left']:<14.0f}{r['winrate']:<10.1%}"
+              f"{r['avg_price']:<12.3f}{r['edge']:<+9.3f}{r['net_ev_pct']:+.1%}")
+    best = max(rows, key=lambda r: r["net_ev_pct"])
+    print("-" * 74)
+    if best["net_ev_pct"] > 0:
+        print(f"SWEET SPOT so far: enter when conf first reaches {best['threshold']:.2f} "
+              f"(~{best['avg_sec_left']:.0f}s left) -> win {best['winrate']:.0%} "
+              f"@ {best['avg_price']:.2f}, NET {best['net_ev_pct']:+.1%}/trade")
+        print("Provisional until n is a few hundred; if it holds, set THRESHOLD there.")
+    else:
+        print("Every crossing level is NEGATIVE -> by the time our confidence arrives,")
+        print("the ask has already priced the move (the book is winning the race).")
+    print("=" * 74)
+
+
 def fade_analysis(events: list[dict[str, Any]], ref_lo: float = 60.0, ref_hi: float = 150.0,
                   max_price: float = 0.40, min_price: float = 0.03,
                   fee_rate: float = 0.0) -> dict[str, Any]:
@@ -336,6 +416,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Instead of the entry-time table, show edge bucketed by indicator confidence")
     ap.add_argument("--fade", action="store_true",
                     help="E3: trailing-side divergence fade — buy the CHEAP side when divergence opposes the move")
+    ap.add_argument("--crossing", action="store_true",
+                    help="First-crossing table: buy at the first moment confidence reaches each threshold")
     ap.add_argument("--conf-offset", type=float, default=120.0,
                     help="Seconds-left decision point for --by-confidence (default 120)")
     ap.add_argument("--fee-rate", type=float, default=0.0,
@@ -345,6 +427,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     events = load(args.log)
+    if args.crossing:
+        rows = crossing_analysis(events, fee_rate=args.fee_rate)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        _print_crossing(rows)
+        return 0
     if args.fade:
         res = fade_analysis(events, fee_rate=args.fee_rate)
         if args.json:

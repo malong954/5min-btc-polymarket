@@ -189,7 +189,8 @@ class MTFModel:
                 break
         return best
 
-    def evaluate(self, round_start: int, as_of_ts: Optional[int] = None) -> Optional[Signal]:
+    def evaluate(self, round_start: int, as_of_ts: Optional[int] = None,
+                 spot: Optional[float] = None) -> Optional[Signal]:
         """Compute the signal for the 5m round beginning at `round_start`.
 
         By default the decision instant is frozen at `round_start + DECISION_OFFSET`
@@ -198,6 +199,11 @@ class MTFModel:
         entry-time recorder to ask "what do the indicators say right now, earlier
         in the round?" `as_of_ts` must be a 1m-bar CLOSE time (i.e. a minute
         boundary) that has a closed bar in history; otherwise this returns None.
+
+        Pass `spot` (the LIVE tick price) to make the impulse — the dominant
+        weight — update between bar closes: confidence then ticks every poll
+        instead of once a minute. Bar-based indicators (RSI/MACD/...) still use
+        closed bars only; live time is real time, so this adds no lookahead.
 
         Returns None if there isn't enough closed history / data at that instant
         (round is skipped, not counted as a trade).
@@ -214,7 +220,8 @@ class MTFModel:
         if i_open is None:
             return None
         round_open_px = self.bars_1m[i_open].o
-        cur_px = self.bars_1m[i1].c
+        # Live spot beats the (up to a minute stale) bar close for the impulse.
+        cur_px = float(spot) if spot is not None else self.bars_1m[i1].c
 
         sig = Signal()
         subs: dict[str, float] = {}
