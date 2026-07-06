@@ -5,6 +5,7 @@
 # earlier = cheaper but less certain, later = surer but pricier.
 #
 #   scripts/record.sh            # start recording (background)
+#   scripts/record.sh dash       # LIVE color view: watch the price ladder run up
 #   scripts/record.sh status     # rounds recorded so far
 #   scripts/record.sh analyze    # the entry-time table (winrate/price/edge per offset)
 #   scripts/record.sh stop
@@ -33,8 +34,10 @@ case "${1:-start}" in
     exit 0 ;;
   analyze)
     exec "$PY" scripts/btc_entry_timing.py --log "$LOG" ;;
+  dash)
+    exec "$PY" scripts/btc_record_monitor.py --log "$LOG" ;;
   start) ;;
-  *) echo "usage: scripts/record.sh [start|status|analyze|stop]"; exit 1 ;;
+  *) echo "usage: scripts/record.sh [start|dash|status|analyze|stop]"; exit 1 ;;
 esac
 
 mkdir -p out
@@ -44,5 +47,6 @@ fi
 nohup "$PY" scripts/btc_record.py --provider "$PROVIDER" --poll 5 --log "$LOG" \
   >> out/record-nohup.log 2>&1 &
 echo "started trajectory recorder (pid $!)  provider=$PROVIDER  -> $LOG"
+echo "watch it live:  scripts/record.sh dash"
 echo "let it run several hours, then: scripts/record.sh analyze"
 echo "NOTE: nohup does not survive a reboot."
