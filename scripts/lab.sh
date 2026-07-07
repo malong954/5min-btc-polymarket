@@ -47,7 +47,16 @@ case "${1:-start}" in
     trader_up   && echo "trader:   RUNNING (pid $(pgrep -f btc_live_paper.py | tr '\n' ' '))" || echo "trader:   not running"
     recorder_up && echo "recorder: RUNNING (pid $(pgrep -f btc_record.py | tr '\n' ' '))"     || echo "recorder: not running"
     echo "trades settled:  $([ -f "$TLOG" ] && grep -c '"type":"settle"' "$TLOG" 2>/dev/null || echo 0)"
-    echo "rounds recorded: $([ -f "$RLOG" ] && grep -c '"type":"result"' "$RLOG" 2>/dev/null || echo 0)   (want 100+ before judging)"
+    RREC="$([ -f "$RLOG" ] && grep -c '"type":"result"' "$RLOG" 2>/dev/null || echo 0)"
+    RSAMP="$([ -f "$RLOG" ] && grep -c '"type":"sample"' "$RLOG" 2>/dev/null || echo 0)"
+    echo "rounds recorded: $RREC  (samples: $RSAMP; want 100+ rounds before judging)"
+    # A recorder that is 'RUNNING' but writing nothing is a hidden failure —
+    # surface its recent stderr so the cause is visible right here.
+    if [ "$RSAMP" = "0" ] && [ -f out/record-nohup.log ]; then
+      echo
+      echo "!! recorder has produced NO samples — its recent output:"
+      tail -8 out/record-nohup.log | sed 's/^/   | /'
+    fi
     exit 0 ;;
 
   dash)
