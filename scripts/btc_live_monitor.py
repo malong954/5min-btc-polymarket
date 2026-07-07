@@ -39,6 +39,22 @@ SHOW_CURSOR = "\033[?25h"
 RECENT_N = 12
 
 
+def _build_stamp() -> str:
+    """Short git hash of the running checkout — shown in the header so 'which
+    version is the Mac actually running?' is answerable from a screenshot."""
+    try:
+        import subprocess
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             cwd=os.path.dirname(os.path.abspath(__file__)),
+                             capture_output=True, text=True, timeout=3)
+        return out.stdout.strip() or "?"
+    except Exception:
+        return "?"
+
+
+BUILD = _build_stamp()
+
+
 ACTIVITY_MAX = 5000  # cap the in-memory live feed (the full log stays on disk)
 
 
@@ -215,7 +231,8 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
 
     lines: list[str] = []
     now = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
-    lines.append(p.c("  BTC 5m — Live Paper Trader ", BOLD, CYAN) + p.c(f" {now}", GREY))
+    lines.append(p.c("  BTC 5m — Live Paper Trader ", BOLD, CYAN) + p.c(f" {now}", GREY)
+                 + p.c(f"  build {BUILD}", GREY))
     lines.append(p.c("  " + "─" * 56, GREY))
 
     price = hb.get("price")
@@ -371,11 +388,19 @@ def clip_line(line: str, width: int) -> str:
     return clipped
 
 
-def fit_frame(frame: str, columns: int) -> str:
+def fit_frame(frame: str, columns: int, rows: Optional[int] = None) -> str:
     """Make the frame safe for in-place redraw: clip every line to the terminal
-    width and drop the trailing newline (writing a newline on the bottom row
-    scrolls the screen by one line per redraw)."""
-    return "\n".join(clip_line(ln, max(20, columns - 1)) for ln in frame.splitlines())
+    width, HARD-truncate to the window height (a frame even one row taller than
+    the terminal scrolls on every redraw and stacks stale copies in scrollback
+    — the soft budget can't help when the window is shorter than the fixed
+    sections), and drop the trailing newline (a newline written on the bottom
+    row also scrolls)."""
+    lines = [clip_line(ln, max(20, columns - 1)) for ln in frame.splitlines()]
+    if rows is not None and len(lines) > rows - 1:
+        keep = max(5, rows - 1)
+        cut = len(lines) - (keep - 1)
+        lines = lines[:keep - 1] + [f"{DIM}  … {cut} more rows — make the window taller{RESET}"]
+    return "\n".join(lines)
 
 
 def read_new_events(path: str, offset: int) -> tuple[list[dict[str, Any]], int]:
@@ -483,7 +508,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             refresh()
             term = shutil.get_terminal_size(fallback=(100, 40))
             frame = render(state, args.entry_price, painter, max_rows=term.lines)
-            sys.stdout.write(CLEAR + CLEAR_SCROLLBACK + fit_frame(frame, term.columns))
+            sys.stdout.write(CLEAR + CLEAR_SCROLLBACK + fit_frame(frame, term.columns, term.lines))
             sys.stdout.flush()
             time.sleep(args.interval)
     except KeyboardInterrupt:
