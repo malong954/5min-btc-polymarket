@@ -235,10 +235,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if color:
         sys.stdout.write(HIDE_CURSOR)
     try:
+        import shutil
+        from btc_live_monitor import CLEAR_SCROLLBACK, fit_frame
         while True:
             refresh()
+            term = shutil.get_terminal_size(fallback=(100, 40))
             frame = render(state, painter, args.log)
-            sys.stdout.write(CLEAR + frame)
+            sys.stdout.write(CLEAR + CLEAR_SCROLLBACK + fit_frame(frame, term.columns))
             sys.stdout.flush()
             time.sleep(args.interval)
     except KeyboardInterrupt:

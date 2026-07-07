@@ -341,6 +341,43 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
     return "\n".join(lines) + "\n"
 
 
+def clip_line(line: str, width: int) -> str:
+    """Truncate to `width` VISIBLE chars, passing ANSI color codes through
+    without counting them. A line wider than the terminal wraps onto a second
+    physical row, which breaks the height budget and makes the in-place redraw
+    scroll (stacking stale frames) — so no rendered line may ever wrap."""
+    out: list[str] = []
+    n = 0
+    i = 0
+    had_ansi = False
+    while i < len(line):
+        ch = line[i]
+        if ch == "\x1b":                      # ANSI escape: copy through, zero width
+            j = line.find("m", i)
+            if j == -1:
+                break
+            out.append(line[i:j + 1])
+            had_ansi = True
+            i = j + 1
+            continue
+        if n >= width:
+            break
+        out.append(ch)
+        n += 1
+        i += 1
+    clipped = "".join(out)
+    if had_ansi and i < len(line):            # truncated mid-color -> close it
+        clipped += RESET
+    return clipped
+
+
+def fit_frame(frame: str, columns: int) -> str:
+    """Make the frame safe for in-place redraw: clip every line to the terminal
+    width and drop the trailing newline (writing a newline on the bottom row
+    scrolls the screen by one line per redraw)."""
+    return "\n".join(clip_line(ln, max(20, columns - 1)) for ln in frame.splitlines())
+
+
 def read_new_events(path: str, offset: int) -> tuple[list[dict[str, Any]], int]:
     """Return (new events, new offset). Handles missing file and truncation."""
     if not os.path.exists(path):
@@ -446,7 +483,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             refresh()
             term = shutil.get_terminal_size(fallback=(100, 40))
             frame = render(state, args.entry_price, painter, max_rows=term.lines)
-            sys.stdout.write(CLEAR + CLEAR_SCROLLBACK + frame)
+            sys.stdout.write(CLEAR + CLEAR_SCROLLBACK + fit_frame(frame, term.columns))
             sys.stdout.flush()
             time.sleep(args.interval)
     except KeyboardInterrupt:
