@@ -232,23 +232,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         sys.stdout.write(render(state, painter, args.log))
         return 0
 
+    import shutil
+    from btc_live_monitor import ALT_SCREEN_OFF, ALT_SCREEN_ON, CLEAR_SCROLLBACK, fit_frame
     if color:
-        sys.stdout.write(HIDE_CURSOR)
+        sys.stdout.write(ALT_SCREEN_ON + HIDE_CURSOR)
     try:
-        import shutil
-        from btc_live_monitor import CLEAR_SCROLLBACK, fit_frame
         while True:
             refresh()
             term = shutil.get_terminal_size(fallback=(100, 40))
             frame = render(state, painter, args.log)
-            sys.stdout.write(CLEAR + CLEAR_SCROLLBACK + fit_frame(frame, term.columns))
+            sys.stdout.write(CLEAR + CLEAR_SCROLLBACK + fit_frame(frame, term.columns, term.lines))
             sys.stdout.flush()
             time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
     finally:
         if color:
-            sys.stdout.write(SHOW_CURSOR)
+            sys.stdout.write(SHOW_CURSOR + ALT_SCREEN_OFF)
             sys.stdout.flush()
     return 0
 

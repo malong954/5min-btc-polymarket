@@ -32,7 +32,12 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 GREY = "\033[90m"
 CLEAR = "\033[H\033[J"          # cursor home + clear to end
-CLEAR_SCROLLBACK = "\033[3J"    # also drop scrollback so old frames can't stack
+CLEAR_SCROLLBACK = "\033[3J"    # drop scrollback (ignored by Apple Terminal!)
+# Alternate screen buffer (what htop/vim/less use): the dashboard draws on a
+# separate screen with NO scrollback, so stale frames can never pile up above
+# the live panel; on exit the user's normal shell screen is restored intact.
+ALT_SCREEN_ON = "\033[?1049h\033[H"
+ALT_SCREEN_OFF = "\033[?1049l"
 HIDE_CURSOR = "\033[?25l"
 SHOW_CURSOR = "\033[?25h"
 
@@ -502,7 +507,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if color:
-        sys.stdout.write(HIDE_CURSOR)
+        sys.stdout.write(ALT_SCREEN_ON + HIDE_CURSOR)
     try:
         while True:
             refresh()
@@ -515,7 +520,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         pass
     finally:
         if color:
-            sys.stdout.write(SHOW_CURSOR)
+            sys.stdout.write(SHOW_CURSOR + ALT_SCREEN_OFF)
             sys.stdout.flush()
     return 0
 
