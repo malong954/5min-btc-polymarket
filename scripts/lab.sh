@@ -47,16 +47,21 @@ case "${1:-start}" in
   status)
     trader_up   && echo "trader:   RUNNING (pid $(pgrep -f btc_live_paper.py | tr '\n' ' '))" || echo "trader:   not running"
     recorder_up && echo "recorder: RUNNING (pid $(pgrep -f btc_record.py | tr '\n' ' '))"     || echo "recorder: not running"
-    echo "trades settled:  $([ -f "$TLOG" ] && grep -c '"type":"settle"' "$TLOG" 2>/dev/null || echo 0)"
-    RREC="$([ -f "$RLOG" ] && grep -c '"type":"result"' "$RLOG" 2>/dev/null || echo 0)"
-    RSAMP="$([ -f "$RLOG" ] && grep -c '"type":"sample"' "$RLOG" 2>/dev/null || echo 0)"
-    echo "rounds recorded: $RREC  (samples: $RSAMP; want 100+ rounds before judging)"
+    # NOTE: grep -c prints its count but exits 1 when the count is 0, so the
+    # naive `grep -c ... || echo 0` printed BOTH a 0 and the fallback 0 (and
+    # broke the zero-samples check below). Capture with `|| true` instead.
+    TSET=0; RREC=0; RSAMP=0
+    [ -f "$TLOG" ] && TSET="$(grep -c '"type":"settle"' "$TLOG" 2>/dev/null || true)"
+    [ -f "$RLOG" ] && RREC="$(grep -c '"type":"result"' "$RLOG" 2>/dev/null || true)"
+    [ -f "$RLOG" ] && RSAMP="$(grep -c '"type":"sample"' "$RLOG" 2>/dev/null || true)"
+    echo "trades settled:  ${TSET:-0}"
+    echo "rounds recorded: ${RREC:-0}  (samples: ${RSAMP:-0}; want 100+ rounds before judging)"
     # A recorder that is 'RUNNING' but writing nothing is a hidden failure —
     # surface its recent stderr so the cause is visible right here.
-    if [ "$RSAMP" = "0" ] && [ -f out/record-nohup.log ]; then
+    if [ "${RSAMP:-0}" = "0" ] && [ -f out/record-nohup.log ]; then
       echo
       echo "!! recorder has produced NO samples — its recent output:"
-      tail -8 out/record-nohup.log | sed 's/^/   | /'
+      tail -10 out/record-nohup.log | sed 's/^/   | /'
     fi
     exit 0 ;;
 
