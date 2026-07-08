@@ -116,7 +116,13 @@ class LivePaperEngine:
         require_market_price: bool = False,
         entry_rule: str = "threshold",
         edge_margin: float = 0.03,
+        max_entry_price: float = 0.97,
     ):
+        # Never pay near $1.00: a contract bought at 0.99-1.00 risks the whole
+        # stake to win pennies (observed live: $10 risked to win $0.01). If the
+        # ask is above this cap we keep watching — it can dip back — and if it
+        # never does, the round is skipped as price_capped.
+        self.max_entry_price = max_entry_price
         # entry_rule 'threshold': enter when confidence >= entry_threshold.
         # entry_rule 'edge': enter when confidence >= THE ASK + edge_margin —
         # the market price is the hurdle, so expensive (near-decided) rounds
@@ -312,7 +318,12 @@ class LivePaperEngine:
         if w is not None and (w["round"] != cur or sec_left < self.min_entry_sec):
             rs = w["round"]
             if rs not in self.positions and rs not in self.pending and rs not in self.skipped:
-                reason = "below_threshold" if w.get("side") else "no_direction"
+                if not w.get("side"):
+                    reason = "no_direction"
+                elif w.get("capped"):
+                    reason = "price_capped"   # armed, but the ask stayed near $1
+                else:
+                    reason = "below_threshold"
                 self.skipped.add(rs)
                 if w.get("side"):
                     self.shadows[rs] = {"side": w["side"], "reason": reason,
@@ -356,14 +367,19 @@ class LivePaperEngine:
                     if conf > self.watch["conf"]:   # peak snapshot for the skip record
                         self.watch.update({"side": sig.direction, "conf": conf,
                                            "features": feat, "note": note})
+                ask = entry_prices.get(sig.direction) if (entry_prices and sig.direction) else None
+                ask_ok = isinstance(ask, (int, float)) and 0.0 < ask < 1.0
                 if self.entry_rule == "edge":
                     # Hurdle = the live ask + margin. No valid ask this poll ->
                     # not armed; the live loop just re-checks next poll.
-                    ask = entry_prices.get(sig.direction) if (entry_prices and sig.direction) else None
-                    armed = (isinstance(ask, (int, float)) and 0.0 < ask < 1.0
-                             and sig.confidence >= ask + self.edge_margin)
+                    armed = ask_ok and sig.confidence >= ask + self.edge_margin
                 else:
                     armed = bool(sig.direction) and sig.confidence >= self.entry_threshold
+                if armed and ask_ok and ask > self.max_entry_price:
+                    # Armed but the contract is priced near $1 — risking the whole
+                    # stake to win pennies. Keep watching; asks can dip back.
+                    self.watch["capped"] = True
+                    armed = False
                 if armed:
                     ev = self._try_enter(cur, now, sig.direction, sig.confidence,
                                          feat, note, entry_prices, sec_left=sec_left)
@@ -459,6 +475,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge"],
                     help="threshold: conf >= --entry-threshold | edge: conf >= live ask + --edge-margin (the price is the hurdle)")
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
+    ap.add_argument("--max-entry-price", type=float, default=0.97,
+                    help="Never buy above this ask — near $1.00 you risk the whole stake to win pennies")
     ap.add_argument("--entry-window", type=float, default=150.0, help="Start deciding when this many seconds remain in the round")
     ap.add_argument("--min-entry", type=float, default=30.0, help="Stop entering/retrying prices below this many seconds left")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
@@ -493,6 +511,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         stake_pct=args.stake_pct, big_conf=args.big_conf, big_mult=args.big_mult,
         confluence=args.confluence, require_market_price=use_pm,
         entry_rule=args.entry_rule, edge_margin=args.edge_margin,
+        max_entry_price=args.max_entry_price,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")

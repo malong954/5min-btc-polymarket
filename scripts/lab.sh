@@ -29,6 +29,7 @@ PROVIDER="${PROVIDER:-binance}"
 THRESHOLD="${THRESHOLD:-0.60}"
 RULE="${RULE:-threshold}"
 EDGE_MARGIN="${EDGE_MARGIN:-0.03}"
+MAX_PRICE="${MAX_PRICE:-0.97}"   # never buy above this ask (near $1 = pennies upside)
 STAKE="${STAKE:-10}"
 BANKROLL="${BANKROLL:-100}"
 
@@ -125,7 +126,7 @@ else
   [ -f "$TLOG" ] && mv "$TLOG" "out/live-prev.jsonl" && echo "archived prior session -> out/live-prev.jsonl"
   nohup "$PY" scripts/btc_live_paper.py \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
-    --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" \
+    --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
     --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
