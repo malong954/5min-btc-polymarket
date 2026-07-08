@@ -121,6 +121,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     round_open: Optional[float] = None
     last_spot: Optional[float] = None
     last_klines = 0.0
+    last_slot_retry = 0.0
+    last_diag = 0.0
+    pm_missing_logged: set = set()
     n = 0
     try:
         while args.max_steps is None or n < args.max_steps:
@@ -137,11 +140,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                     cur_round = r
                     round_open = feed.slot_open(r)   # exact 5m-open BTC price
                     last_spot = None
+                    if round_open is None:
+                        print(f"# slot_open failed for round {r} — will retry / "
+                              f"fall back to first spot", file=sys.stderr)
                 spot = feed.spot()
                 if spot is not None:
                     last_spot = spot
                     push_spot(now, spot)
+                # slot_open swallows failures into None (fine for the trading
+                # gate, fatal for a recorder): without an open we can emit
+                # NOTHING all round, silently. Self-heal two ways -- use the
+                # first spot of a YOUNG round as the open (feed-consistent with
+                # the last-spot close used to settle), and keep retrying the
+                # exact kline open every 30s.
+                if round_open is None:
+                    if spot is not None and sec_left >= 285:
+                        round_open = spot
+                        print(f"# round {r}: using first spot {spot:.2f} as open", file=sys.stderr)
+                    elif now - last_slot_retry >= 30:
+                        last_slot_retry = now
+                        round_open = feed.slot_open(r)
                 in_window = args.min_left <= sec_left <= args.max_left
+                # Never be silent: if a full minute of in-window polls produced
+                # nothing, say exactly which gate is blocking.
+                if in_window and now - last_diag >= 60 and (round_open is None or spot is None):
+                    last_diag = now
+                    print(f"# waiting: round_open={'MISSING' if round_open is None else 'ok'} "
+                          f"spot={'MISSING' if spot is None else 'ok'} (round {r}, {sec_left:.0f}s left)",
+                          file=sys.stderr)
                 # Refresh the heavier 1m klines periodically (and lazily on first use),
                 # so the indicator signal stays current without a fetch every poll.
                 if in_window and (not bars or now - last_klines >= args.klines_every):
@@ -152,6 +178,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                         print(f"# kline fetch error: {e}", file=sys.stderr)
                 if in_window and round_open is not None and spot is not None:
                     pm = current_prices(now)
+                    if not pm and r not in pm_missing_logged:
+                        pm_missing_logged.add(r)
+                        print(f"# round {r}: no polymarket market found (gamma slug lookup empty)",
+                              file=sys.stderr)
                     if pm:
                         idir, iconf, iscore, idiv = indicator_signal(r, now, spot=spot)
                         emit({"type": "sample", "round": r, "sec_left": round(sec_left, 1),
