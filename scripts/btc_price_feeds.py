@@ -58,21 +58,41 @@ class Feed:
 
 class BinanceFeed(Feed):
     name = "binance"
+    # api.binance.com returns HTTP 451 for US IPs; the .vision data mirror is
+    # open (same API, market data only). Same fallback order as btc_binance —
+    # this feed being pinned to the blocked host is what silenced the recorder
+    # for two days (spot/slot_open quietly None on a US network).
+    BASES = [
+        "https://data-api.binance.vision",
+        "https://api.binance.com",
+        "https://api.binance.us",
+    ]
+
+    def __init__(self) -> None:
+        self._base: Optional[str] = None   # sticky: first base that answered
+
+    def _get(self, path: str, params: dict) -> Any:
+        order = ([self._base] if self._base else []) + [b for b in self.BASES if b != self._base]
+        for b in order:
+            try:
+                j = _get_json(b + path, params)
+                self._base = b
+                return j
+            except Exception:
+                continue
+        return None
 
     def spot(self) -> Optional[float]:
         try:
-            j = _get_json(
-                "https://api.binance.com/api/v3/ticker/price",
-                {"symbol": "BTCUSDT"},
-            )
-            return float(j["price"])
+            j = self._get("/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+            return float(j["price"]) if j else None
         except Exception:
             return None
 
     def slot_open(self, slot_start: int) -> Optional[float]:
         try:
-            kl = _get_json(
-                "https://api.binance.com/api/v3/klines",
+            kl = self._get(
+                "/api/v3/klines",
                 {
                     "symbol": "BTCUSDT",
                     "interval": "5m",
