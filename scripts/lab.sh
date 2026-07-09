@@ -44,6 +44,20 @@ case "${1:-start}" in
     recorder_up && pkill -f "btc_record.py"     && echo "stopped the recorder"     || echo "recorder not running"
     exit 0 ;;
 
+  newrun)
+    # Fresh measurement segment: stop everything, archive BOTH logs with a
+    # timestamp, start clean. Use after a model/config change so analyze does
+    # not mix data measured with different brains. Old segments stay analyzable:
+    #   .venv/bin/python scripts/btc_entry_timing.py --log out/trajectory-<ts>.jsonl --crossing
+    pkill -f "btc_live_paper.py" 2>/dev/null || true
+    pkill -f "btc_record.py" 2>/dev/null || true
+    sleep 1
+    TS="$(date +%Y%m%d-%H%M%S)"
+    [ -f "$TLOG" ] && mv "$TLOG" "out/live-$TS.jsonl" && echo "archived trader log   -> out/live-$TS.jsonl"
+    [ -f "$RLOG" ] && mv "$RLOG" "out/trajectory-$TS.jsonl" && echo "archived recorder log -> out/trajectory-$TS.jsonl"
+    echo "starting a fresh run..."
+    exec "$0" start ;;
+
   status)
     trader_up   && echo "trader:   RUNNING (pid $(pgrep -f btc_live_paper.py | tr '\n' ' '))" || echo "trader:   not running"
     recorder_up && echo "recorder: RUNNING (pid $(pgrep -f btc_record.py | tr '\n' ' '))"     || echo "recorder: not running"
@@ -109,7 +123,7 @@ case "${1:-start}" in
     exit 0 ;;
 
   start) ;;
-  *) echo "usage: scripts/lab.sh [start|analyze|dash|recdash|history|status|stop]"; exit 1 ;;
+  *) echo "usage: scripts/lab.sh [start|newrun|analyze|dash|recdash|history|status|stop]"; exit 1 ;;
 esac
 
 mkdir -p out
