@@ -180,8 +180,12 @@ def test_confluence_agreement():
     """confluence=0 must not change confidence; confluence>0 must lower confidence
     for rounds where the weighted indicators disagree (low agreement)."""
     bars = synth_bars(4000, autocorr=0.4, seed=44)
-    base = MTFModel(bars)                       # confluence 0 (default)
-    conf = MTFModel(bars, confluence=1.0)       # fully agreement-scaled
+    # Confluence needs >=2 weighted indicators to have any disagreement to
+    # measure; production DEFAULT_WEIGHTS is impulse-only now (agreement always
+    # 1.0), so exercise the mechanism with an explicit two-indicator set.
+    W = {"impulse_1m": 1.0, "rsi_1m": 0.5}
+    base = MTFModel(bars, weights=W)                       # confluence 0 (default)
+    conf = MTFModel(bars, weights=W, confluence=1.0)       # fully agreement-scaled
     lowered = 0
     checked = 0
     for b in base.bars_5m:

@@ -121,7 +121,13 @@ class Signal:
 # so --ablation / --optimize-weights can still explore them.
 DEFAULT_WEIGHTS = {
     "impulse_1m": 1.0,
-    "divergence_1m": 0.3,  # leading signal — earns weight on real data
+    # Divergence killed by live data (182 recorded rounds): the trailing-side
+    # fade lost 13% winrate @ -31% EV, every divergence type underperformed
+    # 'none' (57-63% vs 85%), div_signal correlated NEGATIVELY with wins, and
+    # the indicator-side entry table (divergence can flip the call) was negative
+    # at every offset while the raw move was positive. Still computed + logged
+    # (weight 0) for continued monitoring.
+    "divergence_1m": 0.0,
     "rsi_1m": 0.0,         # ablation: dead weight
     "macd_1m": 0.0,        # ablation: dead weight
     "trend_5m": 0.0,       # ablation: worst drag (-0.032 EV)
