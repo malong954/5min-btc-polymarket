@@ -51,7 +51,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     logf = open(args.log, "a")
 
     from btc_price_feeds import build_feeds
-    from btc_polymarket import current_prices
+    from btc_polymarket import current_prices, current_slug, resolved_outcome
     from btc_backtest import Bar, DEFAULT_WEIGHTS, MTFModel
     from btc_history import fetch_history
 
@@ -124,6 +124,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     last_slot_retry = 0.0
     last_diag = 0.0
     pm_missing_logged: set = set()
+    # Closed rounds awaiting Polymarket's OFFICIAL resolution (the ground-truth
+    # label; the spot-feed result can disagree on near-flat rounds).
+    pm_pending: dict = {}
     n = 0
     try:
         while args.max_steps is None or n < args.max_steps:
@@ -137,6 +140,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                         outcome = "UP" if last_spot > round_open else "DOWN"
                         emit({"type": "result", "round": cur_round, "open": round(round_open, 2),
                               "close": round(last_spot, 2), "outcome": outcome, "ts": int(now)})
+                        # Queue the round for its OFFICIAL Polymarket resolution
+                        # (takes ~a minute to settle on-chain; poll a few times).
+                        pm_pending[cur_round] = {"next": now + 45.0, "tries": 0}
                     cur_round = r
                     round_open = feed.slot_open(r)   # exact 5m-open BTC price
                     last_spot = None
@@ -160,6 +166,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                     elif now - last_slot_retry >= 30:
                         last_slot_retry = now
                         round_open = feed.slot_open(r)
+                # Fetch official resolutions for recently closed rounds.
+                for rs in list(pm_pending):
+                    p = pm_pending[rs]
+                    if now < p["next"]:
+                        continue
+                    outc = resolved_outcome(current_slug(rs))
+                    if outc in ("UP", "DOWN"):
+                        emit({"type": "result_pm", "round": rs, "outcome": outc, "ts": int(now)})
+                        del pm_pending[rs]
+                    else:
+                        p["tries"] += 1
+                        p["next"] = now + 30.0
+                        if p["tries"] >= 6:   # ~3.5 min of retries -> give up
+                            print(f"# round {rs}: no official resolution after "
+                                  f"{p['tries']} tries", file=sys.stderr)
+                            del pm_pending[rs]
                 in_window = args.min_left <= sec_left <= args.max_left
                 # Never be silent: if a full minute of in-window polls produced
                 # nothing, say exactly which gate is blocking.

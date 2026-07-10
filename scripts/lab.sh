@@ -93,6 +93,9 @@ case "${1:-start}" in
     if [ -f "$RLOG" ]; then
       "$PY" scripts/btc_entry_timing.py --log "$RLOG"                      || true
       echo
+      echo "---- same, robust: executable size only + near-flat rounds dropped ----"
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --min-size 100 --min-move 10 || true
+      echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side indicator     || true
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-confidence     || true

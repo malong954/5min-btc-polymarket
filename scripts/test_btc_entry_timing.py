@@ -199,6 +199,32 @@ def test_edge_gate_price_is_hurdle():
     check("edge-gate huge margin finds nothing", by[0.20]["n"] == 0)
 
 
+def test_official_result_overrides_spot():
+    # Spot feed says UP, but Polymarket officially resolved DOWN -> the analyzer
+    # must grade against the OFFICIAL outcome.
+    evs = [
+        {"type": "sample", "round": 0, "sec_left": 100, "move": 10, "up_ask": 0.7, "dn_ask": 0.3},
+        {"type": "result", "round": 0, "open": 60000, "close": 60000.5, "outcome": "UP"},
+        {"type": "result_pm", "round": 0, "outcome": "DOWN"},
+    ]
+    rows = analyze(evs)
+    check("official resolution overrides spot label", rows[0]["winrate"] == 0.0)
+
+
+def test_min_move_drops_flat_rounds():
+    evs = [
+        # flat round (|close-open| = 0.5): excluded at min_move=10
+        {"type": "sample", "round": 0, "sec_left": 100, "move": 1, "up_ask": 0.6, "dn_ask": 0.4},
+        {"type": "result", "round": 0, "open": 60000, "close": 60000.5, "outcome": "UP"},
+        # decisive round: kept
+        {"type": "sample", "round": 1, "sec_left": 100, "move": 50, "up_ask": 0.8, "dn_ask": 0.2},
+        {"type": "result", "round": 1, "open": 60000, "close": 60050, "outcome": "UP"},
+    ]
+    all_rows = analyze(evs)
+    solid = analyze(evs, min_move=10.0)
+    check("min-move keeps only decisive rounds", all_rows[0]["n"] == 2 and solid[0]["n"] == 1)
+
+
 def test_empty_and_missing():
     check("empty log -> no rows", analyze([]) == [])
     # samples without a result round are ignored.
@@ -216,6 +242,8 @@ def main():
     test_fade_no_setups()
     test_crossing_first_moment()
     test_edge_gate_price_is_hurdle()
+    test_official_result_overrides_spot()
+    test_min_move_drops_flat_rounds()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")
 

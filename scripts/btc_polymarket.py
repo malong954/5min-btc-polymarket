@@ -136,6 +136,40 @@ def current_prices(now_ts: float, getter: Callable[..., Any] = _get_json) -> Opt
     }
 
 
+def resolved_outcome(slug: str, getter: Callable[..., Any] = _get_json) -> Optional[str]:
+    """OFFICIAL Polymarket resolution for a (closed) 5m market: 'UP' / 'DOWN',
+    or None if it hasn't decisively resolved yet. This is the ground-truth
+    label — our spot-feed settle can disagree with the Chainlink resolution on
+    near-flat rounds, silently grading our own homework."""
+    try:
+        ev = fetch_event(slug, getter)
+    except Exception:
+        return None
+    if not ev:
+        return None
+    markets = ev.get("markets") or []
+    if not markets:
+        return None
+    m = markets[0]
+    outcomes = parse_json_field(m.get("outcomes")) or []
+    prices = parse_json_field(m.get("outcomePrices")) or []
+    if not isinstance(prices, list) or len(prices) < 2:
+        return None
+    try:
+        p0, p1 = float(prices[0]), float(prices[1])
+    except (TypeError, ValueError):
+        return None
+    # Only trust a decisive settlement (1/0), not live mid-round prices.
+    if not ((p0 > 0.99 and p1 < 0.01) or (p1 > 0.99 and p0 < 0.01)):
+        return None
+    win_i = 0 if p0 > p1 else 1
+    labs = [str(x).lower() for x in outcomes[:2]] if isinstance(outcomes, list) else []
+    up_i = 0
+    if len(labs) >= 2 and ("up" in labs[1] or "yes" in labs[1]):
+        up_i = 1
+    return "UP" if win_i == up_i else "DOWN"
+
+
 def main() -> int:
     import sys
     import time

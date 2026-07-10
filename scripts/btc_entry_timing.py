@@ -55,15 +55,32 @@ DEFAULT_CONF_BANDS = [(0.0, 0.5), (0.5, 0.6), (0.6, 0.7),
 
 
 def _split(events: list[dict[str, Any]]):
+    """Group samples and results per round. result_pm (Polymarket's OFFICIAL
+    resolution) overrides the spot-feed outcome when present — the spot label
+    can disagree with the Chainlink settle on near-flat rounds, and using it to
+    grade a spot-derived signal risks grading our own homework."""
     samples: dict[int, list[dict[str, Any]]] = {}
     results: dict[int, dict[str, Any]] = {}
+    official: dict[int, str] = {}
     for e in events:
         t = e.get("type")
         if t == "sample":
             samples.setdefault(e["round"], []).append(e)
         elif t == "result":
             results[e["round"]] = e
-    return samples, results
+        elif t == "result_pm" and e.get("outcome") in ("UP", "DOWN"):
+            official[e["round"]] = e["outcome"]
+    merged: dict[int, dict[str, Any]] = {}
+    for r, e in results.items():
+        d = dict(e)
+        if r in official:
+            d["outcome"] = official[r]
+            d["official"] = True
+        merged[r] = d
+    for r, oc in official.items():
+        if r not in merged:
+            merged[r] = {"round": r, "outcome": oc, "official": True}
+    return samples, merged
 
 
 VEL_FIELDS = {"vel_5s": "vel_5s", "vel_15s": "vel_15s", "vel_30s": "vel_30s", "vel_60s": "vel_60s"}
@@ -114,7 +131,8 @@ def taker_fee_frac(price: float, fee_rate: float) -> float:
 
 def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_BINS,
             side_source: str = "move", min_conf: Optional[float] = None,
-            fee_rate: float = 0.0, min_size: float = 0.0) -> list[dict[str, Any]]:
+            fee_rate: float = 0.0, min_size: float = 0.0,
+            min_move: float = 0.0) -> list[dict[str, Any]]:
     samples, results = _split(events)
     rows = []
     for lo, hi in bins:
@@ -123,6 +141,12 @@ def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_
             res = results.get(r)
             if not res:
                 continue
+            if min_move > 0.0:
+                # Robustness filter: drop near-flat rounds, where the label is
+                # most exposed to feed disagreement (see --label-risk).
+                op, cl = res.get("open"), res.get("close")
+                if op is None or cl is None or abs(float(cl) - float(op)) < min_move:
+                    continue
             outcome = res["outcome"]
             inbin = [s for s in samps if lo <= s["sec_left"] < hi]
             if not inbin:
@@ -552,6 +576,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--min-size", type=float, default=0.0,
                     help="Require this many shares at the best ask (filters phantom dust quotes; "
                          "needs samples recorded with up_sz/dn_sz)")
+    ap.add_argument("--min-move", type=float, default=0.0,
+                    help="Drop rounds settling within this many dollars of open (label-noise robustness check)")
     ap.add_argument("--by-confidence", action="store_true",
                     help="Instead of the entry-time table, show edge bucketed by indicator confidence")
     ap.add_argument("--fade", action="store_true",
@@ -608,7 +634,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     rows = analyze(events, side_source=args.side, min_conf=args.min_conf,
-                   fee_rate=args.fee_rate, min_size=args.min_size)
+                   fee_rate=args.fee_rate, min_size=args.min_size, min_move=args.min_move)
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
