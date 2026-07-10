@@ -117,7 +117,17 @@ class LivePaperEngine:
         entry_rule: str = "threshold",
         edge_margin: float = 0.03,
         max_entry_price: float = 0.97,
+        lead_window: tuple = (240.0, 180.0),
+        lead_max_price: float = 0.72,
+        lead_min_move: float = 10.0,
     ):
+        # 'lead' rule — the measured candidate strategy: buy whichever side BTC
+        # already leads, inside the sweet-spot window (seconds-left hi..lo),
+        # only while the ask is still cheap and the move is decisive. From the
+        # robust entry-time table: ~72-77% winrate @ ~0.64-0.69 in 180-240s.
+        self.lead_hi, self.lead_lo = float(lead_window[0]), float(lead_window[1])
+        self.lead_max_price = lead_max_price
+        self.lead_min_move = lead_min_move
         # Never pay near $1.00: a contract bought at 0.99-1.00 risks the whole
         # stake to win pennies (observed live: $10 risked to win $0.01). If the
         # ask is above this cap we keep watching — it can dip back — and if it
@@ -328,6 +338,8 @@ class LivePaperEngine:
                     # Edge rule: confidence never exceeded the ask + margin —
                     # the book was already priced at/above our conviction.
                     reason = "no_edge"
+                elif self.entry_rule == "lead":
+                    reason = "no_lead_setup"   # window/ask/move never lined up
                 else:
                     reason = "below_threshold"
                 self.skipped.add(rs)
@@ -382,6 +394,14 @@ class LivePaperEngine:
                     # Hurdle = the live ask + margin. No valid ask this poll ->
                     # not armed; the live loop just re-checks next poll.
                     armed = ask_ok and sig.confidence >= ask + self.edge_margin
+                elif self.entry_rule == "lead":
+                    # Candidate strategy: leading side, sweet-spot window, cheap
+                    # ask, decisive move. No indicators beyond the move itself.
+                    mv = sig.features.get("btc_move_usd", 0.0) or 0.0
+                    armed = (ask_ok and sig.direction is not None
+                             and self.lead_lo <= sec_left <= self.lead_hi
+                             and abs(mv) >= self.lead_min_move
+                             and ask <= self.lead_max_price)
                 else:
                     armed = bool(sig.direction) and sig.confidence >= self.entry_threshold
                 if armed and ask_ok and ask > self.max_entry_price:
@@ -481,8 +501,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--poll", type=float, default=2.0, help="Seconds between polls (live spot price ticks at this cadence)")
     ap.add_argument("--klines-every", type=float, default=15.0, help="Seconds between the heavier 1m-kline/indicator refreshes")
     ap.add_argument("--entry-threshold", type=float, default=0.60, help="Min confidence to open a paper position (entry-rule threshold)")
-    ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge"],
-                    help="threshold: conf >= --entry-threshold | edge: conf >= live ask + --edge-margin (the price is the hurdle)")
+    ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge", "lead"],
+                    help="threshold: conf >= --entry-threshold | edge: conf >= live ask + --edge-margin | "
+                         "lead: buy the leading side in the sweet-spot window when the ask is cheap (the measured candidate)")
+    ap.add_argument("--lead-hi", type=float, default=240.0, help="lead rule: window opens at this many seconds left")
+    ap.add_argument("--lead-lo", type=float, default=180.0, help="lead rule: window closes at this many seconds left")
+    ap.add_argument("--lead-max-price", type=float, default=0.72, help="lead rule: only enter while the ask is at/below this")
+    ap.add_argument("--lead-min-move", type=float, default=10.0, help="lead rule: require BTC moved at least this many dollars")
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
     ap.add_argument("--max-entry-price", type=float, default=0.97,
                     help="Never buy above this ask — near $1.00 you risk the whole stake to win pennies")
@@ -523,6 +548,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         confluence=args.confluence, require_market_price=use_pm,
         entry_rule=args.entry_rule, edge_margin=args.edge_margin,
         max_entry_price=args.max_entry_price,
+        lead_window=(args.lead_hi, args.lead_lo),
+        lead_max_price=args.lead_max_price, lead_min_move=args.lead_min_move,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")

@@ -494,6 +494,58 @@ def _print_fade(res: dict[str, Any]) -> None:
     print("=" * 68)
 
 
+def label_check(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Direct measurement of label noise: for rounds that have BOTH our
+    spot-feed result and Polymarket's official resolution (result_pm), how
+    often do they disagree — and how concentrated is disagreement in
+    near-flat rounds?"""
+    spot: dict[int, dict[str, Any]] = {}
+    pm: dict[int, str] = {}
+    for e in events:
+        t = e.get("type")
+        if t == "result":
+            spot[e["round"]] = e
+        elif t == "result_pm" and e.get("outcome") in ("UP", "DOWN"):
+            pm[e["round"]] = e["outcome"]
+    both = [r for r in spot if r in pm]
+    dis = []
+    for r in both:
+        if spot[r].get("outcome") != pm[r]:
+            op, cl = spot[r].get("open"), spot[r].get("close")
+            mv = abs(float(cl) - float(op)) if op is not None and cl is not None else None
+            dis.append({"round": r, "spot": spot[r].get("outcome"), "official": pm[r],
+                        "abs_move": round(mv, 2) if mv is not None else None})
+    return {"n_official": len(pm), "n_both": len(both), "n_disagree": len(dis),
+            "pct_disagree": round(len(dis) / len(both), 4) if both else None,
+            "disagreements": dis[:20]}
+
+
+def _print_label_check(res: dict[str, Any]) -> None:
+    print("=" * 68)
+    print("LABEL AGREEMENT  (our spot settle vs Polymarket's OFFICIAL settle)")
+    print("=" * 68)
+    if not res["n_both"]:
+        print("  no rounds have both labels yet — result_pm collection just started;")
+        print("  let the recorder run.")
+        print("=" * 68)
+        return
+    print(f"  official resolutions recorded: {res['n_official']}   comparable rounds: {res['n_both']}")
+    pct = res["pct_disagree"]
+    print(f"  disagreements: {res['n_disagree']} ({pct:.1%})")
+    for d in res["disagreements"]:
+        print(f"    round {d['round']}: spot={d['spot']} official={d['official']} |move|=${d['abs_move']}")
+    print("-" * 68)
+    if pct == 0:
+        print("  Labels agree perfectly so far — spot-labeled history is trustworthy.")
+    elif pct <= 0.03:
+        print("  Small disagreement rate, concentrated in flat rounds — spot-labeled")
+        print("  results are usable; official labels remove the residual noise.")
+    else:
+        print("  MATERIAL disagreement — treat spot-labeled edges as suspect and rerun")
+        print("  the tables once enough official-labeled rounds accumulate.")
+    print("=" * 68)
+
+
 def _print_offsets(rows, side_source, min_conf, fee_rate):
     tag = f"side={side_source}" + (f" min-conf={min_conf}" if min_conf is not None else "")
     fee_on = fee_rate > 0
@@ -588,6 +640,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Edge-gate table: buy at the first moment confidence >= ask + margin (price as hurdle)")
     ap.add_argument("--label-risk", action="store_true",
                     help="Fraction of near-flat rounds where Binance-vs-Chainlink settle labels could differ")
+    ap.add_argument("--label-check", action="store_true",
+                    help="Measured disagreement between our spot settle and the official Polymarket settle")
     ap.add_argument("--conf-offset", type=float, default=120.0,
                     help="Seconds-left decision point for --by-confidence (default 120)")
     ap.add_argument("--fee-rate", type=float, default=0.0,
@@ -597,6 +651,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     events = load(args.log)
+    if args.label_check:
+        res = label_check(events)
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        _print_label_check(res)
+        return 0
     if args.label_risk:
         res = label_risk(events)
         if args.json:

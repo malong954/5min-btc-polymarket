@@ -106,6 +106,8 @@ case "${1:-start}" in
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --label-risk        || true
       echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --label-check       || true
+      echo
       for v in vel_15s vel_30s; do
         "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side "$v"       || true
         echo
@@ -155,6 +157,8 @@ else
     >> out/nohup.log 2>&1 &
   if [ "$RULE" = "edge" ]; then
     echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
+  elif [ "$RULE" = "lead" ]; then
+    echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, 180-240s left, ask <= 0.72, |move| >= 10)"
   else
     echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${THRESHOLD})"
   fi

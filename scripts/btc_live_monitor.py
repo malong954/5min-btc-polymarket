@@ -269,6 +269,8 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
             # Armed-ness depends on the live ask, which the monitor doesn't
             # stream — state the rule instead of a bogus threshold check.
             status = p.c(f"edge rule: enters when conf >= ask + {margin:.2f}", CYAN)
+        elif rule == "lead":
+            status = p.c("lead rule: buys the leading side in the sweet-spot window", CYAN)
         else:
             armed = conf >= thr
             status = p.c(f"ARMED >= {thr:.2f}", GREEN, BOLD) if armed else p.c(f"waiting (need >= {thr:.2f})", YELLOW)
@@ -485,7 +487,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting account balance in USD")
     ap.add_argument("--stake-usd", type=float, default=10.0, help="USD per trade (for deriving $ from older logs)")
     ap.add_argument("--entry-threshold", type=float, default=0.60, help="Confidence needed to trade (shown as ARMED/waiting)")
-    ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge"],
+    ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge", "lead"],
                     help="Display which rule the trader runs (edge shows conf >= ask + margin)")
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Displayed margin for --entry-rule edge")
     ap.add_argument("--recent", type=int, default=15, help="How many activity rows the LIVE view shows (full log via --history)")
