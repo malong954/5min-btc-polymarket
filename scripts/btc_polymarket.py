@@ -65,14 +65,17 @@ def fetch_event(slug: str, getter: Callable[..., Any] = _get_json) -> Optional[d
     return None
 
 
-def clob_best_ask(token_id: str, getter: Callable[..., Any] = _get_json) -> Optional[float]:
-    """Lowest ask (the price you pay to BUY this token) from the CLOB order book."""
+def clob_best_ask_level(token_id: str, getter: Callable[..., Any] = _get_json) -> tuple[Optional[float], Optional[float]]:
+    """(price, size) of the lowest ask from the CLOB order book. Size matters:
+    a cheap best ask for dust shares looks like edge in analysis but cannot be
+    bought in practice — record it so the analyzers can filter phantom quotes."""
     try:
         book = getter(CLOB_BOOK, {"token_id": str(token_id)})
     except Exception:
-        return None
+        return None, None
     asks = (book or {}).get("asks") or []
-    best = None
+    best: Optional[float] = None
+    best_sz: Optional[float] = None
     for a in asks:
         try:
             p = float(a["price"])
@@ -80,7 +83,16 @@ def clob_best_ask(token_id: str, getter: Callable[..., Any] = _get_json) -> Opti
             continue
         if best is None or p < best:
             best = p
-    return best
+            try:
+                best_sz = float(a.get("size"))
+            except (TypeError, ValueError):
+                best_sz = None
+    return best, best_sz
+
+
+def clob_best_ask(token_id: str, getter: Callable[..., Any] = _get_json) -> Optional[float]:
+    """Lowest ask (the price you pay to BUY this token) from the CLOB order book."""
+    return clob_best_ask_level(token_id, getter)[0]
 
 
 def _side_tokens(market: dict[str, Any]) -> Optional[tuple[str, str, str]]:
@@ -110,13 +122,17 @@ def current_prices(now_ts: float, getter: Callable[..., Any] = _get_json) -> Opt
     if tokens is None:
         return None
     up_t, dn_t, end_iso = tokens
+    up_p, up_sz = clob_best_ask_level(up_t, getter)
+    dn_p, dn_sz = clob_best_ask_level(dn_t, getter)
     return {
         "slug": slug,
         "up_token": up_t,
         "down_token": dn_t,
         "end_iso": end_iso,
-        "UP": clob_best_ask(up_t, getter),
-        "DOWN": clob_best_ask(dn_t, getter),
+        "UP": up_p,
+        "DOWN": dn_p,
+        "UP_size": up_sz,
+        "DOWN_size": dn_sz,
     }
 
 

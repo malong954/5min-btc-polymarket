@@ -69,9 +69,12 @@ def _split(events: list[dict[str, Any]]):
 VEL_FIELDS = {"vel_5s": "vel_5s", "vel_15s": "vel_15s", "vel_30s": "vel_30s", "vel_60s": "vel_60s"}
 
 
-def _side_and_price(s: dict[str, Any], side_source: str, min_conf: Optional[float]):
+def _side_and_price(s: dict[str, Any], side_source: str, min_conf: Optional[float],
+                    min_size: float = 0.0):
     """Resolve (side, price) for one sample under the chosen rule, or (None, None)
-    to skip it. side_source: move | indicator | vel_5s | vel_15s | vel_30s | vel_60s."""
+    to skip it. side_source: move | indicator | vel_5s | vel_15s | vel_30s | vel_60s.
+    min_size > 0 requires that many shares at the best ask (samples recorded
+    before sizes were logged are excluded), filtering phantom dust quotes."""
     if side_source == "indicator":
         if min_conf is not None:
             c = s.get("ind_conf")
@@ -93,6 +96,10 @@ def _side_and_price(s: dict[str, Any], side_source: str, min_conf: Optional[floa
     price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
     if price is None or not (0.0 < price < 1.0):
         return None, None
+    if min_size > 0.0:
+        sz = s.get("up_sz") if side == "UP" else s.get("dn_sz")
+        if not isinstance(sz, (int, float)) or sz < min_size:
+            return None, None
     return side, float(price)
 
 
@@ -107,7 +114,7 @@ def taker_fee_frac(price: float, fee_rate: float) -> float:
 
 def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_BINS,
             side_source: str = "move", min_conf: Optional[float] = None,
-            fee_rate: float = 0.0) -> list[dict[str, Any]]:
+            fee_rate: float = 0.0, min_size: float = 0.0) -> list[dict[str, Any]]:
     samples, results = _split(events)
     rows = []
     for lo, hi in bins:
@@ -122,7 +129,7 @@ def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_
                 continue
             mid = (lo + hi) / 2.0
             s = min(inbin, key=lambda x: abs(x["sec_left"] - mid))
-            side, price = _side_and_price(s, side_source, min_conf)
+            side, price = _side_and_price(s, side_source, min_conf, min_size)
             if side is None:
                 continue
             recs.append((side == outcome, price))
@@ -542,6 +549,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "or the sign of a sub-minute velocity (vel_5s..vel_60s) to compare fast timeframes")
     ap.add_argument("--min-conf", type=float, default=None,
                     help="With --side indicator: only take samples with indicator confidence >= this")
+    ap.add_argument("--min-size", type=float, default=0.0,
+                    help="Require this many shares at the best ask (filters phantom dust quotes; "
+                         "needs samples recorded with up_sz/dn_sz)")
     ap.add_argument("--by-confidence", action="store_true",
                     help="Instead of the entry-time table, show edge bucketed by indicator confidence")
     ap.add_argument("--fade", action="store_true",
@@ -597,7 +607,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         _print_bands(rows, args.conf_offset)
         return 0
 
-    rows = analyze(events, side_source=args.side, min_conf=args.min_conf, fee_rate=args.fee_rate)
+    rows = analyze(events, side_source=args.side, min_conf=args.min_conf,
+                   fee_rate=args.fee_rate, min_size=args.min_size)
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0

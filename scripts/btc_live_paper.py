@@ -202,9 +202,11 @@ class LivePaperEngine:
             "confidence": round(confidence, 4), "opened_ts": int(now),
             "stake_usd": stake, "price_source": "polymarket" if real_ok else "fixed",
         }
+        ask_sz = entry_prices.get(side + "_size") if entry_prices else None
         return self._emit({
             "ts": int(now), "type": "entry", "round": cur, "side": side,
             "entry_price": round(ep, 4), "price_source": "polymarket" if real_ok else "fixed",
+            "ask_size": ask_sz,   # shares at the best ask — dust = phantom fill
             "confidence": round(confidence, 4),
             "seconds_left": round(sec_left, 1) if sec_left is not None else None,
             "stake_usd": stake, "sizing": self.sizing, "big_bet": big,
@@ -548,7 +550,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                         from btc_polymarket import current_prices
                         pm = current_prices(now)
                         if pm:
-                            entry_prices = {"UP": pm.get("UP"), "DOWN": pm.get("DOWN")}
+                            entry_prices = {"UP": pm.get("UP"), "DOWN": pm.get("DOWN"),
+                                            "UP_size": pm.get("UP_size"),
+                                            "DOWN_size": pm.get("DOWN_size")}
                     except Exception as e:
                         print(f"# polymarket price error: {e}", file=sys.stderr)
                 events = engine.step(now, bars, spot=spot, entry_prices=entry_prices)

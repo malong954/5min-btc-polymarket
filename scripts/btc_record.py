@@ -187,6 +187,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         emit({"type": "sample", "round": r, "sec_left": round(sec_left, 1),
                               "move": round(spot - round_open, 2), "spot": round(spot, 2),
                               "up_ask": pm.get("UP"), "dn_ask": pm.get("DOWN"),
+                              "up_sz": pm.get("UP_size"), "dn_sz": pm.get("DOWN_size"),
                               "ind_dir": idir, "ind_conf": iconf, "ind_score": iscore,
                               "ind_div": idiv,
                               "vel_5s": velocity(now, 5), "vel_15s": velocity(now, 15),
