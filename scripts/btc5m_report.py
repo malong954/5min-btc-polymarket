@@ -73,6 +73,9 @@ def main():
                 "close_tx": cl.get("close_tx"),
                 "close_status": cl.get("close_status"),
                 "close_skipped": cl.get("close_skipped"),
+                "scale_adds": len([a for a in (obj.get("scale_adds") or []) if a.get("matched")]),
+                "hedged": bool((obj.get("hedge_exit") or {}).get("taken")),
+                "pnl_basis": obj.get("pnl_basis"),
                 "pnl": pnl,
             }
         )

@@ -58,6 +58,18 @@ profiles:
     stop_loss:
       enabled: true
       stop_loss_pct_from_entry: 0.25
+    scaling:
+      enabled: false
+      add_stake_usd: 5
+      trigger_delta_above_entry: 0.08
+      max_add_price: 0.94
+      max_adds: 1
+      min_seconds_left: 45
+      max_total_notional_usd: 10
+    exit_hedge:
+      enabled: true
+      min_edge: 0.02
+      note: "At exit (stop-loss or time exit), if (1 - opposite ask) beats own best bid by min_edge, buy equal opposite shares to lock $1/share at resolution instead of selling into a thin bid."
 
   aggressive:
     description: "Higher frequency and higher risk mode."
@@ -82,6 +94,18 @@ profiles:
     stop_loss:
       enabled: true
       stop_loss_pct_from_entry: 0.30
+    scaling:
+      enabled: true
+      add_stake_usd: 5
+      trigger_delta_above_entry: 0.06
+      max_add_price: 0.95
+      max_adds: 1
+      min_seconds_left: 40
+      max_total_notional_usd: 15
+    exit_hedge:
+      enabled: true
+      min_edge: 0.015
+      note: "Same lock-vs-sell comparison as conservative, with a slightly lower required edge."
 
 runner_mapping:
   script: "skills/btc-5m-live/scripts/test_btc_5m_session_exit_sl.py"
@@ -100,3 +124,5 @@ runner_mapping:
 notes:
   - "Current 5m runner uses threshold/side-strength logic; impulse filter integration can be extended at strategy layer."
   - "Entry behavior: continuous CLOB ask monitoring; if UP/DOWN >= threshold, enter on stronger side."
+  - "Scaling: adds to a winner only after price confirms trigger_delta_above_entry above entry, never above max_add_price, with enough seconds left and total cost capped by max_total_notional_usd. Stop-loss re-anchors to the blended average entry after an add."
+  - "Exit hedge (loss minimize): selling own side at bid and buying equal opposite shares at ask are the same exit (UP + DOWN = $1 at resolution) but fill from different books; the runner takes whichever is richer by min_edge. Equal hedge only — intentionally no over-hedge 'flip', which would be a new directional bet, not loss minimization."

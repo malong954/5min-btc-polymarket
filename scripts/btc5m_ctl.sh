@@ -20,7 +20,7 @@ mkdir -p "$RUNTIME_DIR"
 usage() {
   cat <<'EOF'
 Usage:
-  btc5m_ctl.sh start [--profile conservative|aggressive] [--entry-timeout-min N] [--stake-usd N] [--threshold N] [--poll-sec N] [--close-retry-max N] [--close-retry-delay-sec N]
+  btc5m_ctl.sh start [--profile conservative|aggressive] [--entry-timeout-min N] [--stake-usd N] [--threshold N] [--poll-sec N] [--close-retry-max N] [--close-retry-delay-sec N] [--scale-enabled 0|1] [--scale-stake-usd N] [--scale-max-adds N] [--max-total-notional-usd N] [--hedge-exit 0|1] [--hedge-min-edge N]
   btc5m_ctl.sh status
   btc5m_ctl.sh stop
   btc5m_ctl.sh report [--limit N]
@@ -50,6 +50,12 @@ cmd_start() {
   local poll_sec="2"
   local close_retry_max="30"
   local close_retry_delay_sec="2"
+  local scale_enabled=""
+  local scale_stake_usd=""
+  local scale_max_adds=""
+  local max_total_notional_usd=""
+  local hedge_exit=""
+  local hedge_min_edge=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -60,6 +66,12 @@ cmd_start() {
       --poll-sec) poll_sec="$2"; shift 2;;
       --close-retry-max) close_retry_max="$2"; shift 2;;
       --close-retry-delay-sec) close_retry_delay_sec="$2"; shift 2;;
+      --scale-enabled) scale_enabled="$2"; shift 2;;
+      --scale-stake-usd) scale_stake_usd="$2"; shift 2;;
+      --scale-max-adds) scale_max_adds="$2"; shift 2;;
+      --max-total-notional-usd) max_total_notional_usd="$2"; shift 2;;
+      --hedge-exit) hedge_exit="$2"; shift 2;;
+      --hedge-min-edge) hedge_min_edge="$2"; shift 2;;
       *) echo "Unknown arg: $1"; usage; exit 2;;
     esac
   done
@@ -77,6 +89,12 @@ cmd_start() {
   runner_cmd=("$VENV_PY" "$RUNNER" "--profile" "$profile" "--entry-timeout-min" "$entry_timeout_min" "--poll-sec" "$poll_sec" "--close-retry-max" "$close_retry_max" "--close-retry-delay-sec" "$close_retry_delay_sec" "--execute")
   [[ -n "$stake_usd" ]] && runner_cmd+=("--stake-usd" "$stake_usd")
   [[ -n "$threshold" ]] && runner_cmd+=("--threshold" "$threshold")
+  [[ -n "$scale_enabled" ]] && runner_cmd+=("--scale-enabled" "$scale_enabled")
+  [[ -n "$scale_stake_usd" ]] && runner_cmd+=("--scale-stake-usd" "$scale_stake_usd")
+  [[ -n "$scale_max_adds" ]] && runner_cmd+=("--scale-max-adds" "$scale_max_adds")
+  [[ -n "$max_total_notional_usd" ]] && runner_cmd+=("--max-total-notional-usd" "$max_total_notional_usd")
+  [[ -n "$hedge_exit" ]] && runner_cmd+=("--hedge-exit" "$hedge_exit")
+  [[ -n "$hedge_min_edge" ]] && runner_cmd+=("--hedge-min-edge" "$hedge_min_edge")
 
   (
     if [[ -f "$ENV_FILE" ]]; then

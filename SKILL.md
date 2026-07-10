@@ -26,6 +26,21 @@ Use this skill when the operator wants to execute a BTC 5m momentum strategy:
 - If both UP and DOWN satisfy threshold logic, choose the stronger side.
 - Keep stop-loss and timing guards enabled in profile config.
 
+## Position Scaling (add to a winner)
+Opt-in per profile (`--scale-enabled 1`; default on for `aggressive`, off for `conservative`). After entry, one extra lot may be added only when ALL guards pass:
+- side price has confirmed at least `--scale-trigger-delta` above entry (default 0.06-0.08);
+- price is not above `--scale-max-price` (default 0.94-0.95) — adding near 1.00 risks ~$0.90 to win ~$0.10/share;
+- at least `--scale-min-seconds-left` remain in the slot;
+- total position cost stays within `--max-total-notional-usd`;
+- at most `--scale-max-adds` attempts (default 1).
+After a matched add, the stop-loss re-anchors to the blended average entry so the larger position keeps the same risk profile.
+
+## Exit Hedge (loss minimize via opposite side)
+Enabled by default (`--hedge-exit 1`). At exit time (stop-loss OR time exit) the runner compares two economically equivalent exits:
+- sell own side at its best bid, vs
+- buy an equal number of opposite-side shares at their best ask, locking $1/share at resolution (UP + DOWN pair).
+If `(1 - opposite_ask) >= own_bid + --hedge-min-edge`, it buys the opposite side instead of selling into a thin bid. This is an equal-size hedge that locks the outcome — deliberately NOT an over-hedge "flip", which would be a fresh directional bet rather than loss minimization. Hedged runs report `result: done_hedged` with `pnl_basis: locked_min_at_resolution`; the pair pays out at market resolution, so winnings redemption must be handled as usual.
+
 ## One-shot real test
 From trading repo root:
 

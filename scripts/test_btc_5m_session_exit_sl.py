@@ -166,6 +166,12 @@ def clob_best_bid(token_id: str, clob_base: str = 'https://clob.polymarket.com')
     return best_bid
 
 
+def clob_best_bid_ask(token_id: str, clob_base: str = 'https://clob.polymarket.com') -> tuple[Optional[float], Optional[float]]:
+    pub = ClobClient(host=clob_base, chain_id=POLYGON)
+    book = pub.get_order_book(str(token_id))
+    return _best_bid_ask(book)
+
+
 def auth_clob_client(clob_base: str = 'https://clob.polymarket.com') -> Optional[ClobClient]:
     try:
         key = os.getenv('PM_PRIVATE_KEY') or ''
@@ -290,6 +296,15 @@ PROFILES: dict[str, dict[str, Any]] = {
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        'scale_enabled': 0,
+        'scale_stake_usd': 5.0,
+        'scale_trigger_delta': 0.08,
+        'scale_max_price': 0.94,
+        'scale_max_adds': 1,
+        'scale_min_seconds_left': 45,
+        'max_total_notional_usd': 10.0,
+        'hedge_exit': 1,
+        'hedge_min_edge': 0.02,
     },
     'aggressive': {
         'threshold': 0.70,
@@ -299,6 +314,15 @@ PROFILES: dict[str, dict[str, Any]] = {
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        'scale_enabled': 1,
+        'scale_stake_usd': 5.0,
+        'scale_trigger_delta': 0.06,
+        'scale_max_price': 0.95,
+        'scale_max_adds': 1,
+        'scale_min_seconds_left': 40,
+        'max_total_notional_usd': 15.0,
+        'hedge_exit': 1,
+        'hedge_min_edge': 0.015,
     },
 }
 
@@ -319,6 +343,13 @@ def apply_profile(args: argparse.Namespace) -> argparse.Namespace:
         args.entry_timeout_min = int(prof['entry_timeout_min'])
     if args.poll_sec is None:
         args.poll_sec = float(prof['poll_sec'])
+    for k in (
+        'scale_enabled', 'scale_stake_usd', 'scale_trigger_delta', 'scale_max_price',
+        'scale_max_adds', 'scale_min_seconds_left', 'max_total_notional_usd',
+        'hedge_exit', 'hedge_min_edge',
+    ):
+        if getattr(args, k) is None:
+            setattr(args, k, prof[k])
     return args
 
 
@@ -342,6 +373,15 @@ def main():
     ap.add_argument('--poll-sec', type=float, default=None)
     ap.add_argument('--close-retry-max', type=int, default=18, help='Max close retries when position is not yet visible / not immediately closable')
     ap.add_argument('--close-retry-delay-sec', type=float, default=2.0, help='Delay between close retries')
+    ap.add_argument('--scale-enabled', type=int, choices=[0, 1], default=None, help='1 = allow adding to a winning position once price confirms above entry')
+    ap.add_argument('--scale-stake-usd', type=float, default=None, help='Stake for each scale-in add')
+    ap.add_argument('--scale-trigger-delta', type=float, default=None, help='Add only after side price >= entry_price + delta')
+    ap.add_argument('--scale-max-price', type=float, default=None, help='Never scale-in above this price (risk/reward guard)')
+    ap.add_argument('--scale-max-adds', type=int, default=None, help='Max scale-in attempts per session')
+    ap.add_argument('--scale-min-seconds-left', type=int, default=None, help='Do not scale-in with fewer seconds left in the slot')
+    ap.add_argument('--max-total-notional-usd', type=float, default=None, help='Cap on total position cost including scale-ins')
+    ap.add_argument('--hedge-exit', type=int, choices=[0, 1], default=None, help='1 = at exit, buy equal opposite shares instead of selling when that exits richer')
+    ap.add_argument('--hedge-min-edge', type=float, default=None, help='Required per-share advantage of hedge exit (1 - opp ask) over own best bid')
     ap.add_argument('--execute', action='store_true')
     args = apply_profile(ap.parse_args())
 
@@ -358,6 +398,15 @@ def main():
             'poll_sec': args.poll_sec,
             'close_retry_max': args.close_retry_max,
             'close_retry_delay_sec': args.close_retry_delay_sec,
+            'scale_enabled': args.scale_enabled,
+            'scale_stake_usd': args.scale_stake_usd,
+            'scale_trigger_delta': args.scale_trigger_delta,
+            'scale_max_price': args.scale_max_price,
+            'scale_max_adds': args.scale_max_adds,
+            'scale_min_seconds_left': args.scale_min_seconds_left,
+            'max_total_notional_usd': args.max_total_notional_usd,
+            'hedge_exit': args.hedge_exit,
+            'hedge_min_edge': args.hedge_min_edge,
             'execute': args.execute,
         },
         'attempts': [],
@@ -460,6 +509,7 @@ def main():
                     'market_end_iso': end_iso,
                     'side': side,
                     'token_id': token_id,
+                    'opp_token_id': dn_t if side == 'UP' else up_t,
                     'entry_price': entry_price,
                     'shares': shares,
                     'cost_usdc': cost,
@@ -491,10 +541,13 @@ def main():
 
     sl_price = opened['entry_price'] * (1.0 - args.stop_loss_pct)
     report['stop_loss_price'] = sl_price
+    report['scale_adds'] = []
 
     close_reason = None
+    scale_attempts = 0
     while True:
         now = time.time()
+        sec_left = max(0.0, end_ts - now)
         if now >= (end_ts - args.exit_before_sec):
             close_reason = f'time_exit_{args.exit_before_sec}s_before_end'
             break
@@ -505,7 +558,110 @@ def main():
         if side_px is not None and side_px <= sl_price:
             close_reason = f"stop_loss_{int(args.stop_loss_pct * 100)}pct"
             break
+
+        # scale-in: add to a confirmed winner only, inside hard risk caps
+        if (
+            int(args.scale_enabled or 0) == 1
+            and scale_attempts < int(args.scale_max_adds)
+            and side_px is not None
+            and side_px >= opened['entry_price'] + float(args.scale_trigger_delta)
+            and side_px <= float(args.scale_max_price)
+            and sec_left >= float(args.scale_min_seconds_left)
+            and (opened['cost_usdc'] + float(args.scale_stake_usd)) <= float(args.max_total_notional_usd)
+        ):
+            scale_attempts += 1
+            out_s, objs_s = run_open(args.repo, opened['market_slug'], opened['side'], float(args.scale_stake_usd), args.execute)
+            post_s = None
+            runner_s = None
+            for o in objs_s:
+                if isinstance(o, dict) and 'order_post_result' in o:
+                    runner_s = o
+                    post_s = o.get('order_post_result') or {}
+            add: dict[str, Any] = {
+                'ts': ts_utc(),
+                'attempt': scale_attempts,
+                'trigger_price': side_px,
+                'seconds_left': sec_left,
+                'stake_usd': float(args.scale_stake_usd),
+                'matched': bool(post_s and post_s.get('success') is True and str(post_s.get('status', '')).lower() == 'matched'),
+            }
+            if add['matched']:
+                add_shares = float(post_s.get('takingAmount') or 0)
+                add_cost = float(post_s.get('makingAmount') or 0)
+                add['shares'] = add_shares
+                add['cost_usdc'] = add_cost
+                add['add_price'] = float((runner_s or {}).get('entry_price') or side_px)
+                add['order_id'] = post_s.get('orderID')
+                add['tx'] = (post_s.get('transactionsHashes') or [None])[0]
+                opened['shares'] += add_shares
+                opened['cost_usdc'] += add_cost
+                if opened['shares'] > 0:
+                    # re-anchor stop-loss to blended average entry so the larger position keeps the same risk profile
+                    avg_entry = opened['cost_usdc'] / opened['shares']
+                    sl_price = avg_entry * (1.0 - args.stop_loss_pct)
+                    report['stop_loss_price'] = sl_price
+                    add['avg_entry_price'] = avg_entry
+                    add['new_stop_loss_price'] = sl_price
+            report['scale_adds'].append(add)
         time.sleep(args.poll_sec)
+
+    # Exit-price optimization ("loss minimize"): selling our side at its best bid and
+    # buying an equal number of opposite shares at their best ask are the same exit
+    # economically (UP + DOWN = $1 at resolution), but they fill from different books.
+    # When (1 - opp_ask) beats own_bid by hedge_min_edge, buying the opposite side
+    # locks a richer exit than dumping into our own side's (often thin) bid.
+    shares_to_close = float(opened['shares'])
+    hedge_exit_info: Optional[dict[str, Any]] = None
+    if int(args.hedge_exit or 0) == 1 and shares_to_close > 0:
+        own_bid = None
+        opp_ask = None
+        try:
+            own_bid = clob_best_bid(opened['token_id'])
+        except Exception:
+            pass
+        try:
+            _, opp_ask = clob_best_bid_ask(opened['opp_token_id'])
+        except Exception:
+            pass
+        if own_bid is not None and opp_ask is not None and 0.0 < float(opp_ask) < 1.0:
+            lock_value = 1.0 - float(opp_ask)
+            hedge_notional = round(min(shares_to_close * float(opp_ask) * 1.02, shares_to_close * 0.99), 2)
+            hedge_exit_info = {
+                'considered_at': ts_utc(),
+                'own_bid': float(own_bid),
+                'opp_ask': float(opp_ask),
+                'lock_value_per_share': lock_value,
+                'min_edge': float(args.hedge_min_edge),
+                'taken': False,
+            }
+            if lock_value >= float(own_bid) + float(args.hedge_min_edge) and hedge_notional >= 1.0:
+                opp_side = 'DOWN' if opened['side'] == 'UP' else 'UP'
+                out_h, objs_h = run_open(args.repo, opened['market_slug'], opp_side, hedge_notional, args.execute)
+                post_h = None
+                for o in objs_h:
+                    if isinstance(o, dict) and 'order_post_result' in o:
+                        post_h = o.get('order_post_result') or {}
+                if post_h and post_h.get('success') is True and str(post_h.get('status', '')).lower() == 'matched':
+                    hedged_shares = float(post_h.get('takingAmount') or 0)
+                    hedge_cost = float(post_h.get('makingAmount') or 0)
+                    covered = min(shares_to_close, hedged_shares)
+                    hedge_exit_info.update({
+                        'taken': True,
+                        'side': opp_side,
+                        'shares': hedged_shares,
+                        'cost_usdc': hedge_cost,
+                        'covered_shares': covered,
+                        'order_id': post_h.get('orderID'),
+                        'tx': (post_h.get('transactionsHashes') or [None])[0],
+                    })
+                    shares_to_close = max(0.0, shares_to_close - hedged_shares)
+                    # residual too small to sell at min order size: hold it to resolution
+                    if shares_to_close > 0 and shares_to_close * max(float(own_bid), 0.01) < 1.0:
+                        hedge_exit_info['residual_held_shares'] = shares_to_close
+                        shares_to_close = 0.0
+                    report['locked_min_payout_usdc'] = round(covered * 1.0, 6)
+    if hedge_exit_info:
+        report['hedge_exit'] = hedge_exit_info
 
     close_debug: list[dict[str, Any]] = []
     close_obj: dict[str, Any] = {}
@@ -514,12 +670,12 @@ def main():
     force_close_used = None
     client = auth_clob_client()
 
-    for i in range(max(1, int(args.close_retry_max))):
+    for i in range(max(1, int(args.close_retry_max)) if shares_to_close > 0 else 0):
         out, objs = run_close(
             args.repo,
             opened['market_slug'],
             opened['token_id'],
-            opened['shares'],
+            shares_to_close,
             args.execute,
             close_order_type='FAK',
         )
@@ -561,7 +717,7 @@ def main():
                 args.repo,
                 opened['market_slug'],
                 opened['token_id'],
-                opened['shares'],
+                shares_to_close,
                 args.execute,
                 close_order_type='GTC',
                 close_limit_price=limit_px,
@@ -614,7 +770,7 @@ def main():
                     args.repo,
                     opened['market_slug'],
                     opened['token_id'],
-                    opened['shares'],
+                    shares_to_close,
                     args.execute,
                     close_order_type='GTC',
                     close_limit_price=force_px,
@@ -637,20 +793,34 @@ def main():
 
         time.sleep(float(args.close_retry_delay_sec))
 
-    post = close_obj.get('order_post_result') or {}
-    post_status = str(post.get('status') or '').lower()
-    close_usdc = float(post.get('takingAmount') or 0)
-    closed = {
-        'close_reason': close_reason,
-        'closed_at': ts_utc(),
-        'close_success': bool(post.get('success') is True and (post_status == 'matched' or close_usdc > 0)),
-        'close_status': post.get('status'),
-        'close_order_id': post.get('orderID'),
-        'close_tx': (post.get('transactionsHashes') or [None])[0],
-        'close_shares': float(post.get('makingAmount') or 0),
-        'close_usdc': close_usdc,
-        'close_skipped': close_obj.get('close_skipped'),
-    }
+    fully_hedged = bool(hedge_exit_info and hedge_exit_info.get('taken') and shares_to_close <= 0)
+    if fully_hedged:
+        closed = {
+            'close_reason': f'{close_reason}_hedged_hold_to_resolution',
+            'closed_at': ts_utc(),
+            'close_success': True,
+            'close_status': 'hedged',
+            'close_order_id': hedge_exit_info.get('order_id'),
+            'close_tx': hedge_exit_info.get('tx'),
+            'close_shares': 0.0,
+            'close_usdc': 0.0,
+            'close_skipped': None,
+        }
+    else:
+        post = close_obj.get('order_post_result') or {}
+        post_status = str(post.get('status') or '').lower()
+        close_usdc = float(post.get('takingAmount') or 0)
+        closed = {
+            'close_reason': close_reason,
+            'closed_at': ts_utc(),
+            'close_success': bool(post.get('success') is True and (post_status == 'matched' or close_usdc > 0)),
+            'close_status': post.get('status'),
+            'close_order_id': post.get('orderID'),
+            'close_tx': (post.get('transactionsHashes') or [None])[0],
+            'close_shares': float(post.get('makingAmount') or 0),
+            'close_usdc': close_usdc,
+            'close_skipped': close_obj.get('close_skipped'),
+        }
     report['close_debug'] = close_debug
     if fallback_used:
         report['close_fallback'] = fallback_used
@@ -659,12 +829,20 @@ def main():
     report['close_raw'] = out[-4000:]
     report['closed'] = closed
 
+    # PnL: with a hedge exit, covered shares pay a guaranteed $1 each at resolution
+    # (UP + DOWN pair), so report the locked minimum rather than raw cashflow.
+    hedge = report.get('hedge_exit') or {}
+    hedge_cost = float(hedge.get('cost_usdc') or 0.0)
+    covered = float(hedge.get('covered_shares') or 0.0)
     pnl = None
-    if closed['close_usdc']:
-        pnl = round(closed['close_usdc'] - opened['cost_usdc'], 6)
+    if closed['close_usdc'] or covered > 0:
+        pnl = round(covered * 1.0 + closed['close_usdc'] - opened['cost_usdc'] - hedge_cost, 6)
+    report['pnl_basis'] = 'locked_min_at_resolution' if covered > 0 else 'cashflow'
+    if covered > 0:
+        report['pnl_note'] = 'hedged pair pays $1/share at resolution; residual unhedged shares add upside if the original side wins; ensure winnings redemption is handled'
     report['realized_cashflow_pnl_usdc'] = pnl
     report['finished_at'] = ts_utc()
-    report['result'] = 'done'
+    report['result'] = 'done_hedged' if covered > 0 else 'done'
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
