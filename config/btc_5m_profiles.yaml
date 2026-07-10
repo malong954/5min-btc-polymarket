@@ -100,3 +100,4 @@ runner_mapping:
 notes:
   - "Current 5m runner uses threshold/side-strength logic; impulse filter integration can be extended at strategy layer."
   - "Entry behavior: continuous CLOB ask monitoring; if UP/DOWN >= threshold, enter on stronger side."
+  - "Fee reference (informational, threshold unchanged): taker fee ~= coef*(p*(1-p))^2 per share, coef 0.125 uncalibrated. At entry p=0.70 that's ~0.55c/share, moving hold-to-resolution breakeven win rate from 70.0% to ~70.6% before spread. Early taker exits pay the fee again at the exit price. See scripts/btc5m_fees.py and docs/ODDS_IMPROVEMENT_PLAN.md item 4."

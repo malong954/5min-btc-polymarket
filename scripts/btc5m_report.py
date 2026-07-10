@@ -3,8 +3,12 @@ import argparse
 import glob
 import json
 import os
+import sys
 from pathlib import Path
 from collections import Counter
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from btc5m_fees import estimate_run_fees, fee_coef_from_env, fee_model_meta
 
 
 def default_runtime_dir() -> str:
@@ -32,6 +36,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runtime-dir", default=default_runtime_dir())
     ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--fee-coef", type=float, default=fee_coef_from_env())
     args = ap.parse_args()
 
     pats = [
@@ -47,6 +52,11 @@ def main():
     rows = []
     total_pnl = 0.0
     pnl_count = 0
+    total_fees = 0.0
+    total_net = 0.0
+    net_count = 0
+    net_wins = 0
+    entry_prices = []
     close_status = Counter()
     results = Counter()
 
@@ -62,6 +72,16 @@ def main():
         if isinstance(pnl, (int, float)):
             total_pnl += float(pnl)
             pnl_count += 1
+        fees = estimate_run_fees(obj, args.fee_coef)
+        if isinstance(fees.get("entry_price"), (int, float)):
+            entry_prices.append(float(fees["entry_price"]))
+        total_fees += fees["est_fees_total_usdc"]
+        net = fees.get("est_net_pnl_usdc")
+        if isinstance(net, (int, float)):
+            total_net += float(net)
+            net_count += 1
+            if net > 0:
+                net_wins += 1
         close_status[str(cl.get("close_status") or cl.get("close_skipped") or "none")] += 1
         rows.append(
             {
@@ -74,6 +94,10 @@ def main():
                 "close_status": cl.get("close_status"),
                 "close_skipped": cl.get("close_skipped"),
                 "pnl": pnl,
+                "entry_price": fees.get("entry_price"),
+                "exit_price": fees.get("exit_price"),
+                "est_fees_usdc": fees.get("est_fees_total_usdc"),
+                "est_net_pnl_usdc": fees.get("est_net_pnl_usdc"),
             }
         )
 
@@ -84,6 +108,12 @@ def main():
         "close_status": dict(close_status),
         "realized_pnl_sum_usdc": round(total_pnl, 6) if pnl_count else None,
         "realized_pnl_count": pnl_count,
+        "est_fees_sum_usdc": round(total_fees, 6) if rows else None,
+        "est_net_pnl_sum_usdc": round(total_net, 6) if net_count else None,
+        "est_net_pnl_count": net_count,
+        "est_net_win_rate": round(net_wins / net_count, 4) if net_count else None,
+        "avg_entry_price": round(sum(entry_prices) / len(entry_prices), 4) if entry_prices else None,
+        "fee_model": fee_model_meta(args.fee_coef),
         "runs": rows,
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))

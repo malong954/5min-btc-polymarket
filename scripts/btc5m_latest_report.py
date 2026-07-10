@@ -4,6 +4,10 @@ import glob
 import json
 import os
 import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from btc5m_fees import estimate_run_fees, fee_coef_from_env
 
 
 def default_runtime_dir() -> str:
@@ -71,6 +75,9 @@ def main():
         lines.append(
             f"open: {opened.get('side')} {opened.get('market_slug')} cost={opened.get('cost_usdc')} tx={opened.get('open_tx')}"
         )
+        lines.append(
+            f"entry: price={opened.get('entry_price')} shares={opened.get('shares')}"
+        )
     else:
         lines.append("open: none")
 
@@ -82,6 +89,11 @@ def main():
         lines.append("close: none")
 
     lines.append(f"realized_cashflow_pnl_usdc: {obj.get('realized_cashflow_pnl_usdc')}")
+    fees = estimate_run_fees(obj, fee_coef_from_env())
+    lines.append(
+        f"exit_price: {fees.get('exit_price')} | est_fees_usdc: {fees.get('est_fees_total_usdc')}"
+        f" | est_net_pnl_usdc: {fees.get('est_net_pnl_usdc')} (fee model uncalibrated)"
+    )
     lines.append(f"close_debug_attempts: {len(close_debug)}")
     if obj.get("close_fallback"):
         lines.append(f"close_fallback: {obj.get('close_fallback')}")
