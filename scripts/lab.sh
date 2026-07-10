@@ -80,7 +80,7 @@ case "${1:-start}" in
     exit 0 ;;
 
   dash)
-    exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD" ;;
+    exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD" --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" ;;
 
   recdash)
     exec "$PY" scripts/btc_record_monitor.py --log "$RLOG" ;;
@@ -161,4 +161,4 @@ echo
 echo "opening dashboard — Ctrl-C exits the dashboard; everything keeps running."
 echo "later:  scripts/lab.sh analyze   (full report)   scripts/lab.sh stop"
 sleep 1
-exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD"
+exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD" --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN"

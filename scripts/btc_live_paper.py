@@ -102,7 +102,7 @@ class LivePaperEngine:
         entry_threshold: float = 0.60,
         entry_price: float = 0.85,
         weights: Optional[dict[str, float]] = None,
-        entry_window_sec: float = 150.0,
+        entry_window_sec: float = 240.0,
         min_entry_sec: float = 30.0,
         log: Optional[TextIO] = None,
         emit_heartbeat: bool = True,
@@ -324,6 +324,10 @@ class LivePaperEngine:
                     reason = "no_direction"
                 elif w.get("capped"):
                     reason = "price_capped"   # armed, but the ask stayed near $1
+                elif self.entry_rule == "edge":
+                    # Edge rule: confidence never exceeded the ask + margin —
+                    # the book was already priced at/above our conviction.
+                    reason = "no_edge"
                 else:
                     reason = "below_threshold"
                 self.skipped.add(rs)
@@ -334,6 +338,7 @@ class LivePaperEngine:
                 events.append(self._emit({
                     "ts": int(now), "type": "skip", "round": rs, "reason": reason,
                     "side": w.get("side"), "confidence": w.get("conf"),
+                    "ask": w.get("ask"),   # the price the rule refused (edge/capped skips)
                     "features": w.get("features"), "note": w.get("note"),
                 }))
             if w["round"] != cur:
@@ -371,6 +376,8 @@ class LivePaperEngine:
                                            "features": feat, "note": note})
                 ask = entry_prices.get(sig.direction) if (entry_prices and sig.direction) else None
                 ask_ok = isinstance(ask, (int, float)) and 0.0 < ask < 1.0
+                if ask_ok:
+                    self.watch["ask"] = round(float(ask), 4)   # for skip diagnostics
                 if self.entry_rule == "edge":
                     # Hurdle = the live ask + margin. No valid ask this poll ->
                     # not armed; the live loop just re-checks next poll.
@@ -479,7 +486,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
     ap.add_argument("--max-entry-price", type=float, default=0.97,
                     help="Never buy above this ask — near $1.00 you risk the whole stake to win pennies")
-    ap.add_argument("--entry-window", type=float, default=150.0, help="Start deciding when this many seconds remain in the round")
+    ap.add_argument("--entry-window", type=float, default=240.0,
+                    help="Start deciding when this many seconds remain (the measured sweet-spot "
+                         "crossings fire at 170-190s left, so evaluation must start well above them)")
     ap.add_argument("--min-entry", type=float, default=30.0, help="Stop entering/retrying prices below this many seconds left")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting paper account balance in USD")

@@ -64,11 +64,13 @@ ACTIVITY_MAX = 5000  # cap the in-memory live feed (the full log stays on disk)
 
 
 def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: float = 0.85,
-              entry_threshold: float = 0.60, recent_n: int = RECENT_N) -> dict[str, Any]:
+              entry_threshold: float = 0.60, recent_n: int = RECENT_N,
+              entry_rule: str = "threshold", edge_margin: float = 0.03) -> dict[str, Any]:
     return {
         "trades": 0, "wins": 0, "pnl": 0.0, "pnl_usd": 0.0,
         "bankroll": bankroll, "stake_usd": stake_usd, "entry_price": entry_price,
         "entry_threshold": entry_threshold, "recent_n": recent_n,
+        "entry_rule": entry_rule, "edge_margin": edge_margin,
         "balance": bankroll, "peak_bal": bankroll, "max_dd_usd": 0.0,
         "entry_sum": 0.0, "entry_n": 0,  # realized entry prices (real varies per trade)
         "last_stake": stake_usd,          # most recent actual stake (grows with balance)
@@ -254,6 +256,8 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
     # heartbeat's LIVE confidence (ticks with the spot every poll) over the
     # round's initial prediction snapshot.
     thr = state.get("entry_threshold", 0.60)
+    rule = state.get("entry_rule", "threshold")
+    margin = state.get("edge_margin", 0.03)
     live = hb.get("confidence") is not None and hb.get("round") == pred.get("round")
     d = (hb.get("direction") if live else None) or pred.get("direction")
     if d:
@@ -261,12 +265,20 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
         conf = hb.get("confidence") if live else pred.get("confidence", 0.0)
         conf = conf if conf is not None else 0.0
         move = pred.get("btc_move_usd", 0.0)
-        armed = conf >= thr
-        status = p.c(f"ARMED >= {thr:.2f}", GREEN, BOLD) if armed else p.c(f"waiting (need >= {thr:.2f})", YELLOW)
+        if rule == "edge":
+            # Armed-ness depends on the live ask, which the monitor doesn't
+            # stream — state the rule instead of a bogus threshold check.
+            status = p.c(f"edge rule: enters when conf >= ask + {margin:.2f}", CYAN)
+        else:
+            armed = conf >= thr
+            status = p.c(f"ARMED >= {thr:.2f}", GREEN, BOLD) if armed else p.c(f"waiting (need >= {thr:.2f})", YELLOW)
         lines.append(f"  predict {p.c(d, col, BOLD)}  conf {p.c(f'{conf:.2f}', BOLD)}  "
                      f"move {p.money(move, plus=True)}  rsi {pred.get('rsi_1m')}   {status}")
     else:
-        lines.append(p.c(f"  predict —  (evaluates ~2m before each close; enters at conf >= {thr:.2f})", GREY))
+        if rule == "edge":
+            lines.append(p.c(f"  predict —  (edge rule: enters when conf >= ask + {margin:.2f})", GREY))
+        else:
+            lines.append(p.c(f"  predict —  (enters at conf >= {thr:.2f})", GREY))
     # Show that it's alive and deliberately skipping, not stuck.
     skips = state.get("skips_since_trade", 0)
     if skips:
@@ -473,6 +485,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting account balance in USD")
     ap.add_argument("--stake-usd", type=float, default=10.0, help="USD per trade (for deriving $ from older logs)")
     ap.add_argument("--entry-threshold", type=float, default=0.60, help="Confidence needed to trade (shown as ARMED/waiting)")
+    ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge"],
+                    help="Display which rule the trader runs (edge shows conf >= ask + margin)")
+    ap.add_argument("--edge-margin", type=float, default=0.03, help="Displayed margin for --entry-rule edge")
     ap.add_argument("--recent", type=int, default=15, help="How many activity rows the LIVE view shows (full log via --history)")
     ap.add_argument("--once", action="store_true", help="Render a single frame and exit (no loop)")
     ap.add_argument("--history", action="store_true", help="Print the COMPLETE activity timeline (all entries/skips/wins/losses) and exit")
@@ -492,7 +507,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     state = new_state(bankroll=args.bankroll, stake_usd=args.stake_usd, entry_price=args.entry_price,
-                      entry_threshold=args.entry_threshold, recent_n=args.recent)
+                      entry_threshold=args.entry_threshold, recent_n=args.recent,
+                      entry_rule=args.entry_rule, edge_margin=args.edge_margin)
     offset = 0
 
     def refresh() -> None:
