@@ -120,7 +120,11 @@ class LivePaperEngine:
         lead_window: tuple = (240.0, 180.0),
         lead_max_price: float = 0.72,
         lead_min_move: float = 10.0,
+        official_wait: float = 150.0,
     ):
+        # How long past round close to wait for Polymarket's official
+        # resolution before falling back to the spot label.
+        self.official_wait = official_wait
         # 'lead' rule — the measured candidate strategy: buy whichever side BTC
         # already leads, inside the sweet-spot window (seconds-left hi..lo),
         # only while the ask is still cheap and the move is decisive. From the
@@ -198,15 +202,24 @@ class LivePaperEngine:
             return None
         ep = float(real) if real_ok else self.entry_price
         from btc_sizing import stake_for
+        # Settles can now WAIT for the official resolution, so a prior round's
+        # position may still be open when this entry fires — size from the
+        # balance net of money already at risk, or a losing overlap can spend
+        # the same dollars twice (and drive the balance negative).
+        reserved = sum(p.get("stake_usd", 0.0)
+                       for r0, p in self.positions.items() if r0 not in self.settled)
+        avail = max(0.0, self.balance - reserved)
         stake = stake_for(
-            self.sizing, bankroll=self.balance, base_stake=self.stake_usd,
+            self.sizing, bankroll=avail, base_stake=self.stake_usd,
             confidence=confidence, entry_price=ep, pct=self.stake_pct,
             p_est=confidence,  # live has no calibrator; confidence is a rough proxy
         )
         big = self.big_mult > 1.0 and confidence >= self.big_conf
         if big:
-            stake = min(stake * self.big_mult, self.balance)
+            stake = min(stake * self.big_mult, avail)
         stake = round(stake, 2)
+        if stake <= 0:
+            return None   # fully reserved/insolvent -> cannot open
         self.positions[cur] = {
             "side": side, "entry_price": ep,
             "confidence": round(confidence, 4), "opened_ts": int(now),
@@ -221,25 +234,38 @@ class LivePaperEngine:
             "seconds_left": round(sec_left, 1) if sec_left is not None else None,
             "stake_usd": stake, "sizing": self.sizing, "big_bet": big,
             "balance": round(self.balance, 2),
+            "avail": round(avail, 2),   # balance net of still-open stakes
             "price_retries": retries,
             "features": feat, "note": note,
         })
 
     def step(self, now: float, bars_1m: list[Bar], spot: Optional[float] = None,
-             entry_prices: Optional[dict[str, float]] = None) -> list[dict[str, Any]]:
+             entry_prices: Optional[dict[str, float]] = None,
+             official: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
         now = float(now)
         cur = bucket_5m(int(now))
         sec_left = (cur + 300) - now
         events: list[dict[str, Any]] = []
         model = MTFModel(bars_1m, weights=self.weights, confluence=self.confluence)
 
+        def settle_outcome(rs: int) -> tuple[Optional[str], str]:
+            """Prefer Polymarket's OFFICIAL resolution; our spot label breaks
+            ties the wrong way (measured: 5/6 disagreements were spot=DOWN,
+            official=UP, one at |move|=$0.00). Wait official_wait seconds for
+            the official settle, then fall back to the spot label."""
+            if official and official.get(rs) in ("UP", "DOWN"):
+                return official[rs], "official"
+            if now < rs + 300 + self.official_wait:
+                return None, "waiting"
+            return outcome_direction(model, rs), "spot_fallback"
+
         # 1) Settle any entered round that has closed.
         for rs in sorted(self.positions):
             if rs in self.settled or now < rs + 300:
                 continue
-            actual = outcome_direction(model, rs)
+            actual, settle_src = settle_outcome(rs)
             if actual not in ("UP", "DOWN"):
-                continue  # settle data not available yet; retry next poll
+                continue  # official not posted yet / spot data missing; retry next poll
             pos = self.positions[rs]
             win = pos["side"] == actual
             # Use THIS trade's actual entry price (real Polymarket ask when
@@ -260,6 +286,7 @@ class LivePaperEngine:
             events.append(self._emit({
                 "ts": int(now), "type": "settle", "round": rs, "side": pos["side"],
                 "actual": actual, "result": "win" if win else "loss",
+                "settle_source": settle_src,
                 "entry_price": round(ep, 4),
                 "pnl": round(pnl, 4), "cum_pnl": round(self.stats["pnl"], 4),
                 "pnl_usd": round(pnl_usd, 2), "balance": round(self.balance, 2),
@@ -273,7 +300,7 @@ class LivePaperEngine:
         for rs in sorted(self.shadows):
             if rs in self.shadow_settled or now < rs + 300:
                 continue
-            actual = outcome_direction(model, rs)
+            actual, settle_src = settle_outcome(rs)
             if actual not in ("UP", "DOWN"):
                 continue
             sh = self.shadows[rs]
@@ -283,6 +310,7 @@ class LivePaperEngine:
                 "ts": int(now), "type": "shadow_settle", "round": rs,
                 "side": sh["side"], "actual": actual,
                 "result": "win" if would_win else "loss",
+                "settle_source": settle_src,
                 "reason": sh.get("reason"), "confidence": sh.get("confidence"),
                 "features": sh.get("features"), "note": sh.get("note"),
             }))
@@ -561,12 +589,32 @@ def main(argv: Optional[list[str]] = None) -> int:
     n = 0
     bars: list[Bar] = []
     last_klines = 0.0
+    # Official Polymarket resolutions for closed rounds (settle ground truth).
+    official: dict[int, str] = {}
+    official_tries: dict[int, int] = {}
     try:
         while args.max_steps is None or n < args.max_steps:
             try:
                 now = time.time()
                 cur = bucket_5m(int(now))
                 sec_left = (cur + 300) - now
+                # Fetch the official resolution for any closed round we still
+                # hold (or shadow) — the spot label breaks ties the wrong way.
+                if use_pm:
+                    from btc_polymarket import current_slug, resolved_outcome
+                    waiting = [rs for rs in list(engine.positions) + list(engine.shadows)
+                               if rs not in engine.settled and rs not in engine.shadow_settled
+                               and rs not in official and now >= rs + 345
+                               and official_tries.get(rs, 0) < 6]
+                    for rs in waiting[:2]:   # bounded per poll
+                        try:
+                            oc = resolved_outcome(current_slug(rs))
+                        except Exception:
+                            oc = None
+                        if oc in ("UP", "DOWN"):
+                            official[rs] = oc
+                        else:
+                            official_tries[rs] = official_tries.get(rs, 0) + 1
                 # Refresh the heavier 1m klines only every --klines-every seconds,
                 # or when we need them fresh: in the entry window, or to settle a
                 # round that has just closed. The spot tick (below) stays live.
@@ -591,7 +639,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                                             "DOWN_size": pm.get("DOWN_size")}
                     except Exception as e:
                         print(f"# polymarket price error: {e}", file=sys.stderr)
-                events = engine.step(now, bars, spot=spot, entry_prices=entry_prices)
+                events = engine.step(now, bars, spot=spot, entry_prices=entry_prices,
+                                     official=official)
                 for ev in events:
                     if args.quiet and ev["type"] == "heartbeat":
                         continue

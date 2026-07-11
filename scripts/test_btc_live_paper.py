@@ -182,12 +182,13 @@ def test_confidence_tier_sizes_up():
     lows = [e for e in entries if e["confidence"] < 0.80]
     if highs:
         check("high-confidence entries are flagged big_bet", all(e["big_bet"] for e in highs))
-        # stake = min(base*2, balance-at-entry); balance is carried on the event.
-        check("high-confidence stake is 2x base (capped at balance)",
-              all(abs(e["stake_usd"] - min(20.0, e["balance"])) < 0.05 for e in highs))
+        # stake = min(base*2, AVAILABLE balance) — settles can wait for the
+        # official resolution, so sizing uses balance net of open stakes.
+        check("high-confidence stake is 2x base (capped at available)",
+              all(abs(e["stake_usd"] - min(20.0, e.get("avail", e["balance"]))) < 0.05 for e in highs))
     if lows:
-        check("low-confidence stake is base (capped at balance)",
-              all(abs(e["stake_usd"] - min(10.0, e["balance"])) < 0.05 for e in lows))
+        check("low-confidence stake is base (capped at available)",
+              all(abs(e["stake_usd"] - min(10.0, e.get("avail", e["balance"]))) < 0.05 for e in lows))
         check("low-confidence entries not flagged big", all(not e["big_bet"] for e in lows))
 
 
