@@ -43,6 +43,50 @@ SHOW_CURSOR = "\033[?25h"
 
 RECENT_N = 12
 
+# 5-row block font for the startup banner (only the letters FLIPPOLYBOT needs).
+_FONT = {
+    "F": ["#####", "#    ", "#### ", "#    ", "#    "],
+    "L": ["#    ", "#    ", "#    ", "#    ", "#####"],
+    "I": ["#####", "  #  ", "  #  ", "  #  ", "#####"],
+    "P": ["#### ", "#   #", "#### ", "#    ", "#    "],
+    "O": [" ### ", "#   #", "#   #", "#   #", " ### "],
+    "Y": ["#   #", " # # ", "  #  ", "  #  ", "  #  "],
+    "B": ["#### ", "#   #", "#### ", "#   #", "#### "],
+    "T": ["#####", "  #  ", "  #  ", "  #  ", "  #  "],
+}
+
+
+def banner_lines(text: str = "FLIPPOLYBOT") -> list[str]:
+    rows = ["", "", "", "", ""]
+    for ch in text:
+        glyph = _FONT.get(ch.upper())
+        if glyph is None:
+            continue
+        for i in range(5):
+            rows[i] += glyph[i] + " "
+    return [r.rstrip() for r in rows]
+
+
+def show_banner(p: "Painter", hold: float = 1.8) -> None:
+    """Splash screen at dashboard start: big FLIPPOLYBOT, then the live panel."""
+    lines = [""]
+    for r in banner_lines():
+        lines.append("  " + p.c(r, CYAN, BOLD))
+    lines.append("")
+    lines.append("  " + p.c("BTC 5m — live paper trading lab", GREY))
+    lines.append("")
+    sys.stdout.write(CLEAR + "\n".join(lines) + "\n")
+    sys.stdout.flush()
+    time.sleep(hold)
+
+
+def _fmt_uptime(seconds: float) -> str:
+    s = max(0, int(seconds))
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    return (f"{d}d {h:02d}:{m:02d}:{s:02d}" if d else f"{h:02d}:{m:02d}:{s:02d}")
+
 
 def _build_stamp() -> str:
     """Short git hash of the running checkout — shown in the header so 'which
@@ -71,6 +115,7 @@ def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: flo
         "bankroll": bankroll, "stake_usd": stake_usd, "entry_price": entry_price,
         "entry_threshold": entry_threshold, "recent_n": recent_n,
         "entry_rule": entry_rule, "edge_margin": edge_margin,
+        "first_ts": None,   # first event ts -> bot session uptime
         "balance": bankroll, "peak_bal": bankroll, "max_dd_usd": 0.0,
         "entry_sum": 0.0, "entry_n": 0,  # realized entry prices (real varies per trade)
         "last_stake": stake_usd,          # most recent actual stake (grows with balance)
@@ -97,6 +142,9 @@ def _unit_to_usd(unit_pnl: float, stake_usd: float, entry_price: float) -> float
 
 def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
     t = ev.get("type")
+    ts = ev.get("ts")
+    if ts and (state.get("first_ts") is None or ts < state["first_ts"]):
+        state["first_ts"] = ts   # session start = first event in the log
     if t == "heartbeat":
         state["last_hb"] = ev
     elif t == "prediction":
@@ -238,8 +286,11 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
 
     lines: list[str] = []
     now = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
-    lines.append(p.c("  BTC 5m — Live Paper Trader ", BOLD, CYAN) + p.c(f" {now}", GREY)
-                 + p.c(f"  build {BUILD}", GREY))
+    up_s = ""
+    if state.get("first_ts"):
+        up_s = "  up " + _fmt_uptime(time.time() - state["first_ts"])
+    lines.append(p.c("  FLIPPOLYBOT ", BOLD, CYAN) + p.c("BTC 5m", CYAN) + p.c(f"  {now}", GREY)
+                 + p.c(up_s, YELLOW) + p.c(f"  build {BUILD}", GREY))
     lines.append(p.c("  " + "─" * 56, GREY))
 
     price = hb.get("price")
@@ -526,6 +577,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if color:
         sys.stdout.write(ALT_SCREEN_ON + HIDE_CURSOR)
+        show_banner(painter)   # FLIPPOLYBOT splash, then the live panel
     try:
         while True:
             refresh()
