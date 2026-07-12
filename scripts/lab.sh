@@ -25,13 +25,19 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root
 PY=".venv/bin/python"
 TLOG="out/live.jsonl"        # trader stream
 RLOG="out/trajectory.jsonl"  # recorder stream
-PROVIDER="${PROVIDER:-binance}"
-THRESHOLD="${THRESHOLD:-0.60}"
-RULE="${RULE:-threshold}"
-EDGE_MARGIN="${EDGE_MARGIN:-0.03}"
-MAX_PRICE="${MAX_PRICE:-0.97}"   # never buy above this ask (near $1 = pennies upside)
-STAKE="${STAKE:-10}"
-BANKROLL="${BANKROLL:-100}"
+CONF="out/lab.conf"          # last run's settings — a plain restart reuses them
+
+# Precedence: explicit env var > saved config from the last start > default.
+# (Prevents the classic footgun: RULE=lead scripts/lab.sh ... then later a
+# plain scripts/lab.sh silently reverting to the threshold rule.)
+[ -f "$CONF" ] && . "$CONF"
+PROVIDER="${PROVIDER:-${SAVED_PROVIDER:-binance}}"
+THRESHOLD="${THRESHOLD:-${SAVED_THRESHOLD:-0.60}}"
+RULE="${RULE:-${SAVED_RULE:-threshold}}"
+EDGE_MARGIN="${EDGE_MARGIN:-${SAVED_EDGE_MARGIN:-0.03}}"
+MAX_PRICE="${MAX_PRICE:-${SAVED_MAX_PRICE:-0.97}}"   # never buy above this ask
+STAKE="${STAKE:-${SAVED_STAKE:-10}}"
+BANKROLL="${BANKROLL:-${SAVED_BANKROLL:-100}}"
 
 [ -x "$PY" ] || { echo "create the venv first: python3 -m venv .venv && .venv/bin/pip install requests"; exit 1; }
 
@@ -135,6 +141,17 @@ case "${1:-start}" in
 esac
 
 mkdir -p out
+
+# Persist the effective settings — a later plain `scripts/lab.sh` reuses them.
+{
+  echo "SAVED_PROVIDER=$PROVIDER"
+  echo "SAVED_THRESHOLD=$THRESHOLD"
+  echo "SAVED_RULE=$RULE"
+  echo "SAVED_EDGE_MARGIN=$EDGE_MARGIN"
+  echo "SAVED_MAX_PRICE=$MAX_PRICE"
+  echo "SAVED_STAKE=$STAKE"
+  echo "SAVED_BANKROLL=$BANKROLL"
+} > "$CONF"
 
 # --- recorder (observer: prices + indicators + velocities per round) ---
 if recorder_up; then
