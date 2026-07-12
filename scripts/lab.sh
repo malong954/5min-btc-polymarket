@@ -105,6 +105,8 @@ case "${1:-start}" in
       echo "---- THE TRUTH TABLE: official Polymarket resolutions only ----"
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --official-only --min-size 100 || true
       echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --combo --min-size 100 || true
+      echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side indicator     || true
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-confidence     || true

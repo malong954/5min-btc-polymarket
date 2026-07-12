@@ -424,6 +424,89 @@ def _print_edge_gate(rows: list[dict[str, Any]]) -> None:
     print("=" * 74)
 
 
+COMBO_FLOORS = (0.0, 0.3, 0.5, 0.7, 0.8, 0.9)
+
+
+def combo_analysis(events: list[dict[str, Any]],
+                   conf_floors: tuple = COMBO_FLOORS,
+                   win_hi: float = 240.0, win_lo: float = 150.0,
+                   max_price: float = 0.72, min_move_signal: float = 10.0,
+                   min_size: float = 0.0, fee_rate: float = 0.0,
+                   official_only: bool = True) -> list[dict[str, Any]]:
+    """LEAD + CONFIDENCE combo: the lead setup (leading side, window, cheap ask,
+    decisive move) with an added conviction floor. Sweeps the floor from 0 (the
+    plain lead rule) upward, graded on OFFICIAL resolutions only — spot labels
+    are known to inflate leader-follow-through. First qualifying moment per
+    round; one row per floor."""
+    samples, results = _split(events)
+    rows = []
+    for floor in conf_floors:
+        recs: list[tuple[bool, float]] = []
+        for r, samps in samples.items():
+            res = results.get(r)
+            if not res:
+                continue
+            if official_only and not res.get("official"):
+                continue
+            for s in sorted(samps, key=lambda q: -(q.get("sec_left") or 0)):
+                sl = s.get("sec_left") or 0
+                if not (win_lo <= sl <= win_hi):
+                    continue
+                mv = s.get("move", 0.0) or 0.0
+                if abs(mv) < min_move_signal:
+                    continue
+                side = "UP" if mv > 0 else "DOWN"
+                price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
+                if not isinstance(price, (int, float)) or not (0.0 < price <= max_price):
+                    continue
+                if min_size > 0:
+                    sz = s.get("up_sz") if side == "UP" else s.get("dn_sz")
+                    if not isinstance(sz, (int, float)) or sz < min_size:
+                        continue
+                if floor > 0:
+                    c = s.get("ind_conf")
+                    if c is None or c < floor:
+                        continue
+                recs.append((side == res["outcome"], float(price)))
+                break
+        if recs:
+            n = len(recs)
+            wr = sum(1 for w, _ in recs if w) / n
+            avg_price = sum(p for _, p in recs) / n
+            ev = (wr - avg_price) / avg_price if avg_price else 0.0
+            fee = taker_fee_frac(avg_price, fee_rate)
+            rows.append({"conf_floor": floor, "n": n, "winrate": round(wr, 4),
+                         "avg_price": round(avg_price, 4),
+                         "edge": round(wr - avg_price, 4),
+                         "ev_pct": round(ev, 4), "net_ev_pct": round(ev - fee, 4)})
+        else:
+            rows.append({"conf_floor": floor, "n": 0})
+    return rows
+
+
+def _print_combo(rows: list[dict[str, Any]]) -> None:
+    print("=" * 74)
+    print("LEAD + CONFIDENCE COMBO  (lead setup AND conf >= floor; OFFICIAL labels)")
+    print("=" * 74)
+    traded = [r for r in rows if r.get("n")]
+    if not traded:
+        print("  no qualifying official-graded rounds yet — let it run.")
+        print("=" * 74)
+        return
+    print(f"  {'conf >=':<9}{'n':<5}{'winrate':<10}{'avg price':<11}{'edge':<9}{'NET EV'}")
+    for r in rows:
+        if not r.get("n"):
+            print(f"  {r['conf_floor']:<9.2f}0    (no qualifying rounds)")
+            continue
+        print(f"  {r['conf_floor']:<9.2f}{r['n']:<5}{r['winrate']:<10.1%}{r['avg_price']:<11.3f}"
+              f"{r['edge']:<+9.3f}{r['net_ev_pct']:+.1%}")
+    print("-" * 74)
+    print("  Row 0.00 = the plain lead rule (baseline). A floor only matters if it")
+    print("  BEATS the baseline with n >= 100 and holds across segments — sweeping")
+    print("  floors over one sample WILL find a lucky row; do not trust small n.")
+    print("=" * 74)
+
+
 def fade_analysis(events: list[dict[str, Any]], ref_lo: float = 60.0, ref_hi: float = 150.0,
                   max_price: float = 0.40, min_price: float = 0.03,
                   fee_rate: float = 0.0) -> dict[str, Any]:
@@ -638,6 +721,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Drop rounds settling within this many dollars of open (label-noise robustness check)")
     ap.add_argument("--official-only", action="store_true",
                     help="Grade ONLY rounds with an official Polymarket resolution (result_pm) — the truth table")
+    ap.add_argument("--combo", action="store_true",
+                    help="Lead setup + confidence-floor sweep, official labels only")
     ap.add_argument("--by-confidence", action="store_true",
                     help="Instead of the entry-time table, show edge bucketed by indicator confidence")
     ap.add_argument("--fade", action="store_true",
@@ -659,6 +744,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     events = load(args.log)
+    if args.combo:
+        rows = combo_analysis(events, min_size=args.min_size, fee_rate=args.fee_rate)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        _print_combo(rows)
+        return 0
     if args.label_check:
         res = label_check(events)
         if args.json:
