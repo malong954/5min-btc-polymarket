@@ -36,6 +36,7 @@ THRESHOLD="${THRESHOLD:-${SAVED_THRESHOLD:-0.60}}"
 RULE="${RULE:-${SAVED_RULE:-threshold}}"
 EDGE_MARGIN="${EDGE_MARGIN:-${SAVED_EDGE_MARGIN:-0.03}}"
 MAX_PRICE="${MAX_PRICE:-${SAVED_MAX_PRICE:-0.97}}"   # never buy above this ask
+LEAD_MIN_CONF="${LEAD_MIN_CONF:-${SAVED_LEAD_MIN_CONF:-0.0}}"  # lead+confidence combo floor (0 = off)
 STAKE="${STAKE:-${SAVED_STAKE:-10}}"
 BANKROLL="${BANKROLL:-${SAVED_BANKROLL:-100}}"
 
@@ -155,6 +156,7 @@ mkdir -p out
   echo "SAVED_RULE=$RULE"
   echo "SAVED_EDGE_MARGIN=$EDGE_MARGIN"
   echo "SAVED_MAX_PRICE=$MAX_PRICE"
+  echo "SAVED_LEAD_MIN_CONF=$LEAD_MIN_CONF"
   echo "SAVED_STAKE=$STAKE"
   echo "SAVED_BANKROLL=$BANKROLL"
 } > "$CONF"
@@ -177,6 +179,7 @@ else
   nohup "$PY" scripts/btc_live_paper.py \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
     --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
+    --lead-min-conf "$LEAD_MIN_CONF" \
     --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
@@ -184,7 +187,7 @@ else
   if [ "$RULE" = "edge" ]; then
     echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
   elif [ "$RULE" = "lead" ]; then
-    echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, 180-240s left, ask <= 0.72, |move| >= 10)"
+    echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, 180-240s left, ask <= 0.72, |move| >= 10, conf >= ${LEAD_MIN_CONF})"
   else
     echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${THRESHOLD})"
   fi

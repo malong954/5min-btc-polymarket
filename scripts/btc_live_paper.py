@@ -120,8 +120,11 @@ class LivePaperEngine:
         lead_window: tuple = (240.0, 180.0),
         lead_max_price: float = 0.72,
         lead_min_move: float = 10.0,
+        lead_min_conf: float = 0.0,
         official_wait: float = 150.0,
     ):
+        # Conviction floor for the lead rule (the combo candidate): 0 = off.
+        self.lead_min_conf = lead_min_conf
         # How long past round close to wait for Polymarket's official
         # resolution before falling back to the spot label.
         self.official_wait = official_wait
@@ -424,12 +427,14 @@ class LivePaperEngine:
                     armed = ask_ok and sig.confidence >= ask + self.edge_margin
                 elif self.entry_rule == "lead":
                     # Candidate strategy: leading side, sweet-spot window, cheap
-                    # ask, decisive move. No indicators beyond the move itself.
+                    # ask, decisive move — plus an optional conviction floor
+                    # (the lead+confidence combo from the official-label sweep).
                     mv = sig.features.get("btc_move_usd", 0.0) or 0.0
                     armed = (ask_ok and sig.direction is not None
                              and self.lead_lo <= sec_left <= self.lead_hi
                              and abs(mv) >= self.lead_min_move
-                             and ask <= self.lead_max_price)
+                             and ask <= self.lead_max_price
+                             and sig.confidence >= self.lead_min_conf)
                 else:
                     armed = bool(sig.direction) and sig.confidence >= self.entry_threshold
                 if armed and ask_ok and ask > self.max_entry_price:
@@ -553,6 +558,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--lead-lo", type=float, default=180.0, help="lead rule: window closes at this many seconds left")
     ap.add_argument("--lead-max-price", type=float, default=0.72, help="lead rule: only enter while the ask is at/below this")
     ap.add_argument("--lead-min-move", type=float, default=10.0, help="lead rule: require BTC moved at least this many dollars")
+    ap.add_argument("--lead-min-conf", type=float, default=0.0,
+                    help="lead rule: also require confidence >= this (the lead+confidence combo; 0 = off)")
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
     ap.add_argument("--max-entry-price", type=float, default=0.97,
                     help="Never buy above this ask — near $1.00 you risk the whole stake to win pennies")
@@ -595,6 +602,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_entry_price=args.max_entry_price,
         lead_window=(args.lead_hi, args.lead_lo),
         lead_max_price=args.lead_max_price, lead_min_move=args.lead_min_move,
+        lead_min_conf=args.lead_min_conf,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")
@@ -611,6 +619,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "edge_margin": args.edge_margin, "max_entry_price": args.max_entry_price,
         "lead_hi": args.lead_hi, "lead_lo": args.lead_lo,
         "lead_max_price": args.lead_max_price, "lead_min_move": args.lead_min_move,
+        "lead_min_conf": args.lead_min_conf,
         "sizing": args.sizing, "stake_usd": args.stake_usd,
         "bankroll": args.bankroll, "price_source": args.entry_price_source,
         "provider": args.provider,
