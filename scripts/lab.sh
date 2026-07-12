@@ -97,6 +97,10 @@ case "${1:-start}" in
   analyze)
     echo; echo "################ FULL ANALYSIS BATTERY ################"; echo
     if [ -f "$RLOG" ]; then
+      echo "NOTE: spot-labeled tables below are UNRELIABLE (measured ~26% label"
+      echo "disagreement vs official settles). Read the TRUTH TABLE and COMBO"
+      echo "sections — official Polymarket resolutions only — for real answers."
+      echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG"                      || true
       echo
       echo "---- same, robust: executable size only + near-flat rounds dropped ----"
