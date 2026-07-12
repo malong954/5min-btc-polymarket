@@ -145,6 +145,17 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
     ts = ev.get("ts")
     if ts and (state.get("first_ts") is None or ts < state["first_ts"]):
         state["first_ts"] = ts   # session start = first event in the log
+    if t == "config":
+        # The trader announces its real settings — display those, never the
+        # monitor's own launch flags (they can disagree after restarts).
+        state["entry_rule"] = ev.get("entry_rule", state.get("entry_rule"))
+        if ev.get("entry_threshold") is not None:
+            state["entry_threshold"] = ev["entry_threshold"]
+        if ev.get("edge_margin") is not None:
+            state["edge_margin"] = ev["edge_margin"]
+        if ev.get("stake_usd") is not None:
+            state["stake_usd"] = ev["stake_usd"]
+        return state
     if t == "heartbeat":
         state["last_hb"] = ev
     elif t == "prediction":

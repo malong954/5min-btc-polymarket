@@ -602,6 +602,19 @@ def main(argv: Optional[list[str]] = None) -> int:
           f"entry_threshold={args.entry_threshold} price_source={price_desc} "
           f"bankroll=${args.bankroll:.2f} stake=${args.stake_usd:.2f} "
           f"| PAPER MODE (no real orders)", file=sys.stderr)
+    # Announce the ACTUAL config into the event stream so the dashboard shows
+    # the truth instead of guessing from its own launch flags (observed: a
+    # lead-rule trader under a header claiming 'need >= 0.60').
+    engine._emit({
+        "ts": int(time.time()), "type": "config",
+        "entry_rule": args.entry_rule, "entry_threshold": args.entry_threshold,
+        "edge_margin": args.edge_margin, "max_entry_price": args.max_entry_price,
+        "lead_hi": args.lead_hi, "lead_lo": args.lead_lo,
+        "lead_max_price": args.lead_max_price, "lead_min_move": args.lead_min_move,
+        "sizing": args.sizing, "stake_usd": args.stake_usd,
+        "bankroll": args.bankroll, "price_source": args.entry_price_source,
+        "provider": args.provider,
+    })
 
     n = 0
     bars: list[Bar] = []
