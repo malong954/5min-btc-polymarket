@@ -101,3 +101,67 @@ low-latency arb** (co-located infra, direct WebSocket, sub-100ms). Directional
 prediction as a taker — the approach here — is efficiently priced against.
 
 _Status: stopped. Retained as a documented negative result._
+
+---
+
+# CHAPTER 2 — The lead-rule investigation (July 2026)
+
+After the original stop, the project was revived to test one remaining
+hypothesis: that the Polymarket order book reprices seconds behind the live
+spot, leaving cheap asks buyable by a slow taker ("the lead rule": buy the
+leading side mid-round while the ask is still $0.60-0.72). This chapter records
+how that edge appeared, survived two artifact filters, and died on the third.
+
+## The apparent edge
+
+Recorder data (thousands of samples across five multi-day segments) showed the
+lead rule winning ~73-77% at ~$0.62-0.69 asks — +12 to +33% EV per trade,
+positive in every time bin, every segment. A live paper run delivered
+$100 -> $211 in ~36 hours at 73.6% winrate, matching the tables out-of-sample.
+
+It survived two validity filters:
+1. **Dust quotes** — requiring >=100 shares at the best ask (edge held).
+2. **Near-flat rounds** — dropping rounds settling within $10 of open (held).
+
+## The artifact that killed it: self-graded labels
+
+Win/loss labels came from the same spot feed as the signal. When settles were
+re-graded against **Polymarket's OFFICIAL resolutions** (fetched per round from
+the settled market), the truth emerged:
+
+- **21.2% of rounds disagreed** between our spot settle and the official one —
+  including rounds our feed measured as $26-53 moves. A 5s polling interval and
+  mirror latency made our close price stale; the same stale feed generated both
+  the signal and the scoreboard. Shared measurement noise inflated
+  leader-follow-through winrates in every spot-graded table.
+- **The truth table** (official labels only, executable size only): the
+  180-270s "sweet spot" collapsed from +13..+33% to **+0.7..+3.2%**, and the
+  best surviving bin (+5.8%, n=77) is within one standard error of zero —
+  before taker fees and before fill slippage.
+- The officially-graded live paper run agreed with money: 56-60% winrate
+  against a ~65% real breakeven, -$88 on $100.
+
+**Verdict: no-go.** The market is efficiently priced against a slow taker even
+at the seconds timescale; the apparent latency edge was mostly our own
+measurement latency reflected back at us.
+
+## The method is the takeaway
+
+Four layers of fake edge, four instruments that caught them, zero real dollars
+spent:
+
+| apparent edge | instrument that killed it |
+|---|---|
+| +6.6% at fixed $0.90 pricing | real per-round CLOB pricing |
+| confidence/indicator rules | regime testing + OOS ablation |
+| cheap-ask entry timing | best-ask SIZE capture (survived), then... |
+| ...the whole lead rule | **official-resolution grading** |
+
+The phased go-live process (GOLIVE.md) worked exactly as designed: Phase 0's
+exit bar — >=70% winrate at <=$0.68 average cost, **officially graded** — was
+the tripwire. It fired one segment before real money would have been staked.
+
+If anyone extends this work: grade every strategy against the venue's own
+resolutions from day one, never against the feed that generates your signal.
+
+_Status: concluded. Efficient market, twice-proven — once per grading layer._
