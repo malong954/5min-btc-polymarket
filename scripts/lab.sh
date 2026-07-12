@@ -96,6 +96,9 @@ case "${1:-start}" in
       echo "---- same, robust: executable size only + near-flat rounds dropped ----"
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --min-size 100 --min-move 10 || true
       echo
+      echo "---- THE TRUTH TABLE: official Polymarket resolutions only ----"
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --official-only --min-size 100 || true
+      echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side indicator     || true
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-confidence     || true

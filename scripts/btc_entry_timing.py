@@ -132,7 +132,7 @@ def taker_fee_frac(price: float, fee_rate: float) -> float:
 def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_BINS,
             side_source: str = "move", min_conf: Optional[float] = None,
             fee_rate: float = 0.0, min_size: float = 0.0,
-            min_move: float = 0.0) -> list[dict[str, Any]]:
+            min_move: float = 0.0, official_only: bool = False) -> list[dict[str, Any]]:
     samples, results = _split(events)
     rows = []
     for lo, hi in bins:
@@ -140,6 +140,12 @@ def analyze(events: list[dict[str, Any]], bins: list[tuple[int, int]] = DEFAULT_
         for r, samps in samples.items():
             res = results.get(r)
             if not res:
+                continue
+            if official_only and not res.get("official"):
+                # Grade ONLY on Polymarket's own resolutions. Spot labels share
+                # measurement noise with the spot-derived signal (stale close,
+                # feed drift), which inflates leader-follow-through winrates —
+                # measured: 14.7% label flips incl. $50+ "moves".
                 continue
             if min_move > 0.0:
                 # Robustness filter: drop near-flat rounds, where the label is
@@ -630,6 +636,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "needs samples recorded with up_sz/dn_sz)")
     ap.add_argument("--min-move", type=float, default=0.0,
                     help="Drop rounds settling within this many dollars of open (label-noise robustness check)")
+    ap.add_argument("--official-only", action="store_true",
+                    help="Grade ONLY rounds with an official Polymarket resolution (result_pm) — the truth table")
     ap.add_argument("--by-confidence", action="store_true",
                     help="Instead of the entry-time table, show edge bucketed by indicator confidence")
     ap.add_argument("--fade", action="store_true",
@@ -695,7 +703,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     rows = analyze(events, side_source=args.side, min_conf=args.min_conf,
-                   fee_rate=args.fee_rate, min_size=args.min_size, min_move=args.min_move)
+                   fee_rate=args.fee_rate, min_size=args.min_size, min_move=args.min_move,
+                   official_only=args.official_only)
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
