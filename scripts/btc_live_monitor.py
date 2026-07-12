@@ -155,6 +155,8 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
             state["edge_margin"] = ev["edge_margin"]
         if ev.get("stake_usd") is not None:
             state["stake_usd"] = ev["stake_usd"]
+        if ev.get("lead_min_conf") is not None:
+            state["lead_min_conf"] = ev["lead_min_conf"]
         return state
     if t == "heartbeat":
         state["last_hb"] = ev
@@ -329,20 +331,27 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
         conf = hb.get("confidence") if live else pred.get("confidence", 0.0)
         conf = conf if conf is not None else 0.0
         move = pred.get("btc_move_usd", 0.0)
+        lmc = state.get("lead_min_conf") or 0.0
+        lead_desc = "lead rule: leading side in the sweet-spot window" + (
+            f", conf >= {lmc:.2f}" if lmc > 0 else "")
         if rule == "edge":
             # Armed-ness depends on the live ask, which the monitor doesn't
             # stream — state the rule instead of a bogus threshold check.
             status = p.c(f"edge rule: enters when conf >= ask + {margin:.2f}", CYAN)
         elif rule == "lead":
-            status = p.c("lead rule: buys the leading side in the sweet-spot window", CYAN)
+            status = p.c(lead_desc, CYAN)
         else:
             armed = conf >= thr
             status = p.c(f"ARMED >= {thr:.2f}", GREEN, BOLD) if armed else p.c(f"waiting (need >= {thr:.2f})", YELLOW)
         lines.append(f"  predict {p.c(d, col, BOLD)}  conf {p.c(f'{conf:.2f}', BOLD)}  "
                      f"move {p.money(move, plus=True)}  rsi {pred.get('rsi_1m')}   {status}")
     else:
+        lmc = state.get("lead_min_conf") or 0.0
         if rule == "edge":
             lines.append(p.c(f"  predict —  (edge rule: enters when conf >= ask + {margin:.2f})", GREY))
+        elif rule == "lead":
+            extra = f", conf >= {lmc:.2f}" if lmc > 0 else ""
+            lines.append(p.c(f"  predict —  (lead rule: leading side in the sweet-spot window{extra})", GREY))
         else:
             lines.append(p.c(f"  predict —  (enters at conf >= {thr:.2f})", GREY))
     # Show that it's alive and deliberately skipping, not stuck.
