@@ -266,9 +266,11 @@ def _activity_row(ev: dict[str, Any], p: Painter) -> str:
     pnl_usd = float(ev.get("pnl_usd", 0.0))
     bal = ev.get("balance")
     bal_s = f"bal ${bal:,.2f}" if bal is not None else ""
+    stake = ev.get("stake_usd")
+    stk_s = f"  stk ${stake:.2f}" if stake is not None else ""
     pnl_str = f"${pnl_usd:+,.2f}"
     return (f"   {clk}  {p.c(tag, col, BOLD)}  {pair:<12}{cost:<7}"
-            f"{p.c(f'{pnl_str:<8}', col, BOLD)} {bal_s}")
+            f"{p.c(f'{pnl_str:<8}', col, BOLD)} {bal_s}{p.c(stk_s, GREY)}")
 
 
 def render(state: dict[str, Any], entry_price: float, p: Painter,
