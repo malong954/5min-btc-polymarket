@@ -438,17 +438,34 @@ class LivePaperEngine:
                     self.watch["capped"] = True
                     armed = False
                 if armed:
-                    ev = self._try_enter(cur, now, sig.direction, sig.confidence,
-                                         feat, note, entry_prices, sec_left=sec_left)
-                    if ev is not None:
-                        events.append(ev)
-                    else:
-                        # ARMED but unpriceable right now — don't throw the round
-                        # away; retry the price on later polls inside the window.
-                        self.pending[cur] = {"side": sig.direction,
+                    reserved = sum(p.get("stake_usd", 0.0)
+                                   for r0, p in self.positions.items() if r0 not in self.settled)
+                    if self.balance - reserved < 0.01:
+                        # ARMED but broke (or fully reserved): say so honestly
+                        # instead of pretending the market was unpriceable. The
+                        # bot keeps predicting + shadow-settling regardless.
+                        self.skipped.add(cur)
+                        self.shadows[cur] = {"side": sig.direction, "reason": "insolvent",
                                              "confidence": conf,
-                                             "features": feat, "note": note,
-                                             "retries": 1}
+                                             "features": feat, "note": note}
+                        events.append(self._emit({
+                            "ts": int(now), "type": "skip", "round": cur,
+                            "reason": "insolvent", "side": sig.direction,
+                            "confidence": conf, "balance": round(self.balance, 2),
+                            "features": feat, "note": note,
+                        }))
+                    else:
+                        ev = self._try_enter(cur, now, sig.direction, sig.confidence,
+                                             feat, note, entry_prices, sec_left=sec_left)
+                        if ev is not None:
+                            events.append(ev)
+                        else:
+                            # ARMED but unpriceable right now — don't throw the round
+                            # away; retry the price on later polls inside the window.
+                            self.pending[cur] = {"side": sig.direction,
+                                                 "confidence": conf,
+                                                 "features": feat, "note": note,
+                                                 "retries": 1}
 
         # 3) Heartbeat with the live price and the intra-round move building.
         if self.emit_heartbeat:
