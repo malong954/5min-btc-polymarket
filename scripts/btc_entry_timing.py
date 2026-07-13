@@ -723,6 +723,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Grade ONLY rounds with an official Polymarket resolution (result_pm) — the truth table")
     ap.add_argument("--combo", action="store_true",
                     help="Lead setup + confidence-floor sweep, official labels only")
+    ap.add_argument("--split-halves", action="store_true",
+                    help="With --combo: run separately on the FIRST and SECOND half of official-graded "
+                         "rounds (by time) — a same-log stand-in for the cross-segment check")
     ap.add_argument("--by-confidence", action="store_true",
                     help="Instead of the entry-time table, show edge bucketed by indicator confidence")
     ap.add_argument("--fade", action="store_true",
@@ -745,6 +748,22 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     events = load(args.log)
     if args.combo:
+        if args.split_halves:
+            # Independent halves of the official-graded rounds, by time. A real
+            # edge should be positive in BOTH; a lucky row usually isn't.
+            official_rounds = sorted({e["round"] for e in events
+                                      if e.get("type") == "result_pm"
+                                      and e.get("outcome") in ("UP", "DOWN")})
+            if len(official_rounds) < 20:
+                print("not enough official-graded rounds to split; let it run.")
+                return 0
+            cutoff = official_rounds[len(official_rounds) // 2]
+            first = [e for e in events if e.get("round") is not None and e["round"] < cutoff]
+            second = [e for e in events if e.get("round") is not None and e["round"] >= cutoff]
+            for label, chunk in (("FIRST HALF (older)", first), ("SECOND HALF (newer)", second)):
+                print(f"\n########## {label} ##########")
+                _print_combo(combo_analysis(chunk, min_size=args.min_size, fee_rate=args.fee_rate))
+            return 0
         rows = combo_analysis(events, min_size=args.min_size, fee_rate=args.fee_rate)
         if args.json:
             print(json.dumps(rows, indent=2))
