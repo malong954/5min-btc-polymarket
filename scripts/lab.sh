@@ -24,7 +24,8 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root
 PY=".venv/bin/python"
 TLOG="out/live.jsonl"        # trader stream
-RLOG="out/trajectory.jsonl"  # recorder stream
+RLOG="out/trajectory.jsonl"  # recorder stream (BTC)
+ELOG="out/trajectory-eth.jsonl" # recorder stream (ETH, opt-in via ETH=1)
 CONF="out/lab.conf"          # last run's settings — a plain restart reuses them
 
 # Precedence: explicit env var > saved config from the last start > default.
@@ -37,6 +38,7 @@ RULE="${RULE:-${SAVED_RULE:-threshold}}"
 EDGE_MARGIN="${EDGE_MARGIN:-${SAVED_EDGE_MARGIN:-0.03}}"
 MAX_PRICE="${MAX_PRICE:-${SAVED_MAX_PRICE:-0.97}}"   # never buy above this ask
 LEAD_MIN_CONF="${LEAD_MIN_CONF:-${SAVED_LEAD_MIN_CONF:-0.0}}"  # lead+confidence combo floor (0 = off)
+ETH="${ETH:-${SAVED_ETH:-0}}"    # ETH=1 also records the ETH 5m market (structural angles)
 STAKE="${STAKE:-${SAVED_STAKE:-10}}"
 BANKROLL="${BANKROLL:-${SAVED_BANKROLL:-100}}"
 
@@ -62,6 +64,7 @@ case "${1:-start}" in
     TS="$(date +%Y%m%d-%H%M%S)"
     [ -f "$TLOG" ] && mv "$TLOG" "out/live-$TS.jsonl" && echo "archived trader log   -> out/live-$TS.jsonl"
     [ -f "$RLOG" ] && mv "$RLOG" "out/trajectory-$TS.jsonl" && echo "archived recorder log -> out/trajectory-$TS.jsonl"
+    [ -f "$ELOG" ] && mv "$ELOG" "out/trajectory-eth-$TS.jsonl" && echo "archived ETH recorder log -> out/trajectory-eth-$TS.jsonl"
     echo "starting a fresh run..."
     exec "$0" start ;;
 
@@ -77,6 +80,12 @@ case "${1:-start}" in
     [ -f "$RLOG" ] && RSAMP="$(grep -c '"type":"sample"' "$RLOG" 2>/dev/null || true)"
     echo "trades settled:  ${TSET:-0}"
     echo "rounds recorded: ${RREC:-0}  (samples: ${RSAMP:-0}; want 100+ rounds before judging)"
+    if [ -f "$ELOG" ]; then
+      EREC=0; ESAMP=0
+      EREC="$(grep -c '"type":"result"' "$ELOG" 2>/dev/null || true)"
+      ESAMP="$(grep -c '"type":"sample"' "$ELOG" 2>/dev/null || true)"
+      echo "ETH rounds:      ${EREC:-0}  (samples: ${ESAMP:-0})"
+    fi
     # A recorder that is 'RUNNING' but writing nothing is a hidden failure —
     # surface its recent stderr so the cause is visible right here.
     if [ "${RSAMP:-0}" = "0" ] && [ -f out/record-nohup.log ]; then
@@ -130,6 +139,11 @@ case "${1:-start}" in
       done
       "$PY" scripts/btc_overround.py --log "$RLOG"                        || true
       echo
+      if [ -f "$ELOG" ]; then
+        echo "---- ETH 5m market: overround / dislocations ----"
+        "$PY" scripts/btc_overround.py --log "$ELOG"                      || true
+        echo
+      fi
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --fade              || true
       echo
     else
@@ -157,6 +171,7 @@ mkdir -p out
   echo "SAVED_EDGE_MARGIN=$EDGE_MARGIN"
   echo "SAVED_MAX_PRICE=$MAX_PRICE"
   echo "SAVED_LEAD_MIN_CONF=$LEAD_MIN_CONF"
+  echo "SAVED_ETH=$ETH"
   echo "SAVED_STAKE=$STAKE"
   echo "SAVED_BANKROLL=$BANKROLL"
 } > "$CONF"
@@ -168,6 +183,17 @@ else
   nohup "$PY" scripts/btc_record.py --provider "$PROVIDER" --poll 5 --log "$RLOG" \
     >> out/record-nohup.log 2>&1 &
   echo "started recorder (pid $!) -> $RLOG"
+fi
+
+# --- optional ETH recorder (structural angles: dislocations, spreads) ---
+if [ "$ETH" = "1" ]; then
+  if pgrep -f "btc_record.py.*--asset eth" >/dev/null 2>&1; then
+    echo "ETH recorder already running"
+  else
+    nohup "$PY" scripts/btc_record.py --asset eth --provider binance --poll 5 --log "$ELOG" \
+      >> out/record-eth-nohup.log 2>&1 &
+    echo "started ETH recorder (pid $!) -> $ELOG"
+  fi
 fi
 
 # --- paper trader (flat stake, real pricing, enriched logging) ---

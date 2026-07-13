@@ -26,7 +26,7 @@ import requests
 
 GAMMA = "https://gamma-api.polymarket.com/events"
 CLOB_BOOK = "https://clob.polymarket.com/book"
-SLUG_PREFIX = "btc-updown-5m-"
+SLUG_PREFIX = "btc-updown-5m-"   # legacy default; use current_slug(ts, asset=...)
 
 
 def _get_json(url: str, params: Optional[dict[str, Any]] = None, timeout: float = 8.0) -> Any:
@@ -39,8 +39,10 @@ def bucket_5m(ts: int) -> int:
     return ts - (ts % 300)
 
 
-def current_slug(now_ts: float) -> str:
-    return f"{SLUG_PREFIX}{bucket_5m(int(now_ts))}"
+def current_slug(now_ts: float, asset: str = "btc") -> str:
+    """Slug of the asset's live 5m Up/Down market (btc-updown-5m-<bucket>,
+    eth-updown-5m-<bucket>, ...)."""
+    return f"{asset.lower()}-updown-5m-{bucket_5m(int(now_ts))}"
 
 
 def parse_json_field(v: Any) -> Any:
@@ -116,10 +118,11 @@ def _side_tokens(market: dict[str, Any]) -> Optional[tuple[str, str, str]]:
     return str(token_ids[up_i]), str(token_ids[down_i]), end_iso
 
 
-def current_prices(now_ts: float, getter: Callable[..., Any] = _get_json) -> Optional[dict[str, Any]]:
+def current_prices(now_ts: float, getter: Callable[..., Any] = _get_json,
+                   asset: str = "btc") -> Optional[dict[str, Any]]:
     """Return the live UP/DOWN best-ask prices for the current 5m market, or None
     if the market can't be resolved. Prices are floats in (0,1) or None per side."""
-    slug = current_slug(now_ts)
+    slug = current_slug(now_ts, asset)
     ev = fetch_event(slug, getter)
     if not ev:
         return None

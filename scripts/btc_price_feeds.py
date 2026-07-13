@@ -68,7 +68,8 @@ class BinanceFeed(Feed):
         "https://api.binance.us",
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, symbol: str = "BTCUSDT") -> None:
+        self.symbol = symbol
         self._base: Optional[str] = None   # sticky: first base that answered
 
     def _get(self, path: str, params: dict) -> Any:
@@ -84,7 +85,7 @@ class BinanceFeed(Feed):
 
     def spot(self) -> Optional[float]:
         try:
-            j = self._get("/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+            j = self._get("/api/v3/ticker/price", {"symbol": self.symbol})
             return float(j["price"]) if j else None
         except Exception:
             return None
@@ -94,7 +95,7 @@ class BinanceFeed(Feed):
             kl = self._get(
                 "/api/v3/klines",
                 {
-                    "symbol": "BTCUSDT",
+                    "symbol": self.symbol,
                     "interval": "5m",
                     "startTime": slot_start * 1000,
                     "limit": 1,
@@ -302,11 +303,18 @@ FEEDS: dict[str, type[Feed]] = {
 GATE_CAPABLE_FEEDS = ["binance", "coinbase", "kraken", "cryptocompare"]
 
 
-def build_feeds(names: list[str]) -> list[Feed]:
+def build_feeds(names: list[str], symbol: str = "BTCUSDT") -> list[Feed]:
+    """Build feed adapters. `symbol` selects the traded pair for feeds that
+    support it (Binance); other adapters keep their hardcoded BTC pairs, so use
+    provider=binance for non-BTC assets."""
     feeds: list[Feed] = []
     for n in names:
         cls = FEEDS.get(n.strip().lower())
-        if cls is not None:
+        if cls is None:
+            continue
+        if cls is BinanceFeed:
+            feeds.append(cls(symbol=symbol))
+        else:
             feeds.append(cls())
     return feeds
 

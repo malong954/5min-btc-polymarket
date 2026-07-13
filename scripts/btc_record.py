@@ -37,6 +37,8 @@ def bucket_5m(ts: int) -> int:
 
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Record Polymarket price + BTC move + indicator trajectory per 5m round")
+    ap.add_argument("--asset", default="btc", choices=["btc", "eth"],
+                    help="Which Polymarket 5m Up/Down market to record (sets slug + spot symbol)")
     ap.add_argument("--provider", default="binance", choices=["binance", "cryptocompare", "coinbase", "kraken"])
     ap.add_argument("--poll", type=float, default=5.0, help="Seconds between samples")
     ap.add_argument("--min-left", type=float, default=30.0, help="Start sampling when this many seconds remain")
@@ -55,7 +57,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     from btc_backtest import Bar, DEFAULT_WEIGHTS, MTFModel
     from btc_history import fetch_history
 
-    feeds = build_feeds([args.provider])
+    symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT"}[args.asset]
+    if args.asset != "btc" and args.provider != "binance":
+        print("non-BTC assets need --provider binance (other feeds are BTC-pinned)", file=sys.stderr)
+        return 2
+    feeds = build_feeds([args.provider], symbol=symbol)
     if not feeds:
         print(f"unknown provider {args.provider}", file=sys.stderr)
         return 2
@@ -64,7 +70,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     bars: list = []
 
     def fetch_bars() -> list:
-        rows = fetch_history(args.provider, days=args.history_min / 1440.0)
+        kw = {"symbol": symbol} if args.provider == "binance" else {}
+        rows = fetch_history(args.provider, days=args.history_min / 1440.0, **kw)
         return [Bar(r["time"], r["open"], r["high"], r["low"], r["close"], r["volume"]) for r in rows]
 
     def indicator_signal(round_start: int, now: float, spot: Optional[float] = None):
@@ -171,7 +178,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     p = pm_pending[rs]
                     if now < p["next"]:
                         continue
-                    outc = resolved_outcome(current_slug(rs))
+                    outc = resolved_outcome(current_slug(rs, args.asset))
                     if outc in ("UP", "DOWN"):
                         emit({"type": "result_pm", "round": rs, "outcome": outc, "ts": int(now)})
                         del pm_pending[rs]
@@ -199,7 +206,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     except Exception as e:
                         print(f"# kline fetch error: {e}", file=sys.stderr)
                 if in_window and round_open is not None and spot is not None:
-                    pm = current_prices(now)
+                    pm = current_prices(now, asset=args.asset)
                     if not pm and r not in pm_missing_logged:
                         pm_missing_logged.add(r)
                         print(f"# round {r}: no polymarket market found (gamma slug lookup empty)",
