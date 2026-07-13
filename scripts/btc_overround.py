@@ -47,8 +47,10 @@ def _median(xs: list[float]) -> float:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
 
 
-def analyze(events: list[dict[str, Any]], dislocation_at: float = 1.0) -> dict[str, Any]:
+def analyze(events: list[dict[str, Any]], dislocation_at: float = 1.0,
+            min_size: float = 0.0) -> dict[str, Any]:
     sums: list[float] = []
+    ts_all: list[float] = []
     # Track consecutive dislocation runs within a round (samples are ~5s apart).
     runs: list[dict[str, Any]] = []
     cur: Optional[dict[str, Any]] = None
@@ -64,7 +66,14 @@ def analyze(events: list[dict[str, Any]], dislocation_at: float = 1.0) -> dict[s
             continue
         s = up + dn
         sums.append(s)
-        if s <= dislocation_at:
+        if isinstance(e.get("ts"), (int, float)):
+            ts_all.append(e["ts"])
+        sized = True
+        if min_size > 0:
+            usz, dsz = e.get("up_sz"), e.get("dn_sz")
+            sized = (isinstance(usz, (int, float)) and usz >= min_size
+                     and isinstance(dsz, (int, float)) and dsz >= min_size)
+        if s <= dislocation_at and sized:
             if cur is None:
                 cur = {"round": e.get("round"), "n": 0, "min_sum": s,
                        "start_ts": e.get("ts"), "end_ts": e.get("ts")}
@@ -77,6 +86,7 @@ def analyze(events: list[dict[str, Any]], dislocation_at: float = 1.0) -> dict[s
                 cur = None
     if cur is not None:
         runs.append(cur)
+    span_days = ((max(ts_all) - min(ts_all)) / 86400.0) if len(ts_all) >= 2 else None
 
     for r in runs:
         st, en = r.get("start_ts"), r.get("end_ts")
@@ -91,7 +101,18 @@ def analyze(events: list[dict[str, Any]], dislocation_at: float = 1.0) -> dict[s
         "pct_dislocated": round(100.0 * sum(1 for s in sums if s <= dislocation_at) / n, 2) if n else 0.0,
         "dislocations": runs,
         "dislocation_at": dislocation_at,
+        "min_size": min_size,
+        "span_days": round(span_days, 2) if span_days else None,
     }
+
+
+def arb_net_per_pair(s: float, fee_rate: float) -> float:
+    """Net profit of buying BOTH sides (one share each) at combined cost `s`:
+    payout is exactly $1 at settle; taker fee per leg = rate*p*(1-p) per share.
+    Assumes pU ~ s/2 each for the fee term (exact split changes it little)."""
+    p = s / 2.0
+    fee = 2.0 * fee_rate * p * (1.0 - p)
+    return (1.0 - s) - fee
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -99,10 +120,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--log", default="out/trajectory.jsonl")
     ap.add_argument("--at", type=float, default=1.0, help="Dislocation threshold: flag samples where up+dn <= this")
     ap.add_argument("--min-run", type=int, default=1, help="Only list dislocations lasting >= this many consecutive samples")
+    ap.add_argument("--min-size", type=float, default=0.0,
+                    help="Require BOTH asks to have at least this many shares (executable-arb filter)")
+    ap.add_argument("--fee-rate", type=float, default=0.0, help="Taker fee rate for the net-profit column")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    res = analyze(load(args.log), dislocation_at=args.at)
+    res = analyze(load(args.log), dislocation_at=args.at, min_size=args.min_size)
     if args.json:
         print(json.dumps(res, indent=2))
         return 0
@@ -120,19 +144,36 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"  samples with up+dn <= {res['dislocation_at']:.2f}: {res['pct_dislocated']:.2f}%")
     runs = [r for r in res["dislocations"] if r["n"] >= args.min_run]
     print("-" * 66)
+    sized = f", both sizes >= {args.min_size:.0f}" if args.min_size > 0 else ""
     if runs:
-        print(f"  DISLOCATIONS (up+dn <= {res['dislocation_at']:.2f}, >= {args.min_run} sample(s)):")
-        print(f"    {'round':<14}{'samples':<9}{'~secs':<8}{'min sum'}")
+        print(f"  DISLOCATIONS (up+dn <= {res['dislocation_at']:.2f}, >= {args.min_run} sample(s){sized}):")
+        hdr = f"    {'round':<14}{'samples':<9}{'~secs':<8}{'min sum':<9}"
+        if args.fee_rate > 0:
+            hdr += "net/pair"
+        print(hdr)
         for r in runs[:50]:
             dur = r.get("duration_s")
             dur_s = f"{dur:.0f}" if dur is not None else "?"
-            print(f"    {str(r['round']):<14}{r['n']:<9}{dur_s:<8}{r['min_sum']:.3f}")
-        print(f"  -> {len(runs)} dislocation run(s). A slow taker can only capture ones")
-        print("     that persist several seconds AND clear the fee. Check duration + depth.")
+            row = f"    {str(r['round']):<14}{r['n']:<9}{dur_s:<8}{r['min_sum']:<9.3f}"
+            if args.fee_rate > 0:
+                row += f"{arb_net_per_pair(r['min_sum'], args.fee_rate):+.3f}"
+            print(row)
+        print(f"  -> {len(runs)} run(s)", end="")
+        if res.get("span_days"):
+            print(f"  (~{len(runs) / res['span_days']:.1f}/day over {res['span_days']:.1f} days)", end="")
+        print()
+        pos = [r for r in runs if arb_net_per_pair(r["min_sum"], args.fee_rate) > 0]
+        if args.fee_rate > 0:
+            print(f"  -> {len(pos)} clear the {args.fee_rate:.0%} fee. This is a RISKLESS payoff")
+            print("     (both sides pay $1 total at settle) — the open question is only")
+            print("     whether real orders fill before the quote vanishes.")
+        else:
+            print("     Rerun with --fee-rate and --min-size 100 --min-run 2 for the")
+            print("     EXECUTABLE subset — riskless if fills match the recorded quotes.")
     else:
-        print("  NO dislocations: up+dn stays above the threshold at all times.")
-        print("  -> efficient book. The median overround above is simply the tax you")
-        print("     pay as a taker on every round; it is not capturable.")
+        print(f"  NO dislocations pass (threshold {res['dislocation_at']:.2f}{sized}, >= {args.min_run} samples).")
+        print("  -> at these filters the book never offers a capturable discount; the")
+        print("     median overround above is simply the taker tax on every round.")
     print("=" * 66)
     return 0
 

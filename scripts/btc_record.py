@@ -210,6 +210,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                               "move": round(spot - round_open, 2), "spot": round(spot, 2),
                               "up_ask": pm.get("UP"), "dn_ask": pm.get("DOWN"),
                               "up_sz": pm.get("UP_size"), "dn_sz": pm.get("DOWN_size"),
+                              "up_bid": pm.get("UP_bid"), "dn_bid": pm.get("DOWN_bid"),
+                              "up_bid_sz": pm.get("UP_bid_size"), "dn_bid_sz": pm.get("DOWN_bid_size"),
                               "ind_dir": idir, "ind_conf": iconf, "ind_score": iscore,
                               "ind_div": idiv,
                               "vel_5s": velocity(now, 5), "vel_15s": velocity(now, 15),

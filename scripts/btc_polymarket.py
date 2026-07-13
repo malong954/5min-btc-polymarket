@@ -65,34 +65,42 @@ def fetch_event(slug: str, getter: Callable[..., Any] = _get_json) -> Optional[d
     return None
 
 
-def clob_best_ask_level(token_id: str, getter: Callable[..., Any] = _get_json) -> tuple[Optional[float], Optional[float]]:
-    """(price, size) of the lowest ask from the CLOB order book. Size matters:
-    a cheap best ask for dust shares looks like edge in analysis but cannot be
-    bought in practice — record it so the analyzers can filter phantom quotes."""
+def clob_book_top(token_id: str, getter: Callable[..., Any] = _get_json) -> dict[str, Optional[float]]:
+    """Top of book for a token: best ask (price you pay to BUY), best bid (price
+    you receive to SELL), and the size at each. Sizes matter: dust quotes look
+    like edge in analysis but cannot be traded. Bids enable exit/maker studies."""
+    out: dict[str, Optional[float]] = {"ask": None, "ask_sz": None, "bid": None, "bid_sz": None}
     try:
         book = getter(CLOB_BOOK, {"token_id": str(token_id)})
     except Exception:
-        return None, None
-    asks = (book or {}).get("asks") or []
-    best: Optional[float] = None
-    best_sz: Optional[float] = None
-    for a in asks:
-        try:
-            p = float(a["price"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if best is None or p < best:
-            best = p
+        return out
+    for side, key, better in (("asks", "ask", min), ("bids", "bid", max)):
+        best: Optional[float] = None
+        best_sz: Optional[float] = None
+        for lvl in (book or {}).get(side) or []:
             try:
-                best_sz = float(a.get("size"))
-            except (TypeError, ValueError):
-                best_sz = None
-    return best, best_sz
+                p = float(lvl["price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if best is None or better(p, best) == p:
+                best = p
+                try:
+                    best_sz = float(lvl.get("size"))
+                except (TypeError, ValueError):
+                    best_sz = None
+        out[key] = best
+        out[key + "_sz"] = best_sz
+    return out
+
+
+def clob_best_ask_level(token_id: str, getter: Callable[..., Any] = _get_json) -> tuple[Optional[float], Optional[float]]:
+    top = clob_book_top(token_id, getter)
+    return top["ask"], top["ask_sz"]
 
 
 def clob_best_ask(token_id: str, getter: Callable[..., Any] = _get_json) -> Optional[float]:
     """Lowest ask (the price you pay to BUY this token) from the CLOB order book."""
-    return clob_best_ask_level(token_id, getter)[0]
+    return clob_book_top(token_id, getter)["ask"]
 
 
 def _side_tokens(market: dict[str, Any]) -> Optional[tuple[str, str, str]]:
@@ -122,17 +130,21 @@ def current_prices(now_ts: float, getter: Callable[..., Any] = _get_json) -> Opt
     if tokens is None:
         return None
     up_t, dn_t, end_iso = tokens
-    up_p, up_sz = clob_best_ask_level(up_t, getter)
-    dn_p, dn_sz = clob_best_ask_level(dn_t, getter)
+    up_top = clob_book_top(up_t, getter)
+    dn_top = clob_book_top(dn_t, getter)
     return {
         "slug": slug,
         "up_token": up_t,
         "down_token": dn_t,
         "end_iso": end_iso,
-        "UP": up_p,
-        "DOWN": dn_p,
-        "UP_size": up_sz,
-        "DOWN_size": dn_sz,
+        "UP": up_top["ask"],
+        "DOWN": dn_top["ask"],
+        "UP_size": up_top["ask_sz"],
+        "DOWN_size": dn_top["ask_sz"],
+        "UP_bid": up_top["bid"],
+        "DOWN_bid": dn_top["bid"],
+        "UP_bid_size": up_top["bid_sz"],
+        "DOWN_bid_size": dn_top["bid_sz"],
     }
 
 
