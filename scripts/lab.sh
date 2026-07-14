@@ -143,6 +143,9 @@ case "${1:-start}" in
         echo "---- ETH 5m market: overround / dislocations ----"
         "$PY" scripts/btc_overround.py --log "$ELOG"                      || true
         echo
+        echo "---- ETH 5m market: lead + confidence combo (move threshold scaled) ----"
+        "$PY" scripts/btc_entry_timing.py --log "$ELOG" --combo --min-size 100 --combo-min-move 0.35 || true
+        echo
       fi
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --fade              || true
       echo

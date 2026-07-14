@@ -424,7 +424,7 @@ def _print_edge_gate(rows: list[dict[str, Any]]) -> None:
     print("=" * 74)
 
 
-COMBO_FLOORS = (0.0, 0.3, 0.5, 0.7, 0.8, 0.9)
+COMBO_FLOORS = (0.0, 0.3, 0.4, 0.5, 0.7, 0.8, 0.9)
 
 
 def combo_analysis(events: list[dict[str, Any]],
@@ -723,6 +723,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Grade ONLY rounds with an official Polymarket resolution (result_pm) — the truth table")
     ap.add_argument("--combo", action="store_true",
                     help="Lead setup + confidence-floor sweep, official labels only")
+    ap.add_argument("--combo-min-move", type=float, default=10.0,
+                    help="With --combo: the 'decisive move' threshold in dollars. Default 10 "
+                         "(BTC-scaled). Other assets need it scaled by price: ETH ~0.35.")
     ap.add_argument("--split-halves", action="store_true",
                     help="With --combo: run separately on the FIRST and SECOND half of official-graded "
                          "rounds (by time) — a same-log stand-in for the cross-segment check")
@@ -762,9 +765,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             second = [e for e in events if e.get("round") is not None and e["round"] >= cutoff]
             for label, chunk in (("FIRST HALF (older)", first), ("SECOND HALF (newer)", second)):
                 print(f"\n########## {label} ##########")
-                _print_combo(combo_analysis(chunk, min_size=args.min_size, fee_rate=args.fee_rate))
+                _print_combo(combo_analysis(chunk, min_size=args.min_size, fee_rate=args.fee_rate,
+                                            min_move_signal=args.combo_min_move))
             return 0
-        rows = combo_analysis(events, min_size=args.min_size, fee_rate=args.fee_rate)
+        rows = combo_analysis(events, min_size=args.min_size, fee_rate=args.fee_rate,
+                              min_move_signal=args.combo_min_move)
         if args.json:
             print(json.dumps(rows, indent=2))
             return 0
