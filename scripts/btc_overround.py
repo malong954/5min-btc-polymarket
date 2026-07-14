@@ -23,11 +23,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from typing import Any, Optional
 
 
 def load(path: str) -> list[dict[str, Any]]:
     out = []
+    if not os.path.exists(path):
+        print(f"log not found: {path}", file=sys.stderr)
+        print("that recorder has not run yet (or has not produced samples).", file=sys.stderr)
+        print("for ETH: start it once with  ETH=1 scripts/lab.sh  then let it collect.", file=sys.stderr)
+        raise SystemExit(2)
     with open(path) as f:
         for line in f:
             line = line.strip()
