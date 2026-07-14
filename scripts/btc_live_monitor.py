@@ -153,8 +153,9 @@ def _asset_state(state: dict[str, Any], a: str) -> dict[str, Any]:
 
 def _push_activity(state: dict[str, Any], ev: dict[str, Any]) -> None:
     state["activity"].append(ev)
-    if len(state["activity"]) > ACTIVITY_MAX:
-        state["activity"] = state["activity"][-ACTIVITY_MAX:]
+    cap = state.get("activity_cap", ACTIVITY_MAX)
+    if len(state["activity"]) > cap:
+        state["activity"] = state["activity"][-cap:]
 
 
 def _unit_to_usd(unit_pnl: float, stake_usd: float, entry_price: float) -> float:
@@ -211,6 +212,17 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         state["recent_entries"].append(ev)
         state["recent_entries"] = state["recent_entries"][-RECENT_N:]
         _push_activity(state, ev)
+    elif t == "shadow_settle":
+        # The trader grades every skipped-but-predicted round (no money). Attach
+        # the resolution to the skip row already in the feed, so each SKIP line
+        # shows how the contract actually resolved and whether the shadow call
+        # would have won.
+        for row in reversed(state["activity"]):
+            if (row.get("type") == "skip" and row.get("round") == ev.get("round")
+                    and str(row.get("asset") or "BTC").upper() == a):
+                row["actual"] = ev.get("actual")
+                row["shadow_result"] = ev.get("result")
+                break
     elif t == "settle":
         ast = _asset_state(state, a)
         state["trades"] += 1
@@ -312,8 +324,15 @@ def _activity_row(ev: dict[str, Any], p: Painter) -> str:
             side_s = " " * 6
         note = ev.get("note")
         note_s = p.c(f"  [{note}]", GREY) if note else ""   # why: high RSI, hidden divergence, ...
+        # Once the round resolves, the shadow settle grades the skip: what the
+        # contract actually did, and whether the call would have won.
+        res_s = ""
+        actual = ev.get("actual")
+        if actual in ("UP", "DOWN"):
+            ok = ev.get("shadow_result") == "win"
+            res_s = " " + p.c(f"-> {actual} {'✓' if ok else '✗'}", GREEN if ok else RED, BOLD)
         return (f"   {clk}  {atag}{p.c('SKIP ', GREY, BOLD)} {side_s}"
-                f"{p.c(f'{reason:<16}', GREY)} {p.c(conf_s, GREY)}{note_s}")
+                f"{p.c(f'{reason:<16}', GREY)} {p.c(conf_s, GREY)}{res_s}{note_s}")
     # settle
     win = ev.get("result") == "win"
     col = GREEN if win else RED
@@ -622,17 +641,18 @@ def print_history(events: list[dict[str, Any]], p: Painter, bankroll: float,
     """Dump the COMPLETE chronological timeline (oldest first) with a running
     balance — every entry, skip, win and loss, not just the last N."""
     state = new_state(bankroll=bankroll, stake_usd=stake_usd, entry_price=entry_price)
+    state["activity_cap"] = len(events) + 1   # the FULL history, never trimmed
     print(p.c("FLIPPOLYBOT — full activity history (oldest first)", BOLD, CYAN))
     print(p.c("─" * 60, GREY))
-    shown = 0
+    # Fold EVERYTHING first, then print: a skip's resolution (shadow_settle)
+    # arrives minutes after the skip itself, and folding annotates the stored
+    # row in place — printing as we fold would miss it.
     for ev in events:
         fold_event(state, ev)
-        if ev.get("type") in ("entry", "skip", "settle"):
-            # settle rows were copied inside fold with the cumulative balance;
-            # use that copy so the printed bal matches the account.
-            row_ev = state["activity"][-1] if state["activity"] else ev
-            print(_activity_row(row_ev, p))
-            shown += 1
+    shown = 0
+    for row_ev in state["activity"]:
+        print(_activity_row(row_ev, p))
+        shown += 1
     if shown == 0:
         print(p.c("  (no activity in this log yet)", GREY))
     print(p.c("─" * 60, GREY))

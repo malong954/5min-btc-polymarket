@@ -10,7 +10,7 @@ import tempfile
 
 from btc_live_monitor import (
     GREEN, RED,
-    Painter, new_state, fold_event, render, read_new_events,
+    Painter, new_state, fold_event, render, read_new_events, _activity_row,
 )
 
 
@@ -123,6 +123,35 @@ def test_incremental_read_and_truncation():
         check("truncation handled (re-reads from start)", len(evs4) == 1 and off4 > 0)
 
 
+def test_skip_rows_graded_by_shadow_settle():
+    # A skipped round's later shadow_settle must annotate the SKIP row in the
+    # feed with how the contract actually resolved (and if the call would win).
+    st = new_state()
+    fold_event(st, {"ts": 1, "type": "skip", "asset": "ETH", "round": 900,
+                    "reason": "no_lead_setup", "side": "DOWN", "confidence": 0.25})
+    check("skip row initially ungraded", "actual" not in st["activity"][-1])
+    fold_event(st, {"ts": 2, "type": "shadow_settle", "asset": "ETH", "round": 900,
+                    "side": "DOWN", "actual": "UP", "result": "loss"})
+    check("shadow settle grades the skip row", st["activity"][-1].get("actual") == "UP")
+    out = _activity_row(st["activity"][-1], Painter(color=False))
+    check("skip row shows the resolution", "-> UP" in out and "✗" in out)
+    win = new_state()
+    fold_event(win, {"ts": 1, "type": "skip", "asset": "BTC", "round": 900,
+                     "reason": "insolvent", "side": "UP", "confidence": 0.5})
+    fold_event(win, {"ts": 2, "type": "shadow_settle", "asset": "BTC", "round": 900,
+                     "side": "UP", "actual": "UP", "result": "win"})
+    out_w = _activity_row(win["activity"][-1], Painter(color=False))
+    check("correct shadow call marked with a check", "-> UP" in out_w and "✓" in out_w)
+    # BTC and ETH share round buckets: another market's resolution must not
+    # grade this market's skip.
+    st2 = new_state()
+    fold_event(st2, {"ts": 1, "type": "skip", "asset": "BTC", "round": 900,
+                     "reason": "no_lead_setup", "side": "UP", "confidence": 0.5})
+    fold_event(st2, {"ts": 2, "type": "shadow_settle", "asset": "ETH", "round": 900,
+                     "side": "DOWN", "actual": "UP", "result": "loss"})
+    check("other market's shadow does not grade it", "actual" not in st2["activity"][-1])
+
+
 def test_missing_file_is_safe():
     evs, off = read_new_events("/nonexistent/path/live.jsonl", 0)
     check("missing file returns empty", evs == [] and off == 0)
@@ -135,6 +164,7 @@ def main():
     test_render_no_color_is_plain()
     test_breakeven_verdict_flips_color()
     test_incremental_read_and_truncation()
+    test_skip_rows_graded_by_shadow_settle()
     test_missing_file_is_safe()
     print("\nAll live monitor tests passed.")
 
