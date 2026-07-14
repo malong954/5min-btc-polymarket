@@ -1,0 +1,96 @@
+version: 1
+name: multi_timeframe_updown_parallel
+# Separate parallel-testing bot. Does NOT replace the og 5m bot — it runs
+# alongside it in its own contour (multi/runtime, multibot_ctl.sh).
+#
+# All baselines below are seeded from the og 5m bot's gathered live data
+# (conservative profile: threshold 0.70, stake $5, SL 25%). Only the timing
+# scales per timeframe — that is the one thing that changes drastically
+# between these markets.
+
+# paper = simulate fills against live CLOB books (default, safe, no auth).
+# live  = real orders via the external pm_live_trade_runner.py engine.
+mode_default: paper
+
+# BTC-only by default; uncomment to also test other Up/Down series.
+assets:
+  - btc
+  # - eth
+  # - sol
+  # - xrp
+
+# Cross-worker caps shared by ALL parallel workers (fcntl-locked state file).
+# These are what make "multiple simultaneous positions" safe.
+portfolio:
+  max_concurrent_positions: 3
+  max_total_exposure_usd: 15
+  daily_max_loss_usd: 10
+
+worker:
+  restart_on_exit: true
+  restart_backoff_sec: 20
+
+# Per-timeframe strategy + timing. Anything omitted falls back to defaults
+# baked into multi_worker.py (same values as shown here).
+#
+# entry_window_sec_left  : entry only allowed once <= this many sec remain
+#                          (og 5m: ~120s left = "2 minutes before close")
+# min_entry_seconds_left : never open with less than this remaining
+# exit_before_sec        : forced time-exit this many sec before market end
+# slug_templates         : override market slug discovery patterns if
+#                          probe_markets.py shows a timeframe unresolvable
+timeframes:
+  5m:
+    # NOTE: the og bot trades this market live. Keep the multi 5m worker in
+    # paper mode (or disable it) when the og bot is running live, so you never
+    # hold duplicate exposure on the same market. As a paper baseline it is
+    # useful for validating that multi results match og results.
+    enabled: true
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 120
+    min_entry_seconds_left: 60
+    exit_before_sec: 20
+    poll_sec: 3
+
+  15m:
+    # Closest step up from 5m — the first candidate to take live.
+    enabled: true
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 300
+    min_entry_seconds_left: 120
+    exit_before_sec: 30
+    poll_sec: 5
+
+  1h:
+    enabled: true
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 900
+    min_entry_seconds_left: 300
+    exit_before_sec: 60
+    poll_sec: 15
+
+  4h:
+    enabled: true
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 2700
+    min_entry_seconds_left: 900
+    exit_before_sec: 120
+    poll_sec: 30
+
+  1d:
+    enabled: true
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 10800
+    min_entry_seconds_left: 3600
+    exit_before_sec: 300
+    poll_sec: 60
