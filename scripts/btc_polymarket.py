@@ -29,8 +29,13 @@ CLOB_BOOK = "https://clob.polymarket.com/book"
 SLUG_PREFIX = "btc-updown-5m-"   # legacy default; use current_slug(ts, asset=...)
 
 
+# One keep-alive session per process: without it every gamma/CLOB call pays a
+# fresh TCP+TLS handshake (~100-300ms) — the cheapest latency cut available.
+_SESSION = requests.Session()
+
+
 def _get_json(url: str, params: Optional[dict[str, Any]] = None, timeout: float = 8.0) -> Any:
-    r = requests.get(url, params=params, timeout=timeout)
+    r = _SESSION.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
 

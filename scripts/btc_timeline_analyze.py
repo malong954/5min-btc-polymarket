@@ -191,6 +191,25 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("         threshold may be too strict (leaving good trades on the table).")
     else:
         print("      no shadow-settled skips yet.")
+
+    # (5) FILL SLIPPAGE — how far the ask moved between deciding and the
+    # honest-fill requote one book-read later. This is the paper-vs-live gap
+    # made measurable: a fat right tail here means live fills will be worse
+    # than the table, no matter what the winrate says.
+    slips = [e["slip"] for e in events
+             if e.get("type") == "requote" and isinstance(e.get("slip"), (int, float))]
+    print("\n  (5) FILL SLIPPAGE  (ask movement during the entry's order flight)")
+    if slips:
+        moved = [s for s in slips if s > 0]
+        worst = max(slips)
+        avg_paid = sum(max(s, 0.0) for s in slips) / len(slips)
+        print(f"      requoted entries: {len(slips)}   quote moved against us: "
+              f"{len(moved)} ({len(moved) / len(slips):.0%})")
+        print(f"      avg slip paid: {avg_paid:+.4f}   worst: {worst:+.4f}")
+        print("      -> avg slip paid is a direct tax on the edge; if it rivals the")
+        print("         NET EV in the combo table, the strategy dies in transit.")
+    else:
+        print("      no requote events yet (needs entries made after the honest-fill update).")
     print("=" * 70)
     return 0
 

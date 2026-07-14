@@ -35,8 +35,13 @@ def bucket_5m(ts: int) -> int:
     return ts - (ts % SLOT_SECONDS)
 
 
+# One keep-alive session per process: without it every poll pays a fresh
+# TCP+TLS handshake (~100-300ms) — pure latency for zero benefit.
+_SESSION = requests.Session()
+
+
 def _get_json(url: str, params: Optional[dict[str, Any]] = None, timeout: float = 4.0) -> Any:
-    r = requests.get(url, params=params, timeout=timeout)
+    r = _SESSION.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
 

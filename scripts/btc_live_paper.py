@@ -247,6 +247,34 @@ class LivePaperEngine:
             "features": feat, "note": note,
         })
 
+    def apply_requote(self, rs: int, entry_prices: Optional[dict[str, Any]],
+                      now: float) -> Optional[dict[str, Any]]:
+        """Honest-fill simulation: right after a paper entry, the caller
+        re-reads the live book and this re-prices the position to the WORSE of
+        the decision-time ask and the fresh ask — a real taker order is in
+        flight while the quote moves, and paper must pay for that too. Never
+        re-prices better (that would be gifting ourselves price improvement).
+        Emits a requote event carrying the measured slip either way, so the
+        log accumulates a real distribution of quote movement at our latency."""
+        pos = self.positions.get(rs)
+        if pos is None or rs in self.settled or pos.get("requoted"):
+            return None
+        if pos.get("price_source") != "polymarket":
+            return None
+        fresh = entry_prices.get(pos["side"]) if entry_prices else None
+        if not isinstance(fresh, (int, float)) or not (0.0 < fresh < 1.0):
+            return None
+        old = pos["entry_price"]
+        pos["requoted"] = True
+        if fresh > old:
+            pos["entry_price"] = float(fresh)
+        return self._emit({
+            "ts": int(now), "type": "requote", "round": rs, "side": pos["side"],
+            "decision_ask": round(old, 4), "fresh_ask": round(float(fresh), 4),
+            "slip": round(float(fresh) - old, 4),
+            "filled_at": round(pos["entry_price"], 4),
+        })
+
     def step(self, now: float, bars_1m: list[Bar], spot: Optional[float] = None,
              entry_prices: Optional[dict[str, float]] = None,
              official: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
@@ -524,6 +552,9 @@ def format_event(ev: dict[str, Any]) -> str:
         return f"{clk}  ▲ ENTER {ev['side']}{stake_s} @ ${ev['entry_price']:.2f}  conf={ev['confidence']:.2f}"
     if t == "skip":
         return f"{clk}  – skip ({ev['reason']}, conf={ev['confidence']:.2f})"
+    if t == "requote":
+        return (f"{clk}  ~ requote {ev['side']} {ev['decision_ask']:.2f} -> {ev['fresh_ask']:.2f} "
+                f"(slip {ev['slip']:+.2f}, filled @ {ev['filled_at']:.2f})")
     if t == "settle":
         mark = "[WIN] " if ev["result"] == "win" else "[LOSS]"
         ep = f"@${ev['entry_price']:.2f} " if ev.get("entry_price") is not None else ""
@@ -720,6 +751,25 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if args.quiet and ev["type"] == "heartbeat":
                         continue
                     print(format_event(ev))
+                # Honest fill: after any entry, re-read the book once and pay
+                # the worse of the two asks (quote movement during order
+                # flight). Also logs the slip, so paper measures how fast
+                # quotes move under our feet at this polling latency.
+                if use_pm:
+                    for ev in events:
+                        if ev.get("type") != "entry":
+                            continue
+                        try:
+                            from btc_polymarket import current_prices
+                            pm2 = current_prices(time.time(), asset=asset)
+                        except Exception:
+                            pm2 = None
+                        if pm2:
+                            rq = engine.apply_requote(
+                                ev["round"], {"UP": pm2.get("UP"), "DOWN": pm2.get("DOWN")},
+                                time.time())
+                            if rq is not None:
+                                print(format_event(rq))
             except Exception as e:
                 print(f"# poll error: {e}", file=sys.stderr)
             n += 1

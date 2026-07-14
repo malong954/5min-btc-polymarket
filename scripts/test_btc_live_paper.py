@@ -249,6 +249,32 @@ def test_no_market_price_expires_to_skip():
           any(e["type"] == "shadow_settle" for e in events))
 
 
+def test_requote_pays_worse_never_better():
+    # Honest fill: entries re-price to the WORSE of decision ask vs fresh ask.
+    eng = LivePaperEngine(entry_threshold=0.5)
+    eng.positions[900] = {"side": "UP", "entry_price": 0.66, "confidence": 0.6,
+                          "opened_ts": 1, "stake_usd": 10.0, "price_source": "polymarket"}
+    ev = eng.apply_requote(900, {"UP": 0.70, "DOWN": 0.32}, now=2.0)
+    check("requote event emitted", ev is not None and ev["type"] == "requote")
+    check("slip measured", abs(ev["slip"] - 0.04) < 1e-9)
+    check("position re-priced to the worse ask", eng.positions[900]["entry_price"] == 0.70)
+    check("second requote is a no-op", eng.apply_requote(900, {"UP": 0.90}, 3.0) is None)
+    # A better fresh ask records the slip but never improves the fill.
+    eng.positions[901] = {"side": "DOWN", "entry_price": 0.60, "confidence": 0.6,
+                          "opened_ts": 1, "stake_usd": 10.0, "price_source": "polymarket"}
+    ev2 = eng.apply_requote(901, {"DOWN": 0.55}, now=2.0)
+    check("favorable move logged as negative slip", abs(ev2["slip"] + 0.05) < 1e-9)
+    check("fill never improves", eng.positions[901]["entry_price"] == 0.60)
+    # Fixed-price entries (no real book) are left alone.
+    eng.positions[902] = {"side": "UP", "entry_price": 0.85, "confidence": 0.6,
+                          "opened_ts": 1, "stake_usd": 10.0, "price_source": "fixed"}
+    check("fixed-price entries not requoted", eng.apply_requote(902, {"UP": 0.99}, 2.0) is None)
+    check("requote line renders",
+          "requote" in format_event({"ts": 1, "type": "requote", "side": "UP",
+                                     "decision_ask": 0.66, "fresh_ask": 0.70,
+                                     "slip": 0.04, "filled_at": 0.70}))
+
+
 def test_format_event_smoke():
     ev = {"ts": 1_700_000_000, "type": "settle", "round": 1_700_000_000, "side": "UP",
           "actual": "UP", "result": "win", "pnl": 0.15, "cum_pnl": 0.3, "trades": 2, "winrate": 1.0}
@@ -268,6 +294,7 @@ def main():
     test_new_indicators_feed_the_model()
     test_no_market_price_retries_then_fills()
     test_no_market_price_expires_to_skip()
+    test_requote_pays_worse_never_better()
     test_format_event_smoke()
     print("\nAll live paper-trading tests passed.")
 
