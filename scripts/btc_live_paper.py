@@ -122,7 +122,11 @@ class LivePaperEngine:
         lead_min_move: float = 10.0,
         lead_min_conf: float = 0.0,
         official_wait: float = 150.0,
+        asset: str = "BTC",
     ):
+        # Which market this engine trades ("BTC"/"ETH"); stamped on every
+        # emitted event so a merged multi-market dashboard can tell them apart.
+        self.asset = asset
         # Conviction floor for the lead rule (the combo candidate): 0 = off.
         self.lead_min_conf = lead_min_conf
         # How long past round close to wait for Polymarket's official
@@ -187,6 +191,7 @@ class LivePaperEngine:
         return self.bankroll + self.stats["pnl_usd"]
 
     def _emit(self, ev: dict[str, Any]) -> dict[str, Any]:
+        ev.setdefault("asset", self.asset)
         if self.log is not None:
             self.log.write(json.dumps(ev, separators=(",", ":")) + "\n")
             self.log.flush()
@@ -528,24 +533,27 @@ def format_event(ev: dict[str, Any]) -> str:
     return f"{clk}  {t} {ev}"
 
 
-def fetch_recent_1m(provider: str, minutes: int = 180) -> list[Bar]:
+def fetch_recent_1m(provider: str, minutes: int = 180, symbol: str = "BTCUSDT") -> list[Bar]:
     from btc_history import fetch_history
 
-    rows = fetch_history(provider, days=minutes / 1440.0)
+    kw = {"symbol": symbol} if provider == "binance" else {}
+    rows = fetch_history(provider, days=minutes / 1440.0, **kw)
     return [Bar(r["time"], r["open"], r["high"], r["low"], r["close"], r["volume"]) for r in rows]
 
 
-def fetch_spot(provider: str) -> Optional[float]:
+def fetch_spot(provider: str, symbol: str = "BTCUSDT") -> Optional[float]:
     """A single cheap spot-price call (updates every poll), separate from the
     heavier 1m-kline fetch used for indicators."""
     from btc_price_feeds import build_feeds
 
-    feeds = build_feeds([provider])
+    feeds = build_feeds([provider], symbol=symbol)
     return feeds[0].spot() if feeds else None
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Live paper-trading + streaming logger (BTC 5m)")
+    ap = argparse.ArgumentParser(description="Live paper-trading + streaming logger (5m Up/Down)")
+    ap.add_argument("--asset", default="btc", choices=["btc", "eth"],
+                    help="Which Polymarket 5m Up/Down market to trade (sets slug + spot symbol)")
     ap.add_argument("--provider", default="binance", choices=["binance", "cryptocompare"],
                     help="1m data source for live prediction")
     ap.add_argument("--poll", type=float, default=2.0, help="Seconds between polls (live spot price ticks at this cadence)")
@@ -557,7 +565,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--lead-hi", type=float, default=240.0, help="lead rule: window opens at this many seconds left")
     ap.add_argument("--lead-lo", type=float, default=180.0, help="lead rule: window closes at this many seconds left")
     ap.add_argument("--lead-max-price", type=float, default=0.72, help="lead rule: only enter while the ask is at/below this")
-    ap.add_argument("--lead-min-move", type=float, default=10.0, help="lead rule: require BTC moved at least this many dollars")
+    ap.add_argument("--lead-min-move", type=float, default=None,
+                    help="lead rule: require the asset moved at least this many dollars from the round "
+                         "open (default is price-scaled per asset: BTC 10, ETH 0.35)")
     ap.add_argument("--lead-min-conf", type=float, default=0.0,
                     help="lead rule: also require confidence >= this (the lead+confidence combo; 0 = off)")
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
@@ -584,6 +594,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--quiet", action="store_true", help="Suppress heartbeat lines on stdout")
     args = ap.parse_args(argv)
 
+    asset = args.asset.lower()
+    symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT"}[asset]
+    if asset != "btc" and args.provider != "binance":
+        print("non-BTC assets need --provider binance (other feeds are BTC-pinned)", file=sys.stderr)
+        return 2
+    if args.lead_min_move is None:
+        # 'Decisive move' is a dollar threshold, so it must scale with the
+        # asset's price: BTC's $10 at ~$100k+ corresponds to ~$0.35 on ETH.
+        args.lead_min_move = {"btc": 10.0, "eth": 0.35}[asset]
+
     logf: Optional[TextIO] = None
     if args.log:
         d = os.path.dirname(args.log)
@@ -603,10 +623,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         lead_window=(args.lead_hi, args.lead_lo),
         lead_max_price=args.lead_max_price, lead_min_move=args.lead_min_move,
         lead_min_conf=args.lead_min_conf,
+        asset=asset.upper(),
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")
-    print(f"# live paper trader | provider={args.provider} poll={args.poll}s "
+    print(f"# live paper trader | asset={asset.upper()} ({symbol}) provider={args.provider} poll={args.poll}s "
           f"entry_threshold={args.entry_threshold} price_source={price_desc} "
           f"bankroll=${args.bankroll:.2f} stake=${args.stake_usd:.2f} "
           f"| PAPER MODE (no real orders)", file=sys.stderr)
@@ -647,7 +668,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                and official_tries.get(rs, 0) < 6]
                     for rs in waiting[:2]:   # bounded per poll
                         try:
-                            oc = resolved_outcome(current_slug(rs))
+                            oc = resolved_outcome(current_slug(rs, asset))
                         except Exception:
                             oc = None
                         if oc in ("UP", "DOWN"):
@@ -662,16 +683,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                 in_window = engine.min_entry_sec <= sec_left <= engine.entry_window_sec
                 if (not bars or now - last_klines >= args.klines_every
                         or in_window or pending_settle):
-                    bars = fetch_recent_1m(args.provider, args.history_min)
+                    bars = fetch_recent_1m(args.provider, args.history_min, symbol=symbol)
                     last_klines = now
-                spot = fetch_spot(args.provider)  # cheap, every poll -> live price
+                spot = fetch_spot(args.provider, symbol=symbol)  # cheap, every poll -> live price
                 # Real Polymarket prices only when we might actually enter (in the
                 # window) — one extra call, and only then.
                 entry_prices = None
                 if use_pm and in_window:
                     try:
                         from btc_polymarket import current_prices
-                        pm = current_prices(now)
+                        pm = current_prices(now, asset=asset)
                         if pm:
                             entry_prices = {"UP": pm.get("UP"), "DOWN": pm.get("DOWN"),
                                             "UP_size": pm.get("UP_size"),

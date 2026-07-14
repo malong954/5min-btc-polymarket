@@ -23,7 +23,8 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root
 PY=".venv/bin/python"
-TLOG="out/live.jsonl"        # trader stream
+TLOG="out/live.jsonl"        # trader stream (BTC)
+ELOGT="out/live-eth.jsonl"   # trader stream (ETH, opt-in via ETH=1)
 RLOG="out/trajectory.jsonl"  # recorder stream (BTC)
 ELOG="out/trajectory-eth.jsonl" # recorder stream (ETH, opt-in via ETH=1)
 CONF="out/lab.conf"          # last run's settings — a plain restart reuses them
@@ -38,7 +39,7 @@ RULE="${RULE:-${SAVED_RULE:-threshold}}"
 EDGE_MARGIN="${EDGE_MARGIN:-${SAVED_EDGE_MARGIN:-0.03}}"
 MAX_PRICE="${MAX_PRICE:-${SAVED_MAX_PRICE:-0.97}}"   # never buy above this ask
 LEAD_MIN_CONF="${LEAD_MIN_CONF:-${SAVED_LEAD_MIN_CONF:-0.0}}"  # lead+confidence combo floor (0 = off)
-ETH="${ETH:-${SAVED_ETH:-0}}"    # ETH=1 also records the ETH 5m market (structural angles)
+ETH="${ETH:-${SAVED_ETH:-0}}"    # ETH=1 also records AND paper-trades the ETH 5m market
 STAKE="${STAKE:-${SAVED_STAKE:-10}}"
 BANKROLL="${BANKROLL:-${SAVED_BANKROLL:-100}}"
 
@@ -46,11 +47,15 @@ BANKROLL="${BANKROLL:-${SAVED_BANKROLL:-100}}"
 
 trader_up()   { pgrep -f "btc_live_paper.py" >/dev/null 2>&1; }
 recorder_up() { pgrep -f "btc_record.py"     >/dev/null 2>&1; }
+# Per-market checks (ps, not pgrep -f regex: the BTC trader is 'any trader
+# process that is NOT --asset eth', which also matches pre---asset launches).
+btrader_up()  { ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -v -- "--asset eth" | grep -q .; }
+etrader_up()  { ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -q -- "--asset eth"; }
 
 case "${1:-start}" in
   stop)
-    trader_up   && pkill -f "btc_live_paper.py" && echo "stopped the paper trader" || echo "trader not running"
-    recorder_up && pkill -f "btc_record.py"     && echo "stopped the recorder"     || echo "recorder not running"
+    trader_up   && pkill -f "btc_live_paper.py" && echo "stopped the paper trader(s)" || echo "trader not running"
+    recorder_up && pkill -f "btc_record.py"     && echo "stopped the recorder(s)"     || echo "recorder not running"
     exit 0 ;;
 
   newrun)
@@ -63,22 +68,31 @@ case "${1:-start}" in
     sleep 1
     TS="$(date +%Y%m%d-%H%M%S)"
     [ -f "$TLOG" ] && mv "$TLOG" "out/live-$TS.jsonl" && echo "archived trader log   -> out/live-$TS.jsonl"
+    [ -f "$ELOGT" ] && mv "$ELOGT" "out/live-eth-$TS.jsonl" && echo "archived ETH trader log -> out/live-eth-$TS.jsonl"
     [ -f "$RLOG" ] && mv "$RLOG" "out/trajectory-$TS.jsonl" && echo "archived recorder log -> out/trajectory-$TS.jsonl"
     [ -f "$ELOG" ] && mv "$ELOG" "out/trajectory-eth-$TS.jsonl" && echo "archived ETH recorder log -> out/trajectory-eth-$TS.jsonl"
     echo "starting a fresh run..."
     exec "$0" start ;;
 
   status)
-    trader_up   && echo "trader:   RUNNING (pid $(pgrep -f btc_live_paper.py | tr '\n' ' '))" || echo "trader:   not running"
+    btrader_up  && echo "trader (BTC): RUNNING" || echo "trader (BTC): not running"
+    if [ "$ETH" = "1" ] || [ -f "$ELOGT" ]; then
+      etrader_up && echo "trader (ETH): RUNNING" || echo "trader (ETH): not running"
+    fi
     recorder_up && echo "recorder: RUNNING (pid $(pgrep -f btc_record.py | tr '\n' ' '))"     || echo "recorder: not running"
     # NOTE: grep -c prints its count but exits 1 when the count is 0, so the
     # naive `grep -c ... || echo 0` printed BOTH a 0 and the fallback 0 (and
     # broke the zero-samples check below). Capture with `|| true` instead.
-    TSET=0; RREC=0; RSAMP=0
+    TSET=0; ESET=0; RREC=0; RSAMP=0
     [ -f "$TLOG" ] && TSET="$(grep -c '"type":"settle"' "$TLOG" 2>/dev/null || true)"
+    [ -f "$ELOGT" ] && ESET="$(grep -c '"type":"settle"' "$ELOGT" 2>/dev/null || true)"
     [ -f "$RLOG" ] && RREC="$(grep -c '"type":"result"' "$RLOG" 2>/dev/null || true)"
     [ -f "$RLOG" ] && RSAMP="$(grep -c '"type":"sample"' "$RLOG" 2>/dev/null || true)"
-    echo "trades settled:  ${TSET:-0}"
+    if [ -f "$ELOGT" ]; then
+      echo "trades settled:  ${TSET:-0} BTC + ${ESET:-0} ETH"
+    else
+      echo "trades settled:  ${TSET:-0}"
+    fi
     echo "rounds recorded: ${RREC:-0}  (samples: ${RSAMP:-0}; want 100+ rounds before judging)"
     if [ -f "$ELOG" ]; then
       EREC=0; ESAMP=0
@@ -96,13 +110,13 @@ case "${1:-start}" in
     exit 0 ;;
 
   dash)
-    exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD" --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" ;;
+    exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --eth-log "$ELOGT" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD" --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" ;;
 
   recdash)
     exec "$PY" scripts/btc_record_monitor.py --log "$RLOG" ;;
 
   history)
-    exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --history ;;
+    exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --eth-log "$ELOGT" --bankroll "$BANKROLL" --history ;;
 
   analyze)
     echo; echo "################ FULL ANALYSIS BATTERY ################"; echo
@@ -199,13 +213,13 @@ if [ "$ETH" = "1" ]; then
   fi
 fi
 
-# --- paper trader (flat stake, real pricing, enriched logging) ---
-if trader_up; then
-  echo "trader already running"
+# --- paper trader BTC (flat stake, real pricing, enriched logging) ---
+if btrader_up; then
+  echo "BTC trader already running"
 else
   # Fresh trader session = fresh $100 account (prior log archived).
   [ -f "$TLOG" ] && mv "$TLOG" "out/live-prev.jsonl" && echo "archived prior session -> out/live-prev.jsonl"
-  nohup "$PY" scripts/btc_live_paper.py \
+  nohup "$PY" scripts/btc_live_paper.py --asset btc \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
     --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
     --lead-min-conf "$LEAD_MIN_CONF" \
@@ -214,11 +228,29 @@ else
     --log "$TLOG" --quiet \
     >> out/nohup.log 2>&1 &
   if [ "$RULE" = "edge" ]; then
-    echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
   elif [ "$RULE" = "lead" ]; then
-    echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, 180-240s left, ask <= 0.72, |move| >= 10, conf >= ${LEAD_MIN_CONF})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, 180-240s left, ask <= 0.72, |move| >= 10, conf >= ${LEAD_MIN_CONF})"
   else
-    echo "started paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${THRESHOLD})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${THRESHOLD})"
+  fi
+fi
+
+# --- optional paper trader ETH (same rule/stake, own $BANKROLL, own log) ---
+if [ "$ETH" = "1" ]; then
+  if etrader_up; then
+    echo "ETH trader already running"
+  else
+    [ -f "$ELOGT" ] && mv "$ELOGT" "out/live-eth-prev.jsonl" && echo "archived prior ETH session -> out/live-eth-prev.jsonl"
+    nohup "$PY" scripts/btc_live_paper.py --asset eth \
+      --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
+      --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
+      --lead-min-conf "$LEAD_MIN_CONF" \
+      --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
+      --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
+      --log "$ELOGT" --quiet \
+      >> out/nohup-eth.log 2>&1 &
+    echo "started ETH paper trader (pid $!)  same rule, own \$${BANKROLL} account (lead move threshold auto-scales to ETH)"
   fi
 fi
 
@@ -226,4 +258,4 @@ echo
 echo "opening dashboard — Ctrl-C exits the dashboard; everything keeps running."
 echo "later:  scripts/lab.sh analyze   (full report)   scripts/lab.sh stop"
 sleep 1
-exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD" --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN"
+exec "$PY" scripts/btc_live_monitor.py --log "$TLOG" --eth-log "$ELOGT" --bankroll "$BANKROLL" --entry-threshold "$THRESHOLD" --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN"
