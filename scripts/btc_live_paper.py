@@ -60,7 +60,7 @@ def feature_snapshot(sig: Any) -> dict[str, Any]:
         "rel_volume_1m": _rnd(f.get("rel_volume_1m"), 2),
         "agreement": _rnd(f.get("agreement"), 3),
         "vol_factor": _rnd(f.get("vol_factor"), 3),
-        "btc_move_usd": _rnd(f.get("btc_move_usd"), 2),
+        "btc_move_usd": _rnd(f.get("btc_move_usd"), 6),  # 6dp: XRP moves live at 4dp
         "score": _rnd(sig.score, 4),
     }
 
@@ -412,7 +412,7 @@ class LivePaperEngine:
                         "ts": int(now), "type": "prediction", "round": cur,
                         "seconds_left": round(sec_left, 1), "direction": sig.direction,
                         "confidence": conf, "score": round(sig.score, 4),
-                        "btc_move_usd": round(sig.features.get("btc_move_usd", 0.0), 2),
+                        "btc_move_usd": round(sig.features.get("btc_move_usd", 0.0), 6),
                         "rsi_1m": round(rsi, 1) if rsi is not None else None,
                         "features": feat, "note": note,
                     }))
@@ -490,8 +490,8 @@ class LivePaperEngine:
             hb = {
                 "ts": int(now), "type": "heartbeat", "round": cur,
                 "seconds_left": round(sec_left, 1),
-                "price": round(last_px, 2) if last_px is not None else None,
-                "round_move": round(round_move, 2) if round_move is not None else None,
+                "price": round(last_px, 6) if last_px is not None else None,
+                "round_move": round(round_move, 6) if round_move is not None else None,
                 "open_positions": len(self.positions) - len(self.settled),
                 "cum_pnl": round(self.stats["pnl"], 4),
                 "balance": round(self.balance, 2),
@@ -552,7 +552,7 @@ def fetch_spot(provider: str, symbol: str = "BTCUSDT") -> Optional[float]:
 
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Live paper-trading + streaming logger (5m Up/Down)")
-    ap.add_argument("--asset", default="btc", choices=["btc", "eth"],
+    ap.add_argument("--asset", default="btc", choices=["btc", "eth", "sol", "xrp"],
                     help="Which Polymarket 5m Up/Down market to trade (sets slug + spot symbol)")
     ap.add_argument("--provider", default="binance", choices=["binance", "cryptocompare"],
                     help="1m data source for live prediction")
@@ -595,14 +595,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     asset = args.asset.lower()
-    symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT"}[asset]
+    symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT", "xrp": "XRPUSDT"}[asset]
     if asset != "btc" and args.provider != "binance":
         print("non-BTC assets need --provider binance (other feeds are BTC-pinned)", file=sys.stderr)
         return 2
     if args.lead_min_move is None:
         # 'Decisive move' is a dollar threshold, so it must scale with the
-        # asset's price: BTC's $10 at ~$100k+ corresponds to ~$0.35 on ETH.
-        args.lead_min_move = {"btc": 10.0, "eth": 0.35}[asset]
+        # asset's price. Auto-calibrate from the live spot: 0.016% of price
+        # (exactly BTC's $10 rule at ~$62k). Fallbacks if the feed is down.
+        s0 = None
+        try:
+            s0 = fetch_spot(args.provider, symbol=symbol)
+        except Exception:
+            pass
+        if isinstance(s0, (int, float)) and s0 > 0:
+            args.lead_min_move = round(s0 * 1.6e-4, 6)
+        else:
+            args.lead_min_move = {"btc": 10.0, "eth": 0.30}.get(asset)
+            if args.lead_min_move is None:
+                print("no spot available to auto-scale --lead-min-move for this asset; "
+                      "pass it explicitly", file=sys.stderr)
+                return 2
+        print(f"# lead min move auto-scaled to {args.lead_min_move:g} "
+              f"(0.016% of {symbol} spot)", file=sys.stderr)
 
     logf: Optional[TextIO] = None
     if args.log:

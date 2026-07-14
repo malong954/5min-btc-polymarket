@@ -30,6 +30,8 @@ GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
 CYAN = "\033[36m"
+MAGENTA = "\033[35m"
+BLUE = "\033[34m"
 GREY = "\033[90m"
 CLEAR = "\033[H\033[J"          # cursor home + clear to end
 CLEAR_SCROLLBACK = "\033[3J"    # drop scrollback (ignored by Apple Terminal!)
@@ -43,8 +45,19 @@ SHOW_CURSOR = "\033[?25h"
 
 RECENT_N = 12
 
-# Row tag colors when the feed mixes markets (BTC + ETH traders in one panel).
-ASSET_COLOR = {"BTC": YELLOW, "ETH": CYAN}
+# Row tag colors when the feed mixes markets (multiple traders in one panel).
+ASSET_COLOR = {"BTC": YELLOW, "ETH": CYAN, "SOL": MAGENTA, "XRP": BLUE}
+
+
+def _fmt_move(mv: float) -> str:
+    """Dollar-move string at a precision matching the asset's scale: BTC moves
+    are whole dollars, ETH/SOL cents, XRP fractions of a cent."""
+    a = abs(mv)
+    if a >= 100:
+        return f"{mv:+,.0f}"
+    if a >= 0.05:
+        return f"{mv:+,.2f}"
+    return f"{mv:+.4f}"
 
 # 5-row block font for the startup banner (only the letters FLIPPOLYBOT needs).
 _FONT = {
@@ -400,7 +413,7 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
             mv = ahb.get("round_move")
             mv_s = ""
             if mv is not None:
-                mv_s = "  move " + p.c(f"{mv:+,.2f}" if a == "ETH" else f"{mv:+.0f}",
+                mv_s = "  move " + p.c(_fmt_move(mv),
                                        GREEN if mv > 0 else RED if mv < 0 else GREY, BOLD)
             live = ahb.get("confidence") is not None and ahb.get("round") == apred.get("round")
             d = (ahb.get("direction") if live else None) or apred.get("direction")
@@ -688,6 +701,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--eth-log", default=None,
                     help="Optional second trader stream (the ETH market) merged into the same "
                          "panel; rows are tagged BTC/ETH. Safe to pass even before the file exists.")
+    ap.add_argument("--merge", action="append", default=[], metavar="PATH",
+                    help="Additional trader stream(s) to merge (repeatable — one per extra "
+                         "market, e.g. SOL/XRP). Rows are tagged by each event's asset field.")
     ap.add_argument("--interval", type=float, default=1.0, help="Redraw interval (seconds)")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Breakeven reference (contract entry price)")
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting account balance in USD")
@@ -709,7 +725,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
     painter = Painter(color)
 
-    paths = [args.log] + ([args.eth_log] if args.eth_log else [])
+    paths = [args.log] + ([args.eth_log] if args.eth_log else []) + list(args.merge)
+    paths = list(dict.fromkeys(paths))   # dedupe, keep order
 
     if args.history:
         events: list[dict[str, Any]] = []

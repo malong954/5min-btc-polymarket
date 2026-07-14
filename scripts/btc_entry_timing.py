@@ -426,6 +426,50 @@ def _print_edge_gate(rows: list[dict[str, Any]]) -> None:
 
 COMBO_FLOORS = (0.0, 0.3, 0.4, 0.5, 0.7, 0.8, 0.9)
 
+# The BTC 'decisive move' rule ($10 at ~$62k spot) expressed scale-free, so the
+# same setup means the same thing on ETH/SOL/XRP: 0.016% of the asset's price.
+MOVE_FRAC = 1.6e-4
+
+
+def auto_min_move(events: list[dict[str, Any]]) -> float:
+    """Auto-scale the lead rule's dollar move threshold from the data itself:
+    MOVE_FRAC of the median recorded spot. Falls back to BTC's $10."""
+    spots = sorted(e["spot"] for e in events
+                   if e.get("type") == "sample" and isinstance(e.get("spot"), (int, float)))
+    if not spots:
+        return 10.0
+    return round(spots[len(spots) // 2] * MOVE_FRAC, 6)
+
+
+def _first_lead_pick(samps: list[dict[str, Any]], win_hi: float = 240.0, win_lo: float = 150.0,
+                     max_price: float = 0.72, min_move_signal: float = 10.0,
+                     min_size: float = 0.0, floor: float = 0.0) -> Optional[tuple]:
+    """First sample in the round satisfying the lead setup (leading side inside
+    the window, decisive move, cheap enough executable ask, optional conviction
+    floor). Returns (side, price) or None — shared by the combo and session
+    analyses so they grade the identical rule."""
+    for s in sorted(samps, key=lambda q: -(q.get("sec_left") or 0)):
+        sl = s.get("sec_left") or 0
+        if not (win_lo <= sl <= win_hi):
+            continue
+        mv = s.get("move", 0.0) or 0.0
+        if abs(mv) < min_move_signal:
+            continue
+        side = "UP" if mv > 0 else "DOWN"
+        price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
+        if not isinstance(price, (int, float)) or not (0.0 < price <= max_price):
+            continue
+        if min_size > 0:
+            sz = s.get("up_sz") if side == "UP" else s.get("dn_sz")
+            if not isinstance(sz, (int, float)) or sz < min_size:
+                continue
+        if floor > 0:
+            c = s.get("ind_conf")
+            if c is None or c < floor:
+                continue
+        return side, float(price)
+    return None
+
 
 def combo_analysis(events: list[dict[str, Any]],
                    conf_floors: tuple = COMBO_FLOORS,
@@ -448,27 +492,10 @@ def combo_analysis(events: list[dict[str, Any]],
                 continue
             if official_only and not res.get("official"):
                 continue
-            for s in sorted(samps, key=lambda q: -(q.get("sec_left") or 0)):
-                sl = s.get("sec_left") or 0
-                if not (win_lo <= sl <= win_hi):
-                    continue
-                mv = s.get("move", 0.0) or 0.0
-                if abs(mv) < min_move_signal:
-                    continue
-                side = "UP" if mv > 0 else "DOWN"
-                price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
-                if not isinstance(price, (int, float)) or not (0.0 < price <= max_price):
-                    continue
-                if min_size > 0:
-                    sz = s.get("up_sz") if side == "UP" else s.get("dn_sz")
-                    if not isinstance(sz, (int, float)) or sz < min_size:
-                        continue
-                if floor > 0:
-                    c = s.get("ind_conf")
-                    if c is None or c < floor:
-                        continue
-                recs.append((side == res["outcome"], float(price)))
-                break
+            pick = _first_lead_pick(samps, win_hi=win_hi, win_lo=win_lo, max_price=max_price,
+                                    min_move_signal=min_move_signal, min_size=min_size, floor=floor)
+            if pick is not None:
+                recs.append((pick[0] == res["outcome"], pick[1]))
         if recs:
             n = len(recs)
             wr = sum(1 for w, _ in recs if w) / n
@@ -504,6 +531,109 @@ def _print_combo(rows: list[dict[str, Any]]) -> None:
     print("  Row 0.00 = the plain lead rule (baseline). A floor only matters if it")
     print("  BEATS the baseline with n >= 100 and holds across segments — sweeping")
     print("  floors over one sample WILL find a lucky row; do not trust small n.")
+    print("=" * 74)
+
+
+# 8h UTC blocks approximating the three trading sessions. Each round lands in
+# exactly one, plus a weekday/weekend bucket.
+SESSIONS = (("Asia   00-08 UTC", 0, 8),
+            ("Europe 08-16 UTC", 8, 16),
+            ("US     16-24 UTC", 16, 24))
+
+
+def session_analysis(events: list[dict[str, Any]], min_size: float = 0.0,
+                     fee_rate: float = 0.0, min_move_signal: float = 10.0,
+                     lead_min_conf: float = 0.0, official_only: bool = True) -> list[dict[str, Any]]:
+    """Time-of-day / weekday regimes (official labels only). Two questions per
+    bucket: (a) DRIFT — do rounds resolve UP more or less than 50%, i.e. does
+    the session itself lean a direction; (b) does the LEAD SETUP perform
+    differently by session (where does the edge live, if anywhere)."""
+    import datetime
+
+    samples, results = _split(events)
+
+    def buckets_of(rs: int) -> list[str]:
+        h = (rs // 3600) % 24
+        sess = next(name for name, lo, hi in SESSIONS if lo <= h < hi)
+        wd = datetime.datetime.fromtimestamp(rs, datetime.timezone.utc).weekday()
+        return [sess, "weekday (Mon-Fri)" if wd < 5 else "weekend (Sat-Sun)"]
+
+    order = [s[0] for s in SESSIONS] + ["weekday (Mon-Fri)", "weekend (Sat-Sun)"]
+    drift = {k: {"n": 0, "up": 0, "mv_sum": 0.0, "mv_n": 0} for k in order}
+    lead = {k: [] for k in order}
+    for r, res in results.items():
+        if official_only and not res.get("official"):
+            continue
+        if res.get("outcome") not in ("UP", "DOWN"):
+            continue
+        keys = buckets_of(int(r))
+        absmove = None
+        if isinstance(res.get("open"), (int, float)) and isinstance(res.get("close"), (int, float)):
+            absmove = abs(res["close"] - res["open"])
+        pick = _first_lead_pick(samples.get(r, []), min_move_signal=min_move_signal,
+                                min_size=min_size, floor=lead_min_conf)
+        for k in keys:
+            d = drift[k]
+            d["n"] += 1
+            d["up"] += 1 if res["outcome"] == "UP" else 0
+            if absmove is not None:
+                d["mv_sum"] += absmove
+                d["mv_n"] += 1
+            if pick is not None:
+                lead[k].append((pick[0] == res["outcome"], pick[1]))
+
+    rows = []
+    for k in order:
+        d = drift[k]
+        row: dict[str, Any] = {"bucket": k, "rounds": d["n"],
+                               "up_pct": round(d["up"] / d["n"], 4) if d["n"] else None,
+                               "avg_abs_move": round(d["mv_sum"] / d["mv_n"], 6) if d["mv_n"] else None}
+        recs = lead[k]
+        if recs:
+            n = len(recs)
+            wr = sum(1 for w, _ in recs if w) / n
+            ap = sum(p for _, p in recs) / n
+            ev = (wr - ap) / ap if ap else 0.0
+            row.update({"lead_n": n, "lead_winrate": round(wr, 4),
+                        "lead_avg_price": round(ap, 4),
+                        "lead_net_ev": round(ev - taker_fee_frac(ap, fee_rate), 4)})
+        else:
+            row["lead_n"] = 0
+        rows.append(row)
+    return rows
+
+
+def _print_session(rows: list[dict[str, Any]], min_move_signal: float,
+                   lead_min_conf: float) -> None:
+    print("=" * 74)
+    print("SESSION / TIME-OF-DAY ANALYSIS  (official labels; ET = UTC-4 in summer)")
+    print("=" * 74)
+    if not any(r["rounds"] for r in rows):
+        print("  no official-graded rounds yet — let it run.")
+        print("=" * 74)
+        return
+    print("  DRIFT — how rounds resolve by session (bias regardless of any signal)")
+    print(f"  {'bucket':<20}{'rounds':<8}{'UP%':<8}{'avg |move|'}")
+    for r in rows:
+        if not r["rounds"]:
+            print(f"  {r['bucket']:<20}0")
+            continue
+        mv = f"{r['avg_abs_move']:.4g}" if r.get("avg_abs_move") is not None else "-"
+        print(f"  {r['bucket']:<20}{r['rounds']:<8}{r['up_pct']:<8.1%}{mv}")
+    print("-" * 74)
+    print(f"  LEAD SETUP by session (150-240s left, ask <= 0.72, |move| >= {min_move_signal:g}, "
+          f"conf >= {lead_min_conf:g})")
+    print(f"  {'bucket':<20}{'n':<6}{'winrate':<10}{'avg price':<11}{'NET EV'}")
+    for r in rows:
+        if not r.get("lead_n"):
+            print(f"  {r['bucket']:<20}0     (no qualifying rounds)")
+            continue
+        print(f"  {r['bucket']:<20}{r['lead_n']:<6}{r['lead_winrate']:<10.1%}"
+              f"{r['lead_avg_price']:<11.3f}{r['lead_net_ev']:+.1%}")
+    print("-" * 74)
+    print("  Read: UP% far from 50% at n>=100+ = a real session lean worth testing;")
+    print("  at small n every bucket looks biased. A lead row only matters where")
+    print("  NET clears +5% at n>=100 in that bucket AND agrees across markets.")
     print("=" * 74)
 
 
@@ -723,9 +853,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Grade ONLY rounds with an official Polymarket resolution (result_pm) — the truth table")
     ap.add_argument("--combo", action="store_true",
                     help="Lead setup + confidence-floor sweep, official labels only")
-    ap.add_argument("--combo-min-move", type=float, default=10.0,
-                    help="With --combo: the 'decisive move' threshold in dollars. Default 10 "
-                         "(BTC-scaled). Other assets need it scaled by price: ETH ~0.35.")
+    ap.add_argument("--combo-min-move", type=float, default=None,
+                    help="With --combo/--by-session: the 'decisive move' threshold in dollars. "
+                         "Default: auto-scaled to 0.016%% of the log's median spot (= BTC's $10 "
+                         "rule), so the same setup works on ETH/SOL/XRP without hand-tuning.")
+    ap.add_argument("--by-session", action="store_true",
+                    help="Time-of-day/weekday regimes: per-session UP-drift and lead-setup "
+                         "performance, official labels only")
     ap.add_argument("--split-halves", action="store_true",
                     help="With --combo: run separately on the FIRST and SECOND half of official-graded "
                          "rounds (by time) — a same-log stand-in for the cross-segment check")
@@ -750,6 +884,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     events = load(args.log)
+    if args.combo_min_move is None:
+        args.combo_min_move = auto_min_move(events)
+        if args.combo or args.by_session:
+            print(f"  (lead 'decisive move' threshold auto-scaled: {args.combo_min_move:g} "
+                  f"= {MOVE_FRAC:.3%} of median spot)")
+    if args.by_session:
+        rows = session_analysis(events, min_size=args.min_size, fee_rate=args.fee_rate,
+                                min_move_signal=args.combo_min_move,
+                                lead_min_conf=args.min_conf or 0.0)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        _print_session(rows, args.combo_min_move, args.min_conf or 0.0)
+        return 0
     if args.combo:
         if args.split_halves:
             # Independent halves of the official-graded rounds, by time. A real

@@ -2,8 +2,9 @@
 """Offline tests for the entry-timing analyzer. Run:
     python3 scripts/test_btc_entry_timing.py"""
 
-from btc_entry_timing import (analyze, confidence_bands, crossing_analysis,
-                              edge_gate_analysis, fade_analysis)
+from btc_entry_timing import (analyze, auto_min_move, confidence_bands,
+                              crossing_analysis, edge_gate_analysis,
+                              fade_analysis, session_analysis)
 
 
 def check(desc, cond):
@@ -232,6 +233,50 @@ def test_empty_and_missing():
     check("samples without result ignored", analyze(evs) == [])
 
 
+def test_auto_min_move_scales_with_price():
+    # BTC-priced log -> ~$10; ETH-priced -> cents; XRP-priced -> sub-cent.
+    def log_at(px):
+        return [{"type": "sample", "round": 0, "sec_left": 200, "move": 1,
+                 "up_ask": 0.5, "dn_ask": 0.5, "spot": px}]
+    check("auto move ~ $10 at BTC price", abs(auto_min_move(log_at(62500)) - 10.0) < 0.01)
+    check("auto move ~ $0.28 at ETH price", abs(auto_min_move(log_at(1780)) - 0.2848) < 0.001)
+    check("auto move sub-cent at XRP price", 0 < auto_min_move(log_at(2.5)) < 0.001)
+    check("no samples falls back to $10", auto_min_move([]) == 10.0)
+
+
+def test_session_analysis_buckets_and_lead():
+    # Two rounds in the Asia block (00-08 UTC, both resolve UP with a lead
+    # setup that wins), one weekend round in the US block resolving DOWN with
+    # a losing lead pick. 2026-07-14 is a Tuesday; 2026-07-12 a Sunday.
+    asia1, asia2 = 1783990800, 1783994400            # Tue 2026-07-14 01:00/02:00 UTC
+    us_wknd = 1783876500                              # Sun 2026-07-12 17:15 UTC
+    evs = []
+    for r, mv, up_ask in ((asia1, 20.0, 0.65), (asia2, 25.0, 0.66)):
+        evs.append({"type": "sample", "round": r, "sec_left": 200, "move": mv,
+                    "up_ask": up_ask, "dn_ask": 0.40, "spot": 62000, "ind_conf": 0.5})
+        evs.append({"type": "result", "round": r, "open": 62000, "close": 62000 + mv, "outcome": "UP"})
+        evs.append({"type": "result_pm", "round": r, "outcome": "UP"})
+    evs.append({"type": "sample", "round": us_wknd, "sec_left": 200, "move": 30.0,
+                "up_ask": 0.60, "dn_ask": 0.45, "spot": 62000, "ind_conf": 0.5})
+    evs.append({"type": "result", "round": us_wknd, "open": 62000, "close": 61970, "outcome": "DOWN"})
+    evs.append({"type": "result_pm", "round": us_wknd, "outcome": "DOWN"})
+    rows = {r["bucket"]: r for r in session_analysis(evs, min_move_signal=10.0)}
+    asia = rows["Asia   00-08 UTC"]
+    check("asia bucket has both weekday rounds", asia["rounds"] == 2)
+    check("asia drift 100% UP", asia["up_pct"] == 1.0)
+    check("asia lead setup found and won", asia["lead_n"] == 2 and asia["lead_winrate"] == 1.0)
+    us = rows["US     16-24 UTC"]
+    check("US bucket has the weekend round", us["rounds"] == 1 and us["up_pct"] == 0.0)
+    check("US lead pick lost (bought UP, resolved DOWN)",
+          us["lead_n"] == 1 and us["lead_winrate"] == 0.0)
+    wk = rows["weekday (Mon-Fri)"]
+    we = rows["weekend (Sat-Sun)"]
+    check("weekday/weekend split", wk["rounds"] == 2 and we["rounds"] == 1)
+    # conviction floor above the recorded ind_conf removes the lead picks
+    rows2 = {r["bucket"]: r for r in session_analysis(evs, min_move_signal=10.0, lead_min_conf=0.9)}
+    check("conf floor filters lead picks", rows2["Asia   00-08 UTC"]["lead_n"] == 0)
+
+
 def main():
     test_price_rises_toward_close()
     test_early_less_certain()
@@ -244,6 +289,8 @@ def main():
     test_edge_gate_price_is_hurdle()
     test_official_result_overrides_spot()
     test_min_move_drops_flat_rounds()
+    test_auto_min_move_scales_with_price()
+    test_session_analysis_buckets_and_lead()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")
 

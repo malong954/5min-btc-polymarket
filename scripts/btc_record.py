@@ -37,7 +37,7 @@ def bucket_5m(ts: int) -> int:
 
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Record Polymarket price + BTC move + indicator trajectory per 5m round")
-    ap.add_argument("--asset", default="btc", choices=["btc", "eth"],
+    ap.add_argument("--asset", default="btc", choices=["btc", "eth", "sol", "xrp"],
                     help="Which Polymarket 5m Up/Down market to record (sets slug + spot symbol)")
     ap.add_argument("--provider", default="binance", choices=["binance", "cryptocompare", "coinbase", "kraken"])
     ap.add_argument("--poll", type=float, default=5.0, help="Seconds between samples")
@@ -57,7 +57,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     from btc_backtest import Bar, DEFAULT_WEIGHTS, MTFModel
     from btc_history import fetch_history
 
-    symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT"}[args.asset]
+    symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT", "xrp": "XRPUSDT"}[args.asset]
+    # Log precision must scale with price: a $2 asset's decisive moves live in
+    # the 4th decimal — rounding them to cents flattens every move to $0.00.
+    dp = {"btc": 2, "eth": 2, "sol": 4, "xrp": 6}[args.asset]
+
+    def rnd(v, extra: int = 0):
+        return round(v, dp + extra) if isinstance(v, (int, float)) else None
+
     if args.asset != "btc" and args.provider != "binance":
         print("non-BTC assets need --provider binance (other feeds are BTC-pinned)", file=sys.stderr)
         return 2
@@ -114,7 +121,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ref = older[-1] if older else spot_buf[0]
         if now - ref[0] < window * 0.5:   # not enough history to fill the window
             return None
-        return round(spot_buf[-1][1] - ref[1], 2)
+        return spot_buf[-1][1] - ref[1]   # rounded per-asset at emit time
 
     def emit(o: dict) -> None:
         logf.write(json.dumps(o, separators=(",", ":")) + "\n")
@@ -145,8 +152,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     # Round rolled over -> record the previous round's outcome.
                     if cur_round is not None and round_open is not None and last_spot is not None:
                         outcome = "UP" if last_spot > round_open else "DOWN"
-                        emit({"type": "result", "round": cur_round, "open": round(round_open, 2),
-                              "close": round(last_spot, 2), "outcome": outcome, "ts": int(now)})
+                        emit({"type": "result", "round": cur_round, "open": rnd(round_open),
+                              "close": rnd(last_spot), "outcome": outcome, "ts": int(now)})
                         # Queue the round for its OFFICIAL Polymarket resolution
                         # (takes ~a minute to settle on-chain; poll a few times).
                         pm_pending[cur_round] = {"next": now + 45.0, "tries": 0}
@@ -214,15 +221,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if pm:
                         idir, iconf, iscore, idiv = indicator_signal(r, now, spot=spot)
                         emit({"type": "sample", "round": r, "sec_left": round(sec_left, 1),
-                              "move": round(spot - round_open, 2), "spot": round(spot, 2),
+                              "move": rnd(spot - round_open), "spot": rnd(spot),
                               "up_ask": pm.get("UP"), "dn_ask": pm.get("DOWN"),
                               "up_sz": pm.get("UP_size"), "dn_sz": pm.get("DOWN_size"),
                               "up_bid": pm.get("UP_bid"), "dn_bid": pm.get("DOWN_bid"),
                               "up_bid_sz": pm.get("UP_bid_size"), "dn_bid_sz": pm.get("DOWN_bid_size"),
                               "ind_dir": idir, "ind_conf": iconf, "ind_score": iscore,
                               "ind_div": idiv,
-                              "vel_5s": velocity(now, 5), "vel_15s": velocity(now, 15),
-                              "vel_30s": velocity(now, 30), "vel_60s": velocity(now, 60),
+                              "vel_5s": rnd(velocity(now, 5)), "vel_15s": rnd(velocity(now, 15)),
+                              "vel_30s": rnd(velocity(now, 30)), "vel_60s": rnd(velocity(now, 60)),
                               "ts": int(now)})
             except Exception as e:
                 print(f"# record error: {e}", file=sys.stderr)
