@@ -48,6 +48,25 @@ def median(vals: list) -> Optional[float]:
 # Per-wallet classification
 # ---------------------------------------------------------------------------
 
+def species_from_fields(both_frac: float, clips: float, vol: float, pnl: float,
+                        sold_frac: float, med_px: Optional[float],
+                        pos: Optional[float]) -> str:
+    """Species rules over the reduced per-wallet fields (also used by
+    --reclassify against the cached rows, so keep it field-driven)."""
+    # MM/farmer: heavy clip count + near-flat cashflow. True arb needs ~2
+    # clips per market; dozens at breakeven is reward farming even when one
+    # timeframe's book is patchier (<90% both-sides).
+    if both_frac > 0.6 and clips >= 8 and vol > 0 and abs(pnl) / vol < 0.02:
+        return "farmer"
+    if sold_frac > 0.5:
+        return "scalper"
+    if med_px is not None and med_px <= 0.35:
+        return "underdog"
+    if med_px is not None and med_px >= 0.55:
+        return "favorite_late" if (pos or 0) >= 60 else "favorite_early"
+    return "mixed"
+
+
 def classify(res: dict) -> dict:
     """Reduce one analyze() result to a classified summary row."""
     tfs = res.get("by_timeframe") or {}
@@ -71,16 +90,8 @@ def classify(res: dict) -> dict:
     win_rate = wins / resolved if resolved else None
     alpha = (win_rate - med_px) if (win_rate is not None and med_px is not None) else None
 
-    if both / mkts > 0.9 and clips >= 8 and vol > 0 and abs(pnl) / vol < 0.02:
-        species = "farmer"
-    elif sold / mkts > 0.5:
-        species = "scalper"
-    elif med_px is not None and med_px <= 0.35:
-        species = "underdog"
-    elif med_px is not None and med_px >= 0.55:
-        species = "favorite_late" if (pos or 0) >= 60 else "favorite_early"
-    else:
-        species = "mixed"
+    species = species_from_fields(both / mkts, clips, vol, pnl,
+                                  sold / mkts, med_px, pos)
 
     return {
         "species": species,
@@ -248,6 +259,9 @@ def main() -> int:
                     default=str(Path(__file__).resolve().parents[1] / "runtime" / "reports"))
     ap.add_argument("--rescan", action="store_true",
                     help="ignore cached per-wallet results")
+    ap.add_argument("--reclassify", action="store_true",
+                    help="re-derive species from the cached scan (no API "
+                         "calls) — use after classifier rule updates")
     args = ap.parse_args()
 
     targets: list[dict] = []
@@ -289,6 +303,19 @@ def main() -> int:
         w = t["wallet"]
         if w in cache:
             row = cache[w]
+            if args.reclassify and row.get("species") not in ("inactive", "error"):
+                try:
+                    row["species"] = species_from_fields(
+                        float(row.get("both_sides_frac") or 0),
+                        float(row.get("clips_per_market") or 0),
+                        float(row.get("volume_usdc") or 0),
+                        float(row.get("cash_pnl_usdc") or 0),
+                        float(row.get("sold_before_close_frac") or 0),
+                        row.get("median_buy_price"),
+                        row.get("entry_position_pct"))
+                    cache[w] = row
+                except (TypeError, ValueError):
+                    pass
         else:
             print(f"[{i}/{len(targets)}] scanning {w} ...", file=sys.stderr)
             try:
@@ -303,6 +330,10 @@ def main() -> int:
                                   encoding="utf-8")
             time.sleep(0.2)
         rows.append({**t, **row})
+
+    if args.reclassify:
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False),
+                              encoding="utf-8")
 
     csv_path = Path(out_prefix + "_rows.csv")
     fields = ["rank", "name", "wallet", "species", "primary_tf", "markets",

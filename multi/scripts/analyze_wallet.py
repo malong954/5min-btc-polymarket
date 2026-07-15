@@ -440,7 +440,11 @@ def detect_edge(by_tf: dict, hours: Counter, markets: dict) -> list[str]:
     arb_prices = [g["arb_avg_combined_price"] for g in by_tf.values()
                   if g["arb_avg_combined_price"]]
     buys_per_mkt = total_buys / total_mkts
-    if (arb_mkts / total_mkts > 0.9 and buys_per_mkt >= 8
+    # MM/farmer signature: heavy clip count per market with near-flat cashflow.
+    # A true complete-set arber needs ~2 clips per market (one per side);
+    # dozens of laddered fills at breakeven is inventory management for
+    # liquidity rewards, even when one timeframe's book is patchier (<90%).
+    if (arb_mkts / total_mkts > 0.6 and buys_per_mkt >= 8
             and total_vol > 0 and abs(total_pnl) / total_vol < 0.02):
         out.append(
             f"LIQUIDITY FARMER / MARKET-MAKER-STYLE: both sides in "
