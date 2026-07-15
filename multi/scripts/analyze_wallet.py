@@ -424,7 +424,11 @@ def match_logs(records: list[dict], reports_dir: Path) -> dict:
             except Exception:
                 continue
             if obj.get("slug"):
-                reports[obj["slug"]] = obj
+                prev = reports.get(obj["slug"])
+                # both strategies may report the same slot; favorite carries
+                # the threshold context we compare against
+                if prev is None or str(obj.get("strategy") or "favorite") == "favorite":
+                    reports[obj["slug"]] = obj
 
     rows = []
     agree = 0

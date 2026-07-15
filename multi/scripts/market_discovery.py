@@ -268,6 +268,88 @@ def get_side_price(slug: str, side: str) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# Spot price feed (for move-size filters). Binance is the markets' resolution
+# source; Kraken is the fallback when Binance is geo-blocked (e.g. US). Both
+# open-price and live-price come from the SAME provider so the basis cancels.
+# ---------------------------------------------------------------------------
+
+SPOT_SYMBOLS = {
+    "btc": {"binance": "BTCUSDT", "kraken": "XBTUSDT"},
+    "eth": {"binance": "ETHUSDT", "kraken": "ETHUSDT"},
+    "sol": {"binance": "SOLUSDT", "kraken": "SOLUSDT"},
+    "xrp": {"binance": "XRPUSDT", "kraken": "XRPUSDT"},
+    "doge": {"binance": "DOGEUSDT", "kraken": "DOGEUSDT"},
+}
+_spot_provider: dict[str, str] = {}  # asset -> provider that worked
+
+
+def _binance_open_at(sym: str, ts: int) -> float:
+    r = requests.get("https://api.binance.com/api/v3/klines",
+                     params={"symbol": sym, "interval": "1m",
+                             "startTime": ts * 1000, "limit": 1}, timeout=8)
+    r.raise_for_status()
+    return float(r.json()[0][1])
+
+
+def _binance_price(sym: str) -> float:
+    r = requests.get("https://api.binance.com/api/v3/ticker/price",
+                     params={"symbol": sym}, timeout=8)
+    r.raise_for_status()
+    return float(r.json()["price"])
+
+
+def _kraken_open_at(sym: str, ts: int) -> float:
+    r = requests.get("https://api.kraken.com/0/public/OHLC",
+                     params={"pair": sym, "interval": 1, "since": ts - 60}, timeout=8)
+    r.raise_for_status()
+    res = r.json().get("result") or {}
+    rows = next((v for k, v in res.items() if k != "last"), [])
+    for row in rows:
+        if int(row[0]) >= ts:
+            return float(row[1])
+    raise RuntimeError("kraken: no candle at slot start")
+
+
+def _kraken_price(sym: str) -> float:
+    r = requests.get("https://api.kraken.com/0/public/Ticker",
+                     params={"pair": sym}, timeout=8)
+    r.raise_for_status()
+    res = r.json().get("result") or {}
+    row = next(iter(res.values()), None)
+    if not row:
+        raise RuntimeError("kraken: empty ticker")
+    return float(row["c"][0])
+
+
+def _spot_call(asset: str, kind: str, ts: int = 0) -> Optional[float]:
+    syms = SPOT_SYMBOLS.get(asset.lower())
+    if not syms:
+        return None
+    order = [_spot_provider.get(asset.lower())] if _spot_provider.get(asset.lower()) else []
+    order += [p for p in ("binance", "kraken") if p not in order]
+    for prov in order:
+        try:
+            if kind == "open":
+                v = (_binance_open_at if prov == "binance" else _kraken_open_at)(syms[prov], ts)
+            else:
+                v = (_binance_price if prov == "binance" else _kraken_price)(syms[prov])
+            _spot_provider[asset.lower()] = prov
+            return v
+        except Exception:
+            continue
+    return None
+
+
+def spot_open_at(asset: str, slot_start: int) -> Optional[float]:
+    """Spot open price at slot start (the reference the market resolves against)."""
+    return _spot_call(asset, "open", slot_start)
+
+
+def spot_price(asset: str) -> Optional[float]:
+    return _spot_call(asset, "price")
+
+
+# ---------------------------------------------------------------------------
 # Public CLOB orderbook access (REST, no auth, no py_clob_client dependency)
 # ---------------------------------------------------------------------------
 

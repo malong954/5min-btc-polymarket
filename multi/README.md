@@ -122,6 +122,29 @@ Run a single timeframe by hand:
 python multi/scripts/multi_worker.py --asset btc --timeframe 15m --mode paper --max-slots 10
 ```
 
+## Strategy variants (A/B in parallel)
+
+Each timeframe can run multiple strategy variants side by side
+(`strategies: [favorite, underdog]` in the config), each as its own worker
+with its own reports — the dashboard and report show them as separate series:
+
+- **favorite** — the og momentum-into-close play: buy the strong side at
+  ask ≥ `threshold`, stop-loss, forced exit before close.
+- **underdog** — reversal fade, reverse-engineered from wallet
+  `0x45230b…29e2` (+$15.4k in 2.5 days; median buy $0.19 at ~90s left; zero
+  sells; holds to resolution). Buys the *cheap* side within
+  `[underdog_min_price, underdog_max_price]` inside the entry window, but
+  only while spot has moved **less** than `underdog_max_abs_move_usd` from
+  the slot open (spot feed: Binance, Kraken fallback — same provider for
+  open and live so the basis cancels). No stop-loss; holds through
+  resolution: max loss = stake, winners settle at $1/share.
+
+These two are direct opposites in the same market — that's the point:
+the paper data decides which side of the 0.70/0.30 line actually carries
+the edge, per timeframe. Note: `underdog` live mode places the buy but
+never sells; winning shares must be redeemed on-chain (the report flags
+`live_redemption_manual`). Keep it in paper until that's automated.
+
 ## Per-timeframe defaults (seeded from og 5m data)
 
 | tf | entry window (sec left) | min entry | exit before | poll |

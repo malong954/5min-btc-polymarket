@@ -46,11 +46,15 @@ def main() -> int:
     restart_on_exit = bool(worker_cfg.get("restart_on_exit", True))
     backoff = float(worker_cfg.get("restart_backoff_sec", 20))
 
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str, str, str]] = []
     for asset in assets:
         for tf in ("5m", "15m", "1h", "4h", "1d"):
-            if tf_params(cfg, tf).get("enabled", True):
-                pairs.append((asset, tf))
+            p = tf_params(cfg, tf)
+            if not p.get("enabled", True):
+                continue
+            for strategy in (p.get("strategies") or ["favorite"]):
+                if strategy in ("favorite", "underdog"):
+                    pairs.append((asset, tf, strategy))
 
     if not pairs:
         print("no enabled (asset, timeframe) pairs in config", file=sys.stderr)
@@ -64,11 +68,12 @@ def main() -> int:
 
     procs: dict[str, dict] = {}
 
-    def spawn(asset: str, tf: str) -> None:
-        wid = f"{asset}_{tf}"
+    def spawn(asset: str, tf: str, strategy: str = "favorite") -> None:
+        wid = f"{asset}_{tf}" if strategy == "favorite" else f"{asset}_{tf}_{strategy}"
         log_path = logs_dir / f"{wid}.log"
         cmd = [sys.executable, worker_script,
                "--asset", asset, "--timeframe", tf, "--mode", mode,
+               "--strategy", strategy,
                "--repo", args.repo, "--runtime-dir", str(runtime)]
         if args.config:
             cmd += ["--config", args.config]
@@ -76,6 +81,7 @@ def main() -> int:
         p = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT)
         prev = procs.get(wid) or {}
         procs[wid] = {"proc": p, "logf": logf, "asset": asset, "tf": tf,
+                      "strategy": strategy,
                       "log": str(log_path), "started_at": ts_utc(),
                       "restarts": int(prev.get("restarts") or 0)}
         print(json.dumps({"ts": ts_utc(), "status": "spawned", "worker": wid,
@@ -92,8 +98,8 @@ def main() -> int:
             {"mode": mode, "updated_at": ts_utc(), "workers": meta},
             ensure_ascii=False, indent=2), encoding="utf-8")
 
-    for asset, tf in pairs:
-        spawn(asset, tf)
+    for asset, tf, strategy in pairs:
+        spawn(asset, tf, strategy)
     write_workers_meta()
 
     pending_restart: dict[str, float] = {}
@@ -116,7 +122,7 @@ def main() -> int:
                 info["restarts"] += 1
                 restarts = info["restarts"]
                 info["logf"].close()
-                spawn(info["asset"], info["tf"])
+                spawn(info["asset"], info["tf"], info.get("strategy", "favorite"))
                 procs[wid]["restarts"] = restarts
                 pending_restart.pop(wid, None)
                 changed = True

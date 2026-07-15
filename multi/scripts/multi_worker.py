@@ -82,11 +82,26 @@ DEFAULT_TF_PARAMS: dict[str, dict[str, Any]] = {
 
 SHARED_TF_DEFAULTS: dict[str, Any] = dict(
     enabled=True,
+    strategies=["favorite"],  # which variants to run: favorite | underdog
+    # --- favorite (og momentum-into-close): buy the strong side ---
     threshold=0.70,
     stake_usd=5.0,
     stop_loss_pct=0.25,
     max_spread=0.05,
     min_top_ask_notional_usd=5.0,
+    favorite_min_abs_move_usd=0,  # optional: require spot to have moved this much
+    # --- underdog (reversal fade, reverse-engineered from wallet analysis):
+    #     buy the CHEAP side late, hold to resolution, no stop-loss ---
+    underdog_max_price=0.30,
+    underdog_min_price=0.03,
+    underdog_stake_usd=None,      # defaults to stake_usd
+    underdog_max_spread=0.15,     # longshot books are wide by nature
+    underdog_max_abs_move_usd=80, # only fade when spot is CLOSE to slot open
+    underdog_exit_mode="resolution",  # resolution | pre_close
+    move_filter_fail_open=False,  # spot feed down: False = skip entry
+    settle_grace_sec=20,
+    settle_retries=10,
+    settle_retry_delay_sec=10.0,
     close_retry_max=30,
     close_retry_delay_sec=2.0,
     slug_templates=None,  # falls back to market_discovery defaults
@@ -461,6 +476,27 @@ def live_close_position(repo: str, opened: dict[str, Any], params: dict[str, Any
     }
 
 
+def resolve_outcome(slug: str, side: str, retries: int, delay: float) -> tuple[Optional[bool], Optional[float]]:
+    """After market end, poll gamma until outcome prices settle to ~1/0.
+    Returns (won, settled_price) — (None, None) if still unresolved."""
+    for i in range(max(1, int(retries))):
+        try:
+            ev = md.fetch_event(slug)
+            mkts = (ev or {}).get("markets") or []
+            if mkts:
+                info = md.market_side_info(mkts[0])
+                px = info["up_price"] if side == "UP" else info["down_price"]
+                if px >= 0.95:
+                    return True, px
+                if px <= 0.05:
+                    return False, px
+        except Exception:
+            pass
+        if i < retries - 1:
+            time.sleep(max(1.0, float(delay)))
+    return None, None
+
+
 # ---------------------------------------------------------------------------
 # Slot session
 # ---------------------------------------------------------------------------
@@ -513,19 +549,31 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
         sleep_until(end_ts + 2)
         return None
 
+    strategy = getattr(args, "strategy", "favorite")
+    stake = float(params.get("underdog_stake_usd") or params["stake_usd"]) \
+        if strategy == "underdog" else float(params["stake_usd"])
+    hold_to_resolution = (strategy == "underdog"
+                          and str(params.get("underdog_exit_mode")) == "resolution")
+
     report: dict[str, Any] = {
         "started_at": ts_utc(),
         "asset": args.asset,
         "timeframe": args.timeframe,
         "mode": args.mode,
+        "strategy": strategy,
         "slot_start": slot_start,
         "slug": slug,
         "params": {k: params.get(k) for k in (
             "threshold", "stake_usd", "stop_loss_pct", "entry_window_sec_left",
             "min_entry_seconds_left", "exit_before_sec", "poll_sec",
-            "max_spread", "min_top_ask_notional_usd")},
+            "max_spread", "min_top_ask_notional_usd",
+            "underdog_max_price", "underdog_min_price", "underdog_max_spread",
+            "underdog_max_abs_move_usd", "underdog_exit_mode",
+            "favorite_min_abs_move_usd")},
     }
+    report["params"]["stake_usd_effective"] = stake
     attempts = AttemptLog()
+    slot_open_spot: Optional[float] = None
 
     # Wait until the entry window opens (long timeframes sleep here for a while).
     window_open_ts = end_ts - float(params["entry_window_sec_left"])
@@ -553,15 +601,57 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
                       "clob_up_ask": up_ask, "clob_down_ask": dn_ask,
                       "seconds_left": round(sec_left, 1)})
 
+        # spot move filter (underdog fades SMALL moves; favorite may require a
+        # minimum move per the og strategy doc)
+        move_cap = float(params.get("underdog_max_abs_move_usd") or 0) \
+            if strategy == "underdog" else 0.0
+        move_floor = float(params.get("favorite_min_abs_move_usd") or 0) \
+            if strategy == "favorite" else 0.0
+        if move_cap > 0 or move_floor > 0:
+            if slot_open_spot is None:
+                slot_open_spot = md.spot_open_at(args.asset, slot_start)
+            spot_now = md.spot_price(args.asset)
+            if slot_open_spot is None or spot_now is None:
+                if not params.get("move_filter_fail_open"):
+                    attempts.add({"ts": ts_utc(), "status": "skip_move_unavailable"})
+                    time.sleep(float(params["poll_sec"]))
+                    continue
+            else:
+                move = abs(spot_now - slot_open_spot)
+                report["last_spot_move_usd"] = round(move, 2)
+                if move_cap > 0 and move > move_cap:
+                    attempts.add({"ts": ts_utc(), "status": "skip_move_too_large",
+                                  "move_usd": round(move, 2)})
+                    time.sleep(float(params["poll_sec"]))
+                    continue
+                if move_floor > 0 and move < move_floor:
+                    attempts.add({"ts": ts_utc(), "status": "skip_move_too_small",
+                                  "move_usd": round(move, 2)})
+                    time.sleep(float(params["poll_sec"]))
+                    continue
+
         candidates: list[tuple[str, float, Optional[float], float]] = []
-        if up_ask is not None and up_ask >= float(params["threshold"]):
-            candidates.append(("UP", up_ask, up_bid, up_ask_sz))
-        if dn_ask is not None and dn_ask >= float(params["threshold"]):
-            candidates.append(("DOWN", dn_ask, dn_bid, dn_ask_sz))
+        if strategy == "underdog":
+            lo = float(params["underdog_min_price"])
+            hi = float(params["underdog_max_price"])
+            if up_ask is not None and lo <= up_ask <= hi:
+                candidates.append(("UP", up_ask, up_bid, up_ask_sz))
+            if dn_ask is not None and lo <= dn_ask <= hi:
+                candidates.append(("DOWN", dn_ask, dn_bid, dn_ask_sz))
+            # fade the move: buy the CHEAPER (trailing) side
+            candidates.sort(key=lambda x: x[1])
+            spread_cap = float(params["underdog_max_spread"])
+        else:
+            if up_ask is not None and up_ask >= float(params["threshold"]):
+                candidates.append(("UP", up_ask, up_bid, up_ask_sz))
+            if dn_ask is not None and dn_ask >= float(params["threshold"]):
+                candidates.append(("DOWN", dn_ask, dn_bid, dn_ask_sz))
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            spread_cap = float(params["max_spread"])
 
         picked = None
-        for side, ask, bid, ask_sz in sorted(candidates, key=lambda x: x[1], reverse=True):
-            if bid is not None and (ask - bid) > float(params["max_spread"]):
+        for side, ask, bid, ask_sz in candidates:
+            if bid is not None and (ask - bid) > spread_cap:
                 attempts.add({"ts": ts_utc(), "status": "skip_spread_too_wide",
                               "side": side, "spread": round(ask - bid, 4)})
                 continue
@@ -577,7 +667,7 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
             continue
 
         side, trigger_price = picked
-        ok, reason = guard.try_reserve(worker_id, float(params["stake_usd"]))
+        ok, reason = guard.try_reserve(worker_id, stake)
         if not ok:
             attempts.add({"ts": ts_utc(), "status": "guard_denied", "reason": reason})
             time.sleep(float(params["poll_sec"]))
@@ -585,7 +675,7 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
         guard_reserved = True
 
         if args.mode == "live":
-            out, objs = run_open(args.repo, slug, side, float(params["stake_usd"]), True)
+            out, objs = run_open(args.repo, slug, side, stake, True)
             post, runner = None, None
             for o in objs:
                 if isinstance(o, dict) and "order_post_result" in o:
@@ -611,7 +701,6 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
             guard_reserved = False
             time.sleep(float(params["poll_sec"]))
         else:  # paper fill at best ask
-            stake = float(params["stake_usd"])
             shares = round(stake / trigger_price, 6)
             opened = {
                 "opened_at": ts_utc(),
@@ -641,7 +730,42 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
     report["opened"] = opened
     log_line({"ts": ts_utc(), "status": "opened", "slug": slug,
               "side": opened["side"], "entry_price": opened["entry_price"],
-              "mode": args.mode})
+              "strategy": strategy, "mode": args.mode})
+
+    # --- hold-to-resolution path (underdog): no stop-loss, no pre-close exit;
+    #     max loss is the stake, winners settle at $1/share ---
+    if hold_to_resolution:
+        sleep_until(end_ts + float(params["settle_grace_sec"]))
+        won, settled_px = resolve_outcome(slug, opened["side"],
+                                          params["settle_retries"],
+                                          params["settle_retry_delay_sec"])
+        if won is None:
+            proceeds, pnl = None, None
+        else:
+            proceeds = round(opened["shares"] * (1.0 if won else 0.0), 6)
+            pnl = round(proceeds - opened["cost_usdc"], 6)
+        closed = {
+            "close_reason": "resolution",
+            "closed_at": ts_utc(),
+            "close_success": won is not None,
+            "won": won,
+            "close_price": (1.0 if won else 0.0) if won is not None else None,
+            "settled_gamma_price": settled_px,
+            "close_shares": opened["shares"],
+            "close_usdc": proceeds,
+            "paper": args.mode != "live",
+        }
+        if args.mode == "live":
+            # no sell order is sent; winning shares must be redeemed on-chain
+            closed["live_redemption_manual"] = True
+        guard.release(worker_id, pnl)
+        report["closed"] = closed
+        report["realized_cashflow_pnl_usdc"] = pnl
+        report["finished_at"] = ts_utc()
+        report["result"] = "done" if won is not None else "settle_unresolved"
+        log_line({"ts": ts_utc(), "status": "settled", "slug": slug,
+                  "won": won, "pnl_usdc": pnl, "strategy": strategy})
+        return report
 
     # --- monitor phase: stop-loss or pre-close time exit ---
     sl_price = opened["entry_price"] * (1.0 - float(params["stop_loss_pct"]))
@@ -732,6 +856,7 @@ def main() -> int:
     ap.add_argument("--asset", default="btc")
     ap.add_argument("--timeframe", required=True, choices=sorted(md.TIMEFRAME_SECONDS))
     ap.add_argument("--mode", choices=["paper", "live"], default="paper")
+    ap.add_argument("--strategy", choices=["favorite", "underdog"], default="favorite")
     ap.add_argument("--config", default=None, help="multi profiles yaml/json")
     ap.add_argument("--repo", default=default_repo_path(),
                     help="external pm-hl-conservative-plus-repo path (live mode)")
@@ -770,12 +895,16 @@ def main() -> int:
         pf.get("max_total_exposure_usd", DEFAULT_PORTFOLIO["max_total_exposure_usd"]),
         pf.get("daily_max_loss_usd", DEFAULT_PORTFOLIO["daily_max_loss_usd"]),
     )
-    worker_id = f"{args.asset}-{args.timeframe}"
+    worker_id = f"{args.asset}-{args.timeframe}" if args.strategy == "favorite" \
+        else f"{args.asset}-{args.timeframe}-{args.strategy}"
 
     log_line({"ts": ts_utc(), "status": "worker_started", "worker": worker_id,
+              "strategy": args.strategy,
               "mode": args.mode, "params": {k: params.get(k) for k in (
                   "threshold", "stake_usd", "stop_loss_pct", "entry_window_sec_left",
-                  "min_entry_seconds_left", "exit_before_sec", "poll_sec")}})
+                  "min_entry_seconds_left", "exit_before_sec", "poll_sec",
+                  "underdog_max_price", "underdog_max_abs_move_usd",
+                  "underdog_exit_mode")}})
 
     deadline = time.time() + args.duration_min * 60 if args.duration_min > 0 else None
     slots_done = 0
@@ -794,7 +923,8 @@ def main() -> int:
             time.sleep(float(params["poll_sec"]))
             continue
         if report is not None:
-            fname = f"{args.asset}_{args.timeframe}_{report['slot_start']}.json"
+            strat_tag = "" if args.strategy == "favorite" else f"_{args.strategy}"
+            fname = f"{args.asset}_{args.timeframe}{strat_tag}_{report['slot_start']}.json"
             (reports_dir / fname).write_text(
                 json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             slots_done += 1

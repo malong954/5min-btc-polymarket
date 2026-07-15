@@ -44,7 +44,11 @@ def main() -> int:
         mode = str(obj.get("mode") or "?")
         if args.mode and mode != args.mode:
             continue
-        key = (str(obj.get("asset") or "?"), str(obj.get("timeframe") or "?"), mode)
+        strategy = str(obj.get("strategy") or "favorite")
+        tf_key = str(obj.get("timeframe") or "?")
+        if strategy != "favorite":
+            tf_key += f" {strategy}"
+        key = (str(obj.get("asset") or "?"), tf_key, mode)
         g = groups[key]
         g["slots"] += 1
         g["results"][str(obj.get("result"))] += 1

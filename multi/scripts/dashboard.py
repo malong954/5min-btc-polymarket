@@ -86,12 +86,19 @@ def report_close_ts(r: dict) -> float | None:
             or parse_ts(r.get("started_at")))
 
 
+STRATEGY_ORDER = ["favorite", "underdog"]
+
+
 def pair_key(r: dict) -> str:
-    return f"{r.get('asset') or '?'} {r.get('timeframe') or '?'}"
+    k = f"{r.get('asset') or '?'} {r.get('timeframe') or '?'}"
+    strategy = str(r.get("strategy") or "favorite")
+    if strategy != "favorite":
+        k += f" {strategy}"
+    return k
 
 
 def canonical_pairs(reports: list[dict]) -> list[str]:
-    """Stable series order across filters: asset alphabetical x TF_ORDER.
+    """Stable series order across filters: asset x TF_ORDER x strategy.
     Color follows the entity — derived from ALL reports, never the filtered
     subset, so filtering can't repaint surviving series."""
     assets = sorted({str(r.get("asset") or "?") for r in reports})
@@ -99,10 +106,11 @@ def canonical_pairs(reports: list[dict]) -> list[str]:
     out = []
     for a in assets:
         for tf in TF_ORDER:
-            k = f"{a} {tf}"
-            if k in seen:
-                out.append(k)
-    for k in sorted(seen - set(out)):  # unknown tfs, stable tail
+            for strat in STRATEGY_ORDER:
+                k = f"{a} {tf}" + ("" if strat == "favorite" else f" {strat}")
+                if k in seen:
+                    out.append(k)
+    for k in sorted(seen - set(out)):  # unknown tfs/strategies, stable tail
         out.append(k)
     return out
 
