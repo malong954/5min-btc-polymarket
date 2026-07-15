@@ -30,6 +30,7 @@ multi/
     market_discovery.py        # slug templates -> Gamma API resolution, CLOB books
     multi_report.py            # aggregate PnL/win-rate comparison per timeframe
     probe_markets.py           # verify which timeframes resolve in your env
+    dashboard.py               # local web dashboard (stdlib-only, port 8787)
   runtime/                     # isolated: pids, worker logs, per-slot reports
 ```
 
@@ -94,9 +95,20 @@ multi/scripts/multibot_ctl.sh logs btc_15m
 # 4. Compare timeframes head-to-head
 multi/scripts/multibot_ctl.sh report
 
-# 5. Stop everything (workers close open positions gracefully first)
+# 5. Live web dashboard -> open http://127.0.0.1:8787 in your browser
+multi/scripts/multibot_ctl.sh dashboard
+multi/scripts/multibot_ctl.sh dashboard stop   # when done
+
+# 6. Stop everything (workers close open positions gracefully first)
 multi/scripts/multibot_ctl.sh stop
 ```
+
+The dashboard auto-refreshes every 5s from `multi/runtime`: total/daily PnL,
+win rate, worker health, open positions, cumulative PnL per timeframe, a
+PnL-by-timeframe comparison, and the recent trades log. Filter by time range
+(Today/24h/7d/All) and mode (paper/live); light/dark follows your OS (or
+force with the header toggle / `?theme=dark`). It reads runtime files only —
+zero extra dependencies, safe to run alongside the bot.
 
 Going live later (after paper results look good):
 

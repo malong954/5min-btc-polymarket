@@ -56,6 +56,8 @@ Usage:
   multibot_ctl.sh report [--limit N] [--mode paper|live]
   multibot_ctl.sh logs [asset_tf]        e.g. logs btc_15m (default: orchestrator)
   multibot_ctl.sh probe [--assets a,b] [--timeframes 5m,15m,...]
+  multibot_ctl.sh dashboard [--port N]   local web dashboard (default :8787)
+  multibot_ctl.sh dashboard stop
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -205,6 +207,57 @@ cmd_probe() {
   "$PY" "$SCRIPT_DIR/probe_markets.py" --config "$CONFIG_DEFAULT" "$@"
 }
 
+DASH_PIDFILE="$RUNTIME_DIR/dashboard.pid"
+
+dash_running() {
+  if [[ -f "$DASH_PIDFILE" ]]; then
+    local pid
+    pid="$(cat "$DASH_PIDFILE" 2>/dev/null || true)"
+    [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+cmd_dashboard() {
+  local sub="${1:-start}"
+  if [[ "$sub" == "stop" ]]; then
+    if dash_running; then
+      kill "$(cat "$DASH_PIDFILE")" || true
+      rm -f "$DASH_PIDFILE"
+      echo "dashboard stopped"
+    else
+      rm -f "$DASH_PIDFILE"
+      echo "dashboard already_stopped"
+    fi
+    return 0
+  fi
+  [[ "$sub" == "start" ]] && shift || true
+  local port="8787"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port) port="$2"; shift 2;;
+      *) echo "Unknown arg: $1"; usage; exit 2;;
+    esac
+  done
+  if dash_running; then
+    echo "dashboard already_running pid=$(cat "$DASH_PIDFILE") url=http://127.0.0.1:$port"
+    return 0
+  fi
+  local log="$RUNTIME_DIR/dashboard.log"
+  # dashboard.py is stdlib-only; any python3 works
+  nohup "$PY" "$SCRIPT_DIR/dashboard.py" --port "$port" --runtime-dir "$RUNTIME_DIR" \
+    >"$log" 2>&1 &
+  echo $! >"$DASH_PIDFILE"
+  sleep 1
+  if dash_running; then
+    echo "dashboard started pid=$(cat "$DASH_PIDFILE") -> http://127.0.0.1:$port"
+  else
+    echo "dashboard failed_to_start (check $log)"
+    exit 1
+  fi
+}
+
 main() {
   local cmd="${1:-}"
   [[ -z "$cmd" ]] && { usage; exit 2; }
@@ -216,6 +269,7 @@ main() {
     report) cmd_report "$@" ;;
     logs) cmd_logs "$@" ;;
     probe) cmd_probe "$@" ;;
+    dashboard) cmd_dashboard "$@" ;;
     *) usage; exit 2 ;;
   esac
 }
