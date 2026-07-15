@@ -11,12 +11,35 @@ REPO="${BTCMULTI_REPO:-${BTC5M_REPO:-$REPO_DEFAULT}}"
 ENV_FILE="${BTCMULTI_ENV_FILE:-${BTC5M_ENV_FILE:-$REPO/.env}}"
 CONFIG_DEFAULT="$MULTI_ROOT/config/multi_profiles.yaml"
 
-# Prefer the trading repo venv (has requests/pyyaml/py_clob_client), else python3.
-if [[ -x "$REPO/.venv/bin/python" ]]; then
-  PY="${BTCMULTI_PYTHON:-$REPO/.venv/bin/python}"
+# Resolution order: explicit override > dedicated multi/.venv (paper mode,
+# no external repo needed) > trading repo venv (has py_clob_client, for live
+# mode) > bare python3.
+if [[ -n "${BTCMULTI_PYTHON:-}" ]]; then
+  PY="$BTCMULTI_PYTHON"
+elif [[ -x "$MULTI_ROOT/.venv/bin/python" ]]; then
+  PY="$MULTI_ROOT/.venv/bin/python"
+elif [[ -x "$REPO/.venv/bin/python" ]]; then
+  PY="$REPO/.venv/bin/python"
 else
-  PY="${BTCMULTI_PYTHON:-python3}"
+  PY="python3"
 fi
+
+check_deps() {
+  if ! "$PY" -c "import requests, yaml" >/dev/null 2>&1; then
+    cat >&2 <<EOF
+Missing Python deps (requests, pyyaml) for interpreter: $PY
+
+Fix — set up a dedicated venv for this bot (recommended, no external repo needed):
+  python3 -m venv "$MULTI_ROOT/.venv"
+  "$MULTI_ROOT/.venv/bin/pip" install -r "$MULTI_ROOT/requirements.txt"
+  # then re-run this command (the .venv above is auto-detected)
+
+Or point at an interpreter that already has them:
+  export BTCMULTI_PYTHON=/path/to/python
+EOF
+    exit 1
+  fi
+}
 
 PIDFILE="$RUNTIME_DIR/orchestrator.pid"
 METAFILE="$RUNTIME_DIR/orchestrator.meta.json"
@@ -67,6 +90,8 @@ cmd_start() {
   if [[ "$mode" != "paper" && "$mode" != "live" ]]; then
     echo "invalid --mode: $mode (paper|live)"; exit 2
   fi
+
+  check_deps
 
   if is_running; then
     echo "already_running pid=$(cat "$PIDFILE")"
@@ -176,6 +201,7 @@ cmd_logs() {
 }
 
 cmd_probe() {
+  check_deps
   "$PY" "$SCRIPT_DIR/probe_markets.py" --config "$CONFIG_DEFAULT" "$@"
 }
 

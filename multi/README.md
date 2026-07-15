@@ -76,6 +76,11 @@ in the config. No code change needed.
 ## Quick start
 
 ```bash
+# 0. One-time setup: dedicated venv, no external repo needed for paper mode
+python3 -m venv multi/.venv
+multi/.venv/bin/pip install -r multi/requirements.txt
+# (auto-detected by multibot_ctl.sh; override any time with BTCMULTI_PYTHON)
+
 # 1. Verify markets resolve in your environment
 multi/scripts/multibot_ctl.sh probe
 
@@ -144,11 +149,15 @@ handled by the slug templates.
 
 ## Requirements
 
-- Paper mode: Python 3.10+, `requests` (`pyyaml` for the YAML config, or pass
-  a `.json` config).
+- Paper mode: Python 3.10+ with `multi/requirements.txt` installed
+  (`requests`, `pyyaml`) — see step 0 above. Fully standalone, no external
+  repo needed.
 - Live mode: same as og bot — `pm-hl-conservative-plus-repo` with its `.venv`
   and `.env` auth (override paths: `BTCMULTI_REPO`, `BTCMULTI_ENV_FILE`,
   `BTCMULTI_PYTHON`).
+- Interpreter resolution order: `BTCMULTI_PYTHON` (if set) → `multi/.venv` →
+  trading repo `.venv` → bare `python3`. `multibot_ctl.sh` checks for
+  `requests`/`pyyaml` up front and tells you exactly what to run if missing.
 
 ## Risk notice
 
