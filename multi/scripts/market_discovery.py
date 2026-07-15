@@ -48,12 +48,17 @@ DEFAULT_SLUG_TEMPLATES: dict[str, list[str]] = {
     "15m": ["{asset}-updown-15m-{bucket}"],
     "1h": [
         "{asset}-updown-1h-{bucket}",
-        "{asset_name}-up-or-down-{month}-{day}-{hour12}{ampm}-et",
+        # Year-qualified form first: the bare (no-year) slug collides with a
+        # stale/closed market from a prior year sharing the same month-day,
+        # confirmed in production probes (see multi/README.md market table).
         "{asset_name}-up-or-down-{month}-{day}-{year}-{hour12}{ampm}-et",
+        "{asset_name}-up-or-down-{month}-{day}-{hour12}{ampm}-et",
     ],
     "4h": ["{asset}-updown-4h-{bucket}"],
     "1d": [
         "{asset}-updown-1d-{bucket}",
+        "{asset_name}-up-or-down-on-{month}-{day}-{year}",
+        "{asset_name}-up-or-down-{month}-{day}-{year}",
         "{asset_name}-up-or-down-on-{month}-{day}",
         "{asset_name}-up-or-down-{month}-{day}",
     ],
