@@ -58,6 +58,8 @@ Usage:
   multibot_ctl.sh probe [--assets a,b] [--timeframes 5m,15m,...]
   multibot_ctl.sh dashboard [--port N]   local web dashboard (default :8787)
   multibot_ctl.sh dashboard stop
+  multibot_ctl.sh analyze --wallet 0x... [--dump raw.json]   profile another
+                  account's Up/Down strategy + match against our logs
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -270,6 +272,7 @@ main() {
     logs) cmd_logs "$@" ;;
     probe) cmd_probe "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
+    analyze) check_deps; "$PY" "$SCRIPT_DIR/analyze_wallet.py" "$@" ;;
     *) usage; exit 2 ;;
   esac
 }
