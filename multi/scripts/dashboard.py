@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 UTC = dt.timezone.utc
 TF_ORDER = ["5m", "15m", "1h", "4h", "1d"]
+ARB_THRESHOLD_DEFAULT = 0.99  # buy both sides when asks sum <= this
 
 _cache_lock = threading.Lock()
 _report_cache: dict[str, tuple[float, dict]] = {}
@@ -225,6 +226,44 @@ def build_payload(runtime: Path, mode: str, rng: str) -> dict:
                                "reserved_at": p.get("reserved_at"),
                                "alive": pid_alive(p.get("pid"))})
 
+    # arb progress: for the complete-set arb workers, entries are rare and the
+    # deliverable is the near-miss signal — how close the two asks came to
+    # summing < $1 each slot, even when no window opened. Aggregate that here.
+    arb_slots = []
+    for t, r in reports:  # (close_ts, report) tuples, already mode+range filtered
+        if str(r.get("strategy") or "") != "arb":
+            continue
+        best = r.get("arb_best_combined")
+        opened = r.get("opened") or {}
+        pnl = r.get("realized_cashflow_pnl_usdc")
+        arb_slots.append({
+            "t": round(t * 1000),
+            "pair": pair_key(r),
+            "best": best if isinstance(best, (int, float)) else None,
+            "ticks": int(r.get("arb_opportunity_ticks") or 0),
+            "entered": bool(opened),
+            "combined": opened.get("entry_price") if opened else None,
+            "pnl": pnl if isinstance(pnl, (int, float)) else None,
+        })
+    arb_slots.sort(key=lambda s: s["t"])
+    arb_thr = ARB_THRESHOLD_DEFAULT
+    bests = [s["best"] for s in arb_slots if s["best"] is not None]
+    entries = [s for s in arb_slots if s["entered"]]
+    windows = [b for b in bests if b <= arb_thr]
+    locked = sum(s["pnl"] for s in entries if isinstance(s["pnl"], (int, float)))
+    arb = {
+        "enabled": len(arb_slots) > 0,
+        "threshold": arb_thr,
+        "slots": len(arb_slots),
+        "entries": len(entries),
+        "locked_pnl_usdc": round(locked, 6),
+        "best_ever": min(bests) if bests else None,
+        "median_best": round(sorted(bests)[len(bests) // 2], 4) if bests else None,
+        "windows_seen": len(windows),
+        "window_rate": round(len(windows) / len(bests), 3) if bests else None,
+        "recent": arb_slots[-80:],
+    }
+
     return {
         "generated_at": dt.datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "mode": mode,
@@ -242,6 +281,7 @@ def build_payload(runtime: Path, mode: str, rng: str) -> dict:
         "groups": group_rows,
         "pairs_all": pairs_all,
         "series": series,
+        "arb": arb,
         "trades": trades[-40:][::-1],
     }
 
@@ -395,6 +435,15 @@ button.theme{margin-left:8px;font:inherit;font-size:12px;border:1px solid var(--
     </div>
   </div>
 
+  <div class="card" id="arbCard" style="display:none">
+    <h2>Arb windows — best combined ask per slot (buy both sides when &le; $1.00)</h2>
+    <div class="grid kpis" id="arbKpis" style="margin-bottom:12px"></div>
+    <div class="chart-wrap" id="arbWrap">
+      <div id="arbChart"></div>
+      <div class="tip" id="arbTip"></div>
+    </div>
+  </div>
+
   <div class="grid row3">
     <div class="card">
       <h2>Timeframe comparison</h2>
@@ -523,6 +572,7 @@ function render(d){
   renderKpis(d);
   renderLine(d);
   renderBars(d);
+  renderArb(d);
   renderGroups(d);
   renderWorkers(d);
   renderTrades(d);
@@ -735,6 +785,91 @@ function renderBars(d){
   const zt = svgel("text", {x:X(0), y:H-8, "text-anchor":"middle", class:"tick"});
   zt.textContent = "0";
   svg.appendChild(zt);
+  holder.appendChild(svg);
+}
+
+/* ---------- arb windows: best combined ask per slot vs the $1 line ---------- */
+function renderArb(d){
+  const a = d.arb || {};
+  const card = $("arbCard");
+  if (!a.enabled){ card.style.display = "none"; return; }
+  card.style.display = "";
+
+  const box = $("arbKpis");
+  box.replaceChildren();
+  const thr = a.threshold ?? 0.99;
+  const bestCls = (a.best_ever != null && a.best_ever <= thr) ? "pos-t" : "";
+  box.appendChild(tile("Best combined seen",
+    a.best_ever != null ? "$" + a.best_ever.toFixed(3) : "–", bestCls,
+    "buy threshold $" + thr.toFixed(2)));
+  box.appendChild(tile("Window rate", fmtPct(a.window_rate),
+    "", (a.windows_seen||0) + " of " + (a.slots||0) + " slots dipped ≤ $" + thr.toFixed(2)));
+  box.appendChild(tile("Windows captured", String(a.entries||0),
+    "", "median best/slot $" + (a.median_best != null ? a.median_best.toFixed(3) : "–")));
+  box.appendChild(tile("Locked arb PnL",
+    fmtUsd(a.locked_pnl_usdc||0), (a.locked_pnl_usdc||0) > 0 ? "pos-t" : "",
+    "profit fixed at fill"));
+
+  const holder = $("arbChart"), tip = $("arbTip");
+  holder.replaceChildren(); tip.style.display = "none";
+  const pts = (a.recent || []).filter(s => s.best != null);
+  if (!pts.length){
+    holder.appendChild(el("div", {class:"empty"},
+      "No combined-ask samples yet — the arb worker logs the best per slot as it runs."));
+    return;
+  }
+  const W = Math.max(320, holder.clientWidth || 600);
+  const H = 200, mL = 52, mR = 12, mT = 10, mB = 24;
+  const iw = W - mL - mR, ih = H - mT - mB;
+  const vals = pts.map(p => p.best);
+  let y0 = Math.min(...vals, thr) - 0.01, y1 = Math.max(...vals, 1.0) + 0.01;
+  const X = i => mL + (pts.length === 1 ? iw/2 : i/(pts.length-1)*iw);
+  const Y = v => mT + (y1 - v)/(y1 - y0)*ih;
+  const svg = svgel("svg", {width:W, height:H, viewBox:`0 0 ${W} ${H}`, role:"img",
+    "aria-label":"Best combined ask per slot"});
+  // y gridlines at clean 0.02 steps
+  for (let v = Math.ceil(y0/0.02)*0.02; v <= y1; v += 0.02){
+    svg.appendChild(svgel("line", {x1:mL, x2:W-mR, y1:Y(v), y2:Y(v),
+      stroke:css("--grid"), "stroke-width":1}));
+    const tx = svgel("text", {x:mL-8, y:Y(v)+3.5, "text-anchor":"end", class:"tick"});
+    tx.textContent = "$" + v.toFixed(2);
+    svg.appendChild(tx);
+  }
+  // the $1.00 arb boundary — solid baseline; anything below it is a window
+  const yb = Y(thr);
+  svg.appendChild(svgel("line", {x1:mL, x2:W-mR, y1:yb, y2:yb,
+    stroke:css("--baseline"), "stroke-width":1}));
+  const lbl = svgel("text", {x:W-mR, y:yb-4, "text-anchor":"end", class:"tick"});
+  lbl.textContent = "≤ $" + thr.toFixed(2) + " = arb";
+  svg.appendChild(lbl);
+  // dots: green when a window existed (best <= threshold), muted otherwise
+  pts.forEach((p, i) => {
+    const win = p.best <= thr;
+    const dot = svgel("circle", {cx:X(i), cy:Y(p.best), r: win ? 4.5 : 3.5,
+      fill: win ? css("--s2") : css("--muted"),
+      stroke: css("--surface"), "stroke-width":2});
+    dot.style.cursor = "pointer";
+    const show = () => {
+      tip.replaceChildren(el("div", {class:"t"}, fmtTime(p.t)));
+      const mk = (lab, val) => { const r = el("div", {class:"r"});
+        r.appendChild(el("span", {}, lab));
+        r.appendChild(el("span", {class:"v"}, val)); tip.appendChild(r); };
+      mk("best combined", "$" + p.best.toFixed(3));
+      mk("window", win ? "yes" : "no");
+      if (p.entered) mk("entered @", "$" + Number(p.combined).toFixed(3));
+      if (p.pnl != null) mk("locked pnl", fmtUsd(p.pnl));
+      tip.style.display = "block";
+      const wrap = $("arbWrap").getBoundingClientRect();
+      const bb = dot.getBoundingClientRect();
+      let lx = bb.left - wrap.left + 10;
+      if (lx + 150 > wrap.width) lx = wrap.width - 154;
+      tip.style.left = lx + "px";
+      tip.style.top = Math.max(0, bb.top - wrap.top - 8) + "px";
+    };
+    dot.addEventListener("pointerenter", show);
+    dot.addEventListener("pointerleave", () => tip.style.display = "none");
+    svg.appendChild(dot);
+  });
   holder.appendChild(svg);
 }
 
