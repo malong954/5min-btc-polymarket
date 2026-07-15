@@ -433,10 +433,23 @@ def analyze(records: list[dict]) -> dict:
 def detect_edge(by_tf: dict, hours: Counter, markets: dict) -> list[str]:
     out = []
     total_mkts = sum(g["markets"] for g in by_tf.values()) or 1
+    total_buys = sum(g["buys"] for g in by_tf.values())
+    total_vol = sum(g["volume_usdc"] for g in by_tf.values())
+    total_pnl = sum(g["cash_pnl_usdc"] for g in by_tf.values())
     arb_mkts = sum(g["both_sides_markets"] for g in by_tf.values())
     arb_prices = [g["arb_avg_combined_price"] for g in by_tf.values()
                   if g["arb_avg_combined_price"]]
-    if arb_mkts / total_mkts > 0.2 and arb_prices and min(arb_prices) < 0.995:
+    buys_per_mkt = total_buys / total_mkts
+    if (arb_mkts / total_mkts > 0.9 and buys_per_mkt >= 8
+            and total_vol > 0 and abs(total_pnl) / total_vol < 0.02):
+        out.append(
+            f"LIQUIDITY FARMER / MARKET-MAKER-STYLE: both sides in "
+            f"{arb_mkts}/{total_mkts} markets, ~{buys_per_mkt:.0f} clips per market, "
+            f"net cashflow {total_pnl / total_vol:+.2%} of ${total_vol:,.0f} volume — "
+            "consistent with two-sided quoting for Polymarket liquidity rewards "
+            "(rewards income is NOT visible in this cashflow). Not a directional "
+            "edge to copy.")
+    elif arb_mkts / total_mkts > 0.2 and arb_prices and min(arb_prices) < 0.995:
         out.append(f"COMPLETE-SET ARBITRAGE: buys BOTH sides in {arb_mkts}/{total_mkts} "
                    f"markets at a combined price < $1 (avg "
                    f"{sum(arb_prices)/len(arb_prices):.3f}) — locks in the spread "
@@ -458,7 +471,10 @@ def detect_edge(by_tf: dict, hours: Counter, markets: dict) -> list[str]:
                        f"{g['sold_before_close_markets']}/{g['markets']} markets.")
         elif g["markets"] >= 5 and g["sold_before_close_markets"] / g["markets"] < 0.2:
             out.append(f"{tf}: holds to resolution (redeems rather than selling early).")
-    if hours:
+    if len([h for h, c in hours.items() if c > 0]) >= 20:
+        out.append(f"RUNS 24/7: buys in {len(hours)}/24 ET hours — continuous "
+                   "bot, no session windows.")
+    elif hours:
         top = [h for h, _ in hours.most_common()]
         cum, need, got = 0, 0.8 * sum(hours.values()), []
         for h in top:
