@@ -86,7 +86,7 @@ def report_close_ts(r: dict) -> float | None:
             or parse_ts(r.get("started_at")))
 
 
-STRATEGY_ORDER = ["favorite", "underdog", "impulse"]
+STRATEGY_ORDER = ["favorite", "underdog", "impulse", "arb"]
 
 
 def pair_key(r: dict) -> str:
@@ -441,7 +441,10 @@ const svgel = (tag, attrs) => {
 };
 function colorOf(pair){
   const i = (state.data.pairs_all || []).indexOf(pair);
-  return css(SLOTS[(i >= 0 ? i : 0) % SLOTS.length]);
+  // 8 palette slots; overflow series get the de-emphasis gray rather than a
+  // recycled hue (legend + tables still identify them unambiguously)
+  if (i >= 0 && i < SLOTS.length) return css(SLOTS[i]);
+  return css("--muted");
 }
 function fmtUsd(v, signed=true){
   if (v === null || v === undefined || Number.isNaN(v)) return "–";

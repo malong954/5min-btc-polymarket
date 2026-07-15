@@ -91,7 +91,7 @@ timeframes:
     # (0x865935, alpha 0.349) works 15m, where the book reprices slowly
     # enough that a seconds-slow copy still gets a good price.
     enabled: true
-    strategies: [favorite, underdog, impulse]
+    strategies: [favorite, underdog, impulse, arb]
     threshold: 0.70
     stake_usd: 5
     stop_loss_pct: 0.25
@@ -99,6 +99,10 @@ timeframes:
     min_entry_seconds_left: 120
     exit_before_sec: 30
     poll_sec: 5
+    # arb: buy BOTH sides when asks sum <= this; PnL locked at fill,
+    # settles to exactly $1/pair at resolution. Paper-only for now.
+    # arb_best_combined in each report shows how close we got each slot.
+    arb_max_combined: 0.99
     underdog_max_price: 0.20
     underdog_min_price: 0.05
     underdog_min_opposite_ask: 0.82

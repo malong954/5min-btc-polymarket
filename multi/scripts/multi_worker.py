@@ -112,6 +112,13 @@ SHARED_TF_DEFAULTS: dict[str, Any] = dict(
     impulse_entry_window_sec_left=None,  # None = watch the WHOLE slot
     impulse_min_entry_seconds_left=15,
     impulse_exit_mode="resolution",  # resolution | pre_close
+    # --- arb (complete-set): buy BOTH sides when the asks sum < $1; a
+    #     matched pair redeems exactly $1 at resolution, so PnL is locked
+    #     at fill regardless of outcome. Paper mode only for now. ---
+    arb_max_combined=0.99,
+    arb_min_combined=0.50,        # sanity floor against glitched quotes
+    arb_stake_usd=None,           # defaults to stake_usd
+    arb_min_entry_seconds_left=10,
     move_filter_fail_open=False,  # spot feed down: False = skip entry
     settle_grace_sec=20,
     settle_retries=6,
@@ -573,6 +580,8 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
         stake = float(params.get("underdog_stake_usd") or params["stake_usd"])
     elif strategy == "impulse":
         stake = float(params.get("impulse_stake_usd") or params["stake_usd"])
+    elif strategy == "arb":
+        stake = float(params.get("arb_stake_usd") or params["stake_usd"])
     else:
         stake = float(params["stake_usd"])
     hold_to_resolution = (
@@ -582,6 +591,9 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
         eff_entry_window = float(params.get("impulse_entry_window_sec_left")
                                  or params["duration_sec"])
         eff_min_entry = float(params.get("impulse_min_entry_seconds_left") or 15)
+    elif strategy == "arb":
+        eff_entry_window = float(params["duration_sec"])  # watch the whole slot
+        eff_min_entry = float(params.get("arb_min_entry_seconds_left") or 10)
     else:
         eff_entry_window = float(params["entry_window_sec_left"])
         eff_min_entry = float(params["min_entry_seconds_left"])
@@ -670,6 +682,48 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
                                   "move_usd": round(move, 2)})
                     time.sleep(float(params["poll_sec"]))
                     continue
+
+        if strategy == "arb":
+            if up_ask is None or dn_ask is None:
+                time.sleep(float(params["poll_sec"]))
+                continue
+            total = up_ask + dn_ask
+            best = report.get("arb_best_combined")
+            if best is None or total < best:
+                report["arb_best_combined"] = round(total, 4)
+            lo = float(params["arb_min_combined"])
+            hi = float(params["arb_max_combined"])
+            if not (lo <= total <= hi):
+                time.sleep(float(params["poll_sec"]))
+                continue
+            report["arb_opportunity_ticks"] = int(report.get("arb_opportunity_ticks") or 0) + 1
+            pairs = min(up_ask_sz, dn_ask_sz, stake / total)
+            if pairs * total < float(params["min_top_ask_notional_usd"]) / 2:
+                attempts.add({"ts": ts_utc(), "status": "skip_arb_thin_book",
+                              "combined": round(total, 4)})
+                time.sleep(float(params["poll_sec"]))
+                continue
+            ok, reason = guard.try_reserve(worker_id, stake)
+            if not ok:
+                attempts.add({"ts": ts_utc(), "status": "guard_denied", "reason": reason})
+                time.sleep(float(params["poll_sec"]))
+                continue
+            guard_reserved = True
+            pairs = round(pairs, 6)
+            cost = round(pairs * total, 6)
+            opened = {
+                "opened_at": ts_utc(),
+                "market_slug": slug,
+                "side": "BOTH",
+                "entry_price": round(total, 4),   # combined price per pair
+                "shares": pairs,                  # matched pairs
+                "cost_usdc": cost,
+                "legs": {"UP": {"price": up_ask, "token_id": str(m["up_token"])},
+                         "DOWN": {"price": dn_ask, "token_id": str(m["down_token"])}},
+                "locked_pnl_usdc": round(pairs * (1.0 - total), 6),
+                "paper": True,
+            }
+            break
 
         candidates: list[tuple[str, float, Optional[float], float]] = []
         if strategy == "impulse":
@@ -812,6 +866,31 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
               "side": opened["side"], "entry_price": opened["entry_price"],
               "strategy": strategy, "mode": args.mode})
 
+    # --- arb settle: a matched pair redeems exactly $1 whichever side wins,
+    #     so PnL is locked at fill; just wait out the slot ---
+    if strategy == "arb":
+        sleep_until(end_ts + 2)
+        proceeds = round(opened["shares"] * 1.0, 6)
+        pnl = round(proceeds - opened["cost_usdc"], 6)
+        closed = {
+            "close_reason": "arb_resolution",
+            "closed_at": ts_utc(),
+            "close_success": True,
+            "close_price": 1.0,
+            "close_shares": opened["shares"],
+            "close_usdc": proceeds,
+            "paper": True,
+        }
+        guard.release(worker_id, pnl)
+        report["closed"] = closed
+        report["realized_cashflow_pnl_usdc"] = pnl
+        report["finished_at"] = ts_utc()
+        report["result"] = "done"
+        log_line({"ts": ts_utc(), "status": "settled", "slug": slug,
+                  "combined": opened["entry_price"], "pnl_usdc": pnl,
+                  "strategy": "arb"})
+        return report
+
     # --- hold-to-resolution path (underdog): no stop-loss, no pre-close exit;
     #     max loss is the stake, winners settle at $1/share ---
     if hold_to_resolution:
@@ -949,7 +1028,8 @@ def main() -> int:
     ap.add_argument("--asset", default="btc")
     ap.add_argument("--timeframe", required=True, choices=sorted(md.TIMEFRAME_SECONDS))
     ap.add_argument("--mode", choices=["paper", "live"], default="paper")
-    ap.add_argument("--strategy", choices=["favorite", "underdog", "impulse"],
+    ap.add_argument("--strategy",
+                    choices=["favorite", "underdog", "impulse", "arb"],
                     default="favorite")
     ap.add_argument("--config", default=None, help="multi profiles yaml/json")
     ap.add_argument("--repo", default=default_repo_path(),
@@ -973,6 +1053,11 @@ def main() -> int:
     if args.threshold is not None:
         params["threshold"] = args.threshold
 
+    if args.mode == "live" and args.strategy == "arb":
+        log_line({"ts": ts_utc(), "status": "fatal",
+                  "error": "arb strategy is paper-only for now (live needs "
+                           "atomic two-leg execution with unwind on partial fill)"})
+        return 2
     if args.mode == "live" and not Path(args.repo).exists():
         log_line({"ts": ts_utc(), "status": "fatal",
                   "error": f"live mode requires external repo at {args.repo}"})

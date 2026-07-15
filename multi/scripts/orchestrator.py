@@ -53,8 +53,14 @@ def main() -> int:
             if not p.get("enabled", True):
                 continue
             for strategy in (p.get("strategies") or ["favorite"]):
-                if strategy in ("favorite", "underdog", "impulse"):
-                    pairs.append((asset, tf, strategy))
+                if strategy not in ("favorite", "underdog", "impulse", "arb"):
+                    continue
+                if strategy == "arb" and mode == "live":
+                    print(json.dumps({"ts": ts_utc(), "status": "skip_arb_live",
+                                      "note": "arb is paper-only for now"}),
+                          flush=True)
+                    continue
+                pairs.append((asset, tf, strategy))
 
     if not pairs:
         print("no enabled (asset, timeframe) pairs in config", file=sys.stderr)
