@@ -112,8 +112,8 @@ SHARED_TF_DEFAULTS: dict[str, Any] = dict(
     impulse_exit_mode="resolution",  # resolution | pre_close
     move_filter_fail_open=False,  # spot feed down: False = skip entry
     settle_grace_sec=20,
-    settle_retries=10,
-    settle_retry_delay_sec=10.0,
+    settle_retries=6,
+    settle_retry_delay_sec=5.0,
     close_retry_max=30,
     close_retry_delay_sec=2.0,
     slug_templates=None,  # falls back to market_discovery defaults
@@ -509,6 +509,18 @@ def resolve_outcome(slug: str, side: str, retries: int, delay: float) -> tuple[O
     return None, None
 
 
+def spot_settle(asset: str, slot_start: int, end_ts: float) -> tuple[Optional[bool], Optional[float], Optional[float]]:
+    """Settle from the spot feed's 1m klines when gamma hasn't flipped yet:
+    market rule is Up iff close >= open. Both prices are historical candle
+    opens (at slot start and at slot end), so there is no sampling race.
+    Returns (up_won, open_px, close_px)."""
+    open_px = md.spot_open_at(asset, int(slot_start))
+    close_px = md.spot_open_at(asset, int(end_ts))
+    if open_px is None or close_px is None:
+        return None, None, None
+    return close_px >= open_px, open_px, close_px
+
+
 # ---------------------------------------------------------------------------
 # Slot session
 # ---------------------------------------------------------------------------
@@ -802,6 +814,16 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
         won, settled_px = resolve_outcome(slug, opened["side"],
                                           params["settle_retries"],
                                           params["settle_retry_delay_sec"])
+        settle_source = "gamma" if won is not None else None
+        spot_open_px = spot_close_px = None
+        if won is None:
+            # gamma often takes minutes to flip to 0/1; the spot feed's
+            # historical klines settle it immediately (Up iff close >= open)
+            up_won, spot_open_px, spot_close_px = spot_settle(
+                args.asset, slot_start, end_ts)
+            if up_won is not None:
+                won = up_won if opened["side"] == "UP" else (not up_won)
+                settle_source = "spot_klines"
         if won is None:
             proceeds, pnl = None, None
         else:
@@ -813,7 +835,10 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
             "close_success": won is not None,
             "won": won,
             "close_price": (1.0 if won else 0.0) if won is not None else None,
+            "settle_source": settle_source,
             "settled_gamma_price": settled_px,
+            "spot_open": spot_open_px,
+            "spot_close": spot_close_px,
             "close_shares": opened["shares"],
             "close_usdc": proceeds,
             "paper": args.mode != "live",

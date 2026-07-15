@@ -60,6 +60,8 @@ Usage:
   multibot_ctl.sh dashboard stop
   multibot_ctl.sh analyze --wallet 0x... [--dump raw.json]   profile another
                   account's Up/Down strategy + match against our logs
+  multibot_ctl.sh settle [--dry-run]     backfill reports stuck at
+                  settle_unresolved with the real outcome/PnL
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -273,6 +275,7 @@ main() {
     probe) cmd_probe "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
     analyze) check_deps; "$PY" "$SCRIPT_DIR/analyze_wallet.py" "$@" ;;
+    settle) check_deps; "$PY" "$SCRIPT_DIR/settle_backfill.py" --reports-dir "$RUNTIME_DIR/reports" "$@" ;;
     *) usage; exit 2 ;;
   esac
 }
