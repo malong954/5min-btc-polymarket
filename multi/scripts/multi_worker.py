@@ -97,6 +97,8 @@ SHARED_TF_DEFAULTS: dict[str, Any] = dict(
     underdog_stake_usd=None,      # defaults to stake_usd
     underdog_max_spread=0.15,     # longshot books are wide by nature
     underdog_max_abs_move_usd=80, # only fade when spot is CLOSE to slot open
+    underdog_min_opposite_ask=0.0,  # only fade EXTREME skew: require the
+                                    # favorite side's ask >= this (0 = off)
     underdog_exit_mode="resolution",  # resolution | pre_close
     # --- impulse (latency-style favorite sniping, reverse-engineered from
     #     the latency-bot cohort): when spot jerks hard, buy the impulse
@@ -709,9 +711,12 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
         elif strategy == "underdog":
             lo = float(params["underdog_min_price"])
             hi = float(params["underdog_max_price"])
-            if up_ask is not None and lo <= up_ask <= hi:
+            opp_min = float(params.get("underdog_min_opposite_ask") or 0)
+            if (up_ask is not None and lo <= up_ask <= hi
+                    and (opp_min <= 0 or (dn_ask or 0) >= opp_min)):
                 candidates.append(("UP", up_ask, up_bid, up_ask_sz))
-            if dn_ask is not None and lo <= dn_ask <= hi:
+            if (dn_ask is not None and lo <= dn_ask <= hi
+                    and (opp_min <= 0 or (up_ask or 0) >= opp_min)):
                 candidates.append(("DOWN", dn_ask, dn_bid, dn_ask_sz))
             # fade the move: buy the CHEAPER (trailing) side
             candidates.sort(key=lambda x: x[1])

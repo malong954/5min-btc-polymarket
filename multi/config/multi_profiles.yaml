@@ -75,8 +75,13 @@ timeframes:
     min_entry_seconds_left: 60
     exit_before_sec: 20
     poll_sec: 3
-    underdog_max_price: 0.30
+    # Retuned from the top-100 cohort scan + the whale's actual fills:
+    # they fade only EXTREME skew (favorite >= ~0.85, cheap side <= ~0.18).
+    # Our first loose config (max 0.30, no skew gate) faded weak 0.70
+    # favorites and lost — that trade has no edge.
+    underdog_max_price: 0.18
     underdog_min_price: 0.05
+    underdog_min_opposite_ask: 0.85
     underdog_max_abs_move_usd: 80
     underdog_exit_mode: resolution
 
@@ -94,14 +99,18 @@ timeframes:
     min_entry_seconds_left: 120
     exit_before_sec: 30
     poll_sec: 5
-    underdog_max_price: 0.30
+    underdog_max_price: 0.20
     underdog_min_price: 0.05
+    underdog_min_opposite_ask: 0.82
     underdog_max_abs_move_usd: 150
     underdog_exit_mode: resolution
+    # Retuned toward the cohort's only net-positive group ("mixed" — early
+    # mid-window entries around even odds, alpha +0.09): catch the FIRST
+    # impulse at 0.45-0.75, never chase a book that already repriced to 0.8+.
     impulse_lookback_sec: 20
-    impulse_min_move_usd: 80
-    impulse_min_price: 0.50
-    impulse_max_price: 0.90
+    impulse_min_move_usd: 60
+    impulse_min_price: 0.45
+    impulse_max_price: 0.75
     impulse_exit_mode: resolution
     # to try impulse on 5m too, add 'impulse' to 5m strategies (watch the
     # palette note above) with impulse_lookback_sec: 10-15, min_move: 60
