@@ -62,6 +62,8 @@ Usage:
                   account's Up/Down strategy + match against our logs
   multibot_ctl.sh settle [--dry-run]     backfill reports stuck at
                   settle_unresolved with the real outcome/PnL
+  multibot_ctl.sh cohort --csv FILE      batch-scan a wallet leaderboard csv,
+                  classify species, compare vs our paper results
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -276,6 +278,7 @@ main() {
     dashboard) cmd_dashboard "$@" ;;
     analyze) check_deps; "$PY" "$SCRIPT_DIR/analyze_wallet.py" "$@" ;;
     settle) check_deps; "$PY" "$SCRIPT_DIR/settle_backfill.py" --reports-dir "$RUNTIME_DIR/reports" "$@" ;;
+    cohort) check_deps; "$PY" "$SCRIPT_DIR/cohort_scan.py" --reports-dir "$RUNTIME_DIR/reports" "$@" ;;
     *) usage; exit 2 ;;
   esac
 }
