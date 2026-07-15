@@ -53,13 +53,13 @@ multi/
 
 Polymarket slug formats differ per timeframe and have changed over time:
 
-| timeframe | primary pattern | fallbacks |
+| timeframe | primary pattern (probe-confirmed) | notes |
 |---|---|---|
-| 5m | `btc-updown-5m-<unix slot start>` | — |
-| 15m | `btc-updown-15m-<unix slot start>` | — |
-| 1h | `btc-updown-1h-<unix>` | `bitcoin-up-or-down-<month>-<day>-<h><am/pm>-et` (± year) |
-| 4h | `btc-updown-4h-<unix>` | — |
-| 1d | `btc-updown-1d-<ET midnight epoch>` | `bitcoin-up-or-down-on-<month>-<day>` |
+| 5m | `btc-updown-5m-<unix slot start>` | UTC 300s buckets |
+| 15m | `btc-updown-15m-<unix slot start>` | UTC 900s buckets |
+| 1h | `bitcoin-up-or-down-<month>-<day>-<year>-<h><am/pm>-et` | named by START hour ET; year-qualified form is the live one (bare form hits stale prior-year markets) |
+| 4h | `btc-updown-4h-<unix slot start>` | UTC 14400s buckets |
+| 1d | `bitcoin-up-or-down-on-<month>-<day>-<year>` | runs **noon-to-noon ET**, named by the END (resolution) day |
 
 Discovery tries each candidate template in order and validates against the
 Gamma API. **Before enabling a timeframe, run the probe** in your trading

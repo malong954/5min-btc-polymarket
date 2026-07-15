@@ -57,10 +57,13 @@ DEFAULT_SLUG_TEMPLATES: dict[str, list[str]] = {
     "4h": ["{asset}-updown-4h-{bucket}"],
     "1d": [
         "{asset}-updown-1d-{bucket}",
-        "{asset_name}-up-or-down-on-{month}-{day}-{year}",
-        "{asset_name}-up-or-down-{month}-{day}-{year}",
-        "{asset_name}-up-or-down-on-{month}-{day}",
-        "{asset_name}-up-or-down-{month}-{day}",
+        # Daily markets run noon-to-noon ET and are named for the END
+        # (resolution) day — e.g. the market active at 8pm ET July 14 is
+        # "bitcoin-up-or-down-on-july-15-2026" ending noon ET July 15.
+        "{asset_name}-up-or-down-on-{end_month}-{end_day}-{end_year}",
+        "{asset_name}-up-or-down-{end_month}-{end_day}-{end_year}",
+        "{asset_name}-up-or-down-on-{end_month}-{end_day}",
+        "{asset_name}-up-or-down-{end_month}-{end_day}",
     ],
 }
 
@@ -84,13 +87,24 @@ def slot_bounds(tf: str, ts: Optional[float] = None) -> tuple[int, int]:
     t = int(ts if ts is not None else time.time())
     dur = timeframe_seconds(tf)
     if tf == "1d":
-        # Daily markets run midnight-to-midnight Eastern Time (DST-aware).
+        # Daily markets run NOON-to-NOON Eastern Time (DST-aware), confirmed
+        # by live probe: "bitcoin-up-or-down-on-july-15-2026" ends 12:00 ET.
+        # The market is named for the day it RESOLVES (the end boundary).
         et_now = dt.datetime.fromtimestamp(t, ET)
-        start_et = et_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        noon = et_now.replace(hour=12, minute=0, second=0, microsecond=0)
+        start_et = noon if et_now >= noon else noon - dt.timedelta(days=1)
         end_et = start_et + dt.timedelta(days=1)
         return int(start_et.timestamp()), int(end_et.timestamp())
     start = t - t % dur
     return start, start + dur
+
+
+def _slot_end_ts(tf: str, slot_start: int) -> int:
+    """End timestamp for a slot given its start (ET-aware for 1d)."""
+    if tf == "1d":
+        start_et = dt.datetime.fromtimestamp(slot_start, ET)
+        return int((start_et + dt.timedelta(days=1)).timestamp())
+    return slot_start + timeframe_seconds(tf)
 
 
 def next_slot_bounds(tf: str, ts: Optional[float] = None) -> tuple[int, int]:
@@ -100,16 +114,22 @@ def next_slot_bounds(tf: str, ts: Optional[float] = None) -> tuple[int, int]:
 
 def _fmt_map(asset: str, tf: str, slot_start: int) -> dict[str, Any]:
     et_start = dt.datetime.fromtimestamp(slot_start, ET)
+    et_end = dt.datetime.fromtimestamp(_slot_end_ts(tf, slot_start), ET)
     return {
         "asset": asset.lower(),
         "asset_name": ASSET_NAMES.get(asset.lower(), asset.lower()),
         "tf": tf,
         "bucket": slot_start,
+        # start-boundary date/time (hourly markets are named by start hour)
         "month": et_start.strftime("%B").lower(),
         "day": et_start.day,
         "year": et_start.year,
         "hour12": int(et_start.strftime("%I")),
         "ampm": et_start.strftime("%p").lower(),
+        # end-boundary date (daily markets are named by resolution day)
+        "end_month": et_end.strftime("%B").lower(),
+        "end_day": et_end.day,
+        "end_year": et_end.year,
     }
 
 
