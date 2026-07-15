@@ -56,21 +56,85 @@ ET_DAY_RE = re.compile(
 # Fetch
 # ---------------------------------------------------------------------------
 
+def _dedup_key(it: dict) -> tuple:
+    return (it.get("transactionHash"), it.get("timestamp"), it.get("asset"),
+            it.get("side"), it.get("usdcSize"), it.get("type"))
+
+
 def fetch_activity(wallet: str, max_pages: int = 40, page_size: int = 500) -> list[dict]:
+    """Full activity history. The Data API rejects offset > 3000 (400), so
+    after the offset window is exhausted we continue with a timestamp cursor
+    (`end` param), deduplicating across the boundary."""
     import requests
+
+    def get(params: dict):
+        for attempt in (1, 2):
+            r = requests.get(f"{DATA_API}/activity", params=params, timeout=20)
+            if r.status_code in (429, 500, 502, 503) and attempt == 1:
+                time.sleep(2.0)
+                continue
+            return r
+        return r
+
     out: list[dict] = []
-    for page in range(max_pages):
-        r = requests.get(f"{DATA_API}/activity",
-                         params={"user": wallet, "limit": page_size,
-                                 "offset": page * page_size},
-                         timeout=20)
+    seen: set = set()
+    pages = 0
+    oldest_ts: float | None = None
+
+    # phase 1: plain offset pagination up to the API's offset cap
+    offset = 0
+    while pages < max_pages:
+        r = get({"user": wallet, "limit": page_size, "offset": offset})
+        if r.status_code == 400 and offset > 0:
+            break  # offset cap reached -> switch to time cursor
         r.raise_for_status()
         batch = r.json()
+        pages += 1
+        if not isinstance(batch, list) or not batch:
+            return out
+        for it in batch:
+            k = _dedup_key(it)
+            if k not in seen:
+                seen.add(k)
+                out.append(it)
+            ts = norm_ts(it.get("timestamp"))
+            if ts is not None:
+                oldest_ts = ts if oldest_ts is None else min(oldest_ts, ts)
+        if len(batch) < page_size:
+            return out
+        offset += page_size
+        time.sleep(0.25)
+
+    # phase 2: timestamp-cursor pagination for the deep tail
+    end_cursor = int(oldest_ts) if oldest_ts is not None else None
+    while pages < max_pages and end_cursor is not None:
+        r = get({"user": wallet, "limit": page_size, "offset": 0,
+                 "end": end_cursor})
+        if r.status_code == 400:
+            break
+        r.raise_for_status()
+        batch = r.json()
+        pages += 1
         if not isinstance(batch, list) or not batch:
             break
-        out.extend(batch)
-        if len(batch) < page_size:
+        new = 0
+        batch_min: float | None = None
+        for it in batch:
+            k = _dedup_key(it)
+            if k not in seen:
+                seen.add(k)
+                out.append(it)
+                new += 1
+            ts = norm_ts(it.get("timestamp"))
+            if ts is not None:
+                batch_min = ts if batch_min is None else min(batch_min, ts)
+        if batch_min is None:
             break
+        if len(batch) < page_size:
+            break  # reached the account's oldest events
+        # inclusive boundary: step back 1s when a window returned nothing new
+        # (also guards against the server ignoring the `end` param)
+        end_cursor = int(batch_min) - 1 if new == 0 else int(batch_min)
         time.sleep(0.25)
     return out
 
