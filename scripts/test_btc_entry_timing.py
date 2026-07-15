@@ -278,6 +278,30 @@ def test_session_analysis_buckets_and_lead():
     check("conf floor filters lead picks", rows2["Asia   00-08 UTC"]["lead_n"] == 0)
 
 
+def test_combo_min_price_filters_book_disagreement():
+    from btc_entry_timing import combo_analysis
+    # Two rounds. Round A: our move says UP (+40) but the book prices UP cheap
+    # (ask 0.10) — the market disagrees, and it resolves DOWN (a poisoned/bad-
+    # open loser). Round B: move says UP (+40), book agrees (UP ask 0.62), and
+    # it resolves UP (a genuine winner). The plain combo grades A as a loss and
+    # includes it; min_price=0.40 should DROP round A entirely, leaving B.
+    def rnd(r, up_ask, outcome):
+        return [
+            {"type": "sample", "round": r, "sec_left": 200, "move": 40.0, "spot": 62000,
+             "up_ask": up_ask, "dn_ask": round(1.0 - up_ask + 0.01, 2),
+             "up_sz": 500, "dn_sz": 500, "ind_conf": 0.5, "ind_dir": "UP"},
+            {"type": "result", "round": r, "open": 62000, "close": 62040, "outcome": outcome},
+            {"type": "result_pm", "round": r, "outcome": outcome},
+        ]
+    evs = rnd(1000, 0.10, "DOWN") + rnd(1300, 0.62, "UP")
+    base = {r["conf_floor"]: r for r in combo_analysis(evs, min_move_signal=10.0)}
+    check("plain combo includes both rounds", base[0.0]["n"] == 2)
+    check("plain combo winrate 50% (one poisoned loss)", abs(base[0.0]["winrate"] - 0.5) < 1e-9)
+    guarded = {r["conf_floor"]: r for r in combo_analysis(evs, min_move_signal=10.0, min_price=0.40)}
+    check("guard drops the cheap book-disagreement round", guarded[0.0]["n"] == 1)
+    check("guard keeps the book-agreement winner", abs(guarded[0.0]["winrate"] - 1.0) < 1e-9)
+
+
 def test_calibration_maps_conf_to_winrate():
     # 10 rounds at conf 0.35 where the indicator side wins 8 of 10, and 4
     # rounds at conf 0.55 where it always loses. Only official rounds count.
@@ -325,6 +349,7 @@ def main():
     test_min_move_drops_flat_rounds()
     test_auto_min_move_scales_with_price()
     test_session_analysis_buckets_and_lead()
+    test_combo_min_price_filters_book_disagreement()
     test_calibration_maps_conf_to_winrate()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")

@@ -443,11 +443,18 @@ def auto_min_move(events: list[dict[str, Any]]) -> float:
 
 def _first_lead_pick(samps: list[dict[str, Any]], win_hi: float = 240.0, win_lo: float = 150.0,
                      max_price: float = 0.72, min_move_signal: float = 10.0,
-                     min_size: float = 0.0, floor: float = 0.0) -> Optional[tuple]:
+                     min_size: float = 0.0, floor: float = 0.0,
+                     min_price: float = 0.0) -> Optional[tuple]:
     """First sample in the round satisfying the lead setup (leading side inside
-    the window, decisive move, cheap enough executable ask, optional conviction
-    floor). Returns (side, price) or None — shared by the combo and session
-    analyses so they grade the identical rule."""
+    the window, decisive move, executable ask in [min_price, max_price], optional
+    conviction floor). Returns (side, price) or None — shared by the combo and
+    session analyses so they grade the identical rule.
+
+    min_price is the 'book-agreement' guard: if the side WE think is leading is
+    priced below min_price, the MARKET strongly disagrees (it is pricing the
+    other side as the winner) — which is exactly the case where our round-open
+    reference is wrong or we are being adversely selected. Requiring the leading
+    side to cost at least min_price trusts the book over our move sign."""
     for s in sorted(samps, key=lambda q: -(q.get("sec_left") or 0)):
         sl = s.get("sec_left") or 0
         if not (win_lo <= sl <= win_hi):
@@ -457,7 +464,7 @@ def _first_lead_pick(samps: list[dict[str, Any]], win_hi: float = 240.0, win_lo:
             continue
         side = "UP" if mv > 0 else "DOWN"
         price = s.get("up_ask") if side == "UP" else s.get("dn_ask")
-        if not isinstance(price, (int, float)) or not (0.0 < price <= max_price):
+        if not isinstance(price, (int, float)) or not (min_price < price <= max_price):
             continue
         if min_size > 0:
             sz = s.get("up_sz") if side == "UP" else s.get("dn_sz")
@@ -476,7 +483,7 @@ def combo_analysis(events: list[dict[str, Any]],
                    win_hi: float = 240.0, win_lo: float = 150.0,
                    max_price: float = 0.72, min_move_signal: float = 10.0,
                    min_size: float = 0.0, fee_rate: float = 0.0,
-                   official_only: bool = True) -> list[dict[str, Any]]:
+                   official_only: bool = True, min_price: float = 0.0) -> list[dict[str, Any]]:
     """LEAD + CONFIDENCE combo: the lead setup (leading side, window, cheap ask,
     decisive move) with an added conviction floor. Sweeps the floor from 0 (the
     plain lead rule) upward, graded on OFFICIAL resolutions only — spot labels
@@ -493,7 +500,8 @@ def combo_analysis(events: list[dict[str, Any]],
             if official_only and not res.get("official"):
                 continue
             pick = _first_lead_pick(samps, win_hi=win_hi, win_lo=win_lo, max_price=max_price,
-                                    min_move_signal=min_move_signal, min_size=min_size, floor=floor)
+                                    min_move_signal=min_move_signal, min_size=min_size,
+                                    floor=floor, min_price=min_price)
             if pick is not None:
                 recs.append((pick[0] == res["outcome"], pick[1]))
         if recs:
@@ -922,6 +930,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="With --combo/--by-session: the 'decisive move' threshold in dollars. "
                          "Default: auto-scaled to 0.016%% of the log's median spot (= BTC's $10 "
                          "rule), so the same setup works on ETH/SOL/XRP without hand-tuning.")
+    ap.add_argument("--combo-min-price", type=float, default=0.0,
+                    help="With --combo: require the LEADING side's ask >= this (book-agreement "
+                         "guard). If our 'leading' side is priced below this the market disagrees "
+                         "with our move — the poisoned/bad-open case. 0 = off (current live rule).")
     ap.add_argument("--by-session", action="store_true",
                     help="Time-of-day/weekday regimes: per-session UP-drift and lead-setup "
                          "performance, official labels only")
@@ -989,10 +1001,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             for label, chunk in (("FIRST HALF (older)", first), ("SECOND HALF (newer)", second)):
                 print(f"\n########## {label} ##########")
                 _print_combo(combo_analysis(chunk, min_size=args.min_size, fee_rate=args.fee_rate,
-                                            min_move_signal=args.combo_min_move))
+                                            min_move_signal=args.combo_min_move,
+                                            min_price=args.combo_min_price))
             return 0
+        if args.combo_min_price > 0:
+            print(f"  (book-agreement guard: leading side ask must be >= {args.combo_min_price:g})")
         rows = combo_analysis(events, min_size=args.min_size, fee_rate=args.fee_rate,
-                              min_move_signal=args.combo_min_move)
+                              min_move_signal=args.combo_min_move,
+                              min_price=args.combo_min_price)
         if args.json:
             print(json.dumps(rows, indent=2))
             return 0
