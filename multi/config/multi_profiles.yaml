@@ -39,7 +39,7 @@ worker:
 # exit_before_sec        : forced time-exit this many sec before market end
 # slug_templates         : override market slug discovery patterns if
 #                          probe_markets.py shows a timeframe unresolvable
-# Strategy variants (A/B tested in parallel on the same timeframe):
+# Strategy variants (A/B/C tested in parallel on the same timeframe):
 #   favorite : og momentum-into-close — buy the strong side at ask >= threshold,
 #              stop-loss + exit before close.
 #   underdog : reversal fade, reverse-engineered from wallet
@@ -48,6 +48,18 @@ worker:
 #              when spot has moved LESS than underdog_max_abs_move_usd from
 #              the slot open (Binance, Kraken fallback), holds through
 #              resolution — max loss is the stake, winners pay 1/price.
+#   impulse  : latency-style favorite sniping, reverse-engineered from the
+#              latency-bot cohort (avg entry 0.58-0.84, win 82-100%, pure
+#              5m/15m specialists). When spot moves >= impulse_min_move_usd
+#              within impulse_lookback_sec, buy the impulse direction while
+#              its ask is still in [impulse_min_price, impulse_max_price]
+#              (the stale-repricing band). Watches the whole slot, holds to
+#              resolution. NOTE: those bots are LATENCY-limited winners; at
+#              our 3-5s polling the paper test measures how much of the edge
+#              survives being slow.
+#
+# Palette note: the dashboard has 8 series colors. 5 favorites + 2 underdog
+# + 1 impulse = 8. If you enable more variants, colors start repeating.
 timeframes:
   5m:
     # NOTE: the og bot trades this market live. Keep the multi 5m worker in
@@ -70,8 +82,11 @@ timeframes:
 
   15m:
     # Closest step up from 5m — the first candidate to take live.
+    # impulse runs here (not 5m) deliberately: the rank-1 latency wallet
+    # (0x865935, alpha 0.349) works 15m, where the book reprices slowly
+    # enough that a seconds-slow copy still gets a good price.
     enabled: true
-    strategies: [favorite, underdog]
+    strategies: [favorite, underdog, impulse]
     threshold: 0.70
     stake_usd: 5
     stop_loss_pct: 0.25
@@ -83,6 +98,13 @@ timeframes:
     underdog_min_price: 0.05
     underdog_max_abs_move_usd: 150
     underdog_exit_mode: resolution
+    impulse_lookback_sec: 20
+    impulse_min_move_usd: 80
+    impulse_min_price: 0.50
+    impulse_max_price: 0.90
+    impulse_exit_mode: resolution
+    # to try impulse on 5m too, add 'impulse' to 5m strategies (watch the
+    # palette note above) with impulse_lookback_sec: 10-15, min_move: 60
 
   1h:
     enabled: true

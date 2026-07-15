@@ -53,7 +53,7 @@ def main() -> int:
             if not p.get("enabled", True):
                 continue
             for strategy in (p.get("strategies") or ["favorite"]):
-                if strategy in ("favorite", "underdog"):
+                if strategy in ("favorite", "underdog", "impulse"):
                     pairs.append((asset, tf, strategy))
 
     if not pairs:

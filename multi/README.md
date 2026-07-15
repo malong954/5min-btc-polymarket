@@ -139,11 +139,24 @@ with its own reports — the dashboard and report show them as separate series:
   open and live so the basis cancels). No stop-loss; holds through
   resolution: max loss = stake, winners settle at $1/share.
 
-These two are direct opposites in the same market — that's the point:
-the paper data decides which side of the 0.70/0.30 line actually carries
-the edge, per timeframe. Note: `underdog` live mode places the buy but
-never sells; winning shares must be redeemed on-chain (the report flags
-`live_redemption_manual`). Keep it in paper until that's automated.
+- **impulse** — latency-style favorite sniping, reverse-engineered from the
+  latency-bot cohort (pure 5m/15m specialists entering at 0.58–0.84 with
+  82–100% win rates). Watches spot velocity across the *whole* slot; when
+  spot moves ≥ `impulse_min_move_usd` within `impulse_lookback_sec`, buys
+  the impulse direction while its ask is still inside
+  `[impulse_min_price, impulse_max_price]` — the stale-repricing band.
+  Holds to resolution. Those bots win on speed; our 3–5s polling is slow,
+  so the paper test measures how much of the edge survives latency
+  (15m default — the slowest-repricing, most latency-tolerant venue).
+
+The variants are three bets on the same underlying phenomenon (the CLOB
+reprices slowly after spot moves): impulse buys the favorite while it's
+still cheap right after a move; underdog fades it when it's overpriced
+near close with no move; favorite is the og baseline. The paper data
+decides which one actually carries the edge, per timeframe. Note:
+resolution-hold strategies in live mode place the buy but never sell;
+winning shares must be redeemed on-chain (the report flags
+`live_redemption_manual`). Keep them in paper until that's automated.
 
 ## Per-timeframe defaults (seeded from og 5m data)
 

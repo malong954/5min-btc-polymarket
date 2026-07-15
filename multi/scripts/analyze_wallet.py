@@ -483,43 +483,75 @@ def match_logs(records: list[dict], reports_dir: Path) -> dict:
 
 # ---------------------------------------------------------------------------
 
+def run_one(wallet: Optional[str], raw: list, reports_dir: Path,
+            json_only: bool, compact: bool = False) -> dict:
+    records = normalize(raw)
+    result = analyze(records)
+    result["wallet"] = wallet
+    result["log_match"] = match_logs(records, reports_dir)
+    if compact:
+        slim = {
+            "wallet": wallet,
+            "updown_buys": result["updown_buys"],
+            "cash_pnl_total_usdc": result["cash_pnl_total_usdc"],
+            "by_timeframe": {
+                tf: {k: g[k] for k in ("markets", "buys", "median_buy_price",
+                                       "entry_position_in_window_pct",
+                                       "win_rate_resolved", "cash_pnl_usdc")}
+                for tf, g in result["by_timeframe"].items()},
+            "edge_summary": result["edge_summary"],
+        }
+        print(json.dumps(slim, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if not json_only:
+        print(f"\n=== EDGE SUMMARY {wallet or ''} ===", file=sys.stderr)
+        for line in result["edge_summary"]:
+            print(" • " + line, file=sys.stderr)
+        lm = result["log_match"]
+        print(f"log match: {lm['overlapping_buy_trades']} of their buys landed in "
+              f"markets our bot also watched; {lm['same_side_entries']} matched our "
+              "entry side.\n", file=sys.stderr)
+    return result
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--wallet", default=None, help="0x wallet address")
+    ap.add_argument("--wallet", default=None,
+                    help="0x wallet address, or comma-separated list for a batch scan")
     ap.add_argument("--input", default=None, help="analyze a saved --dump file instead of fetching")
-    ap.add_argument("--dump", default=None, help="save raw activity JSON here")
+    ap.add_argument("--dump", default=None,
+                    help="save raw activity JSON here (batch: used as filename prefix)")
     ap.add_argument("--max-pages", type=int, default=40, help="500 events per page")
     ap.add_argument("--reports-dir",
                     default=str(Path(__file__).resolve().parents[1] / "runtime" / "reports"))
     ap.add_argument("--json-only", action="store_true")
     args = ap.parse_args()
+    reports_dir = Path(args.reports_dir)
 
     if args.input:
         raw = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    elif args.wallet:
-        raw = fetch_activity(args.wallet.strip().lower(), args.max_pages)
-    else:
+        run_one(args.wallet, raw, reports_dir, args.json_only)
+        return 0
+
+    if not args.wallet:
         ap.error("--wallet or --input required")
         return 2
 
-    if args.dump:
-        Path(args.dump).write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
-
-    records = normalize(raw)
-    result = analyze(records)
-    result["wallet"] = args.wallet
-    result["log_match"] = match_logs(records, Path(args.reports_dir))
-
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-
-    if not args.json_only:
-        print("\n=== EDGE SUMMARY ===", file=sys.stderr)
-        for line in result["edge_summary"]:
-            print(" • " + line, file=sys.stderr)
-        lm = result["log_match"]
-        print(f"\nlog match: {lm['overlapping_buy_trades']} of their buys landed in "
-              f"markets our bot also watched; {lm['same_side_entries']} matched our "
-              "entry side.", file=sys.stderr)
+    wallets = [w.strip().lower() for w in args.wallet.split(",") if w.strip()]
+    batch = len(wallets) > 1
+    for w in wallets:
+        try:
+            raw = fetch_activity(w, args.max_pages)
+        except Exception as e:
+            print(json.dumps({"wallet": w, "error": str(e)}), file=sys.stderr)
+            continue
+        if args.dump:
+            path = Path(f"{args.dump}.{w[:10]}.json") if batch else Path(args.dump)
+            path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        run_one(w, raw, reports_dir, args.json_only, compact=batch)
+        if batch:
+            time.sleep(0.5)
     return 0
 
 

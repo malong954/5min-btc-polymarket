@@ -98,6 +98,18 @@ SHARED_TF_DEFAULTS: dict[str, Any] = dict(
     underdog_max_spread=0.15,     # longshot books are wide by nature
     underdog_max_abs_move_usd=80, # only fade when spot is CLOSE to slot open
     underdog_exit_mode="resolution",  # resolution | pre_close
+    # --- impulse (latency-style favorite sniping, reverse-engineered from
+    #     the latency-bot cohort): when spot jerks hard, buy the impulse
+    #     direction while the book's ask is still stale/cheap ---
+    impulse_lookback_sec=15,      # velocity window
+    impulse_min_move_usd=60,      # spot must move this much within lookback
+    impulse_min_price=0.50,       # entry band: below = book disagrees,
+    impulse_max_price=0.90,       #   above = repricing already done
+    impulse_max_spread=0.10,      # books are in flux right after an impulse
+    impulse_stake_usd=None,       # defaults to stake_usd
+    impulse_entry_window_sec_left=None,  # None = watch the WHOLE slot
+    impulse_min_entry_seconds_left=15,
+    impulse_exit_mode="resolution",  # resolution | pre_close
     move_filter_fail_open=False,  # spot feed down: False = skip entry
     settle_grace_sec=20,
     settle_retries=10,
@@ -542,18 +554,30 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
     slug = m["_slug"]
     sec_left = float(m["_seconds_left"])
 
+    strategy = getattr(args, "strategy", "favorite")
+    if strategy == "underdog":
+        stake = float(params.get("underdog_stake_usd") or params["stake_usd"])
+    elif strategy == "impulse":
+        stake = float(params.get("impulse_stake_usd") or params["stake_usd"])
+    else:
+        stake = float(params["stake_usd"])
+    hold_to_resolution = (
+        (strategy == "underdog" and str(params.get("underdog_exit_mode")) == "resolution")
+        or (strategy == "impulse" and str(params.get("impulse_exit_mode")) == "resolution"))
+    if strategy == "impulse":
+        eff_entry_window = float(params.get("impulse_entry_window_sec_left")
+                                 or params["duration_sec"])
+        eff_min_entry = float(params.get("impulse_min_entry_seconds_left") or 15)
+    else:
+        eff_entry_window = float(params["entry_window_sec_left"])
+        eff_min_entry = float(params["min_entry_seconds_left"])
+
     # Too late to enter this slot: wait for the next one, no report.
-    if sec_left < float(params["min_entry_seconds_left"]):
+    if sec_left < eff_min_entry:
         log_line({"ts": ts_utc(), "status": "slot_too_late", "slug": slug,
                   "seconds_left": round(sec_left, 1)})
         sleep_until(end_ts + 2)
         return None
-
-    strategy = getattr(args, "strategy", "favorite")
-    stake = float(params.get("underdog_stake_usd") or params["stake_usd"]) \
-        if strategy == "underdog" else float(params["stake_usd"])
-    hold_to_resolution = (strategy == "underdog"
-                          and str(params.get("underdog_exit_mode")) == "resolution")
 
     report: dict[str, Any] = {
         "started_at": ts_utc(),
@@ -569,14 +593,17 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
             "max_spread", "min_top_ask_notional_usd",
             "underdog_max_price", "underdog_min_price", "underdog_max_spread",
             "underdog_max_abs_move_usd", "underdog_exit_mode",
+            "impulse_lookback_sec", "impulse_min_move_usd",
+            "impulse_min_price", "impulse_max_price", "impulse_exit_mode",
             "favorite_min_abs_move_usd")},
     }
     report["params"]["stake_usd_effective"] = stake
     attempts = AttemptLog()
     slot_open_spot: Optional[float] = None
+    spot_samples: list[tuple[float, float]] = []
 
     # Wait until the entry window opens (long timeframes sleep here for a while).
-    window_open_ts = end_ts - float(params["entry_window_sec_left"])
+    window_open_ts = end_ts - eff_entry_window
     if time.time() < window_open_ts:
         log_line({"ts": ts_utc(), "status": "waiting_for_entry_window", "slug": slug,
                   "window_opens_in_sec": round(window_open_ts - time.time(), 1)})
@@ -587,7 +614,7 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
     guard_reserved = False
     while not STOP:
         sec_left = end_ts - time.time()
-        if sec_left < float(params["min_entry_seconds_left"]):
+        if sec_left < eff_min_entry:
             break
         try:
             up_bid, up_ask, _, up_ask_sz = md.top_of_book(m["up_token"])
@@ -631,7 +658,43 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
                     continue
 
         candidates: list[tuple[str, float, Optional[float], float]] = []
-        if strategy == "underdog":
+        if strategy == "impulse":
+            # velocity trigger: spot moved hard within the lookback window and
+            # the book's ask for the impulse direction is still in the stale band
+            now_t = time.time()
+            spot_now = md.spot_price(args.asset)
+            if spot_now is None:
+                attempts.add({"ts": ts_utc(), "status": "skip_move_unavailable"})
+                time.sleep(float(params["poll_sec"]))
+                continue
+            lookback = float(params["impulse_lookback_sec"])
+            spot_samples.append((now_t, spot_now))
+            spot_samples[:] = [(t, v) for t, v in spot_samples
+                               if t >= now_t - 3 * lookback]
+            ref = None
+            for t, v in reversed(spot_samples):
+                if t <= now_t - lookback:
+                    ref = v
+                    break
+            if ref is None:
+                attempts.add({"ts": ts_utc(), "status": "skip_impulse_warmup"})
+                time.sleep(float(params["poll_sec"]))
+                continue
+            vel = spot_now - ref
+            report["last_impulse_usd"] = round(vel, 2)
+            if abs(vel) >= float(params["impulse_min_move_usd"]):
+                side = "UP" if vel > 0 else "DOWN"
+                ask = up_ask if side == "UP" else dn_ask
+                bid = up_bid if side == "UP" else dn_bid
+                sz = up_ask_sz if side == "UP" else dn_ask_sz
+                lo, hi = float(params["impulse_min_price"]), float(params["impulse_max_price"])
+                if ask is not None and lo <= ask <= hi:
+                    candidates.append((side, ask, bid, sz))
+                else:
+                    attempts.add({"ts": ts_utc(), "status": "skip_impulse_price_out_of_band",
+                                  "side": side, "ask": ask, "move_usd": round(vel, 2)})
+            spread_cap = float(params["impulse_max_spread"])
+        elif strategy == "underdog":
             lo = float(params["underdog_min_price"])
             hi = float(params["underdog_max_price"])
             if up_ask is not None and lo <= up_ask <= hi:
@@ -856,7 +919,8 @@ def main() -> int:
     ap.add_argument("--asset", default="btc")
     ap.add_argument("--timeframe", required=True, choices=sorted(md.TIMEFRAME_SECONDS))
     ap.add_argument("--mode", choices=["paper", "live"], default="paper")
-    ap.add_argument("--strategy", choices=["favorite", "underdog"], default="favorite")
+    ap.add_argument("--strategy", choices=["favorite", "underdog", "impulse"],
+                    default="favorite")
     ap.add_argument("--config", default=None, help="multi profiles yaml/json")
     ap.add_argument("--repo", default=default_repo_path(),
                     help="external pm-hl-conservative-plus-repo path (live mode)")

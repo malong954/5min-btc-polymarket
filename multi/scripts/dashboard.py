@@ -86,7 +86,7 @@ def report_close_ts(r: dict) -> float | None:
             or parse_ts(r.get("started_at")))
 
 
-STRATEGY_ORDER = ["favorite", "underdog"]
+STRATEGY_ORDER = ["favorite", "underdog", "impulse"]
 
 
 def pair_key(r: dict) -> str:
