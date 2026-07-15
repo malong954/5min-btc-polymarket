@@ -534,6 +534,71 @@ def _print_combo(rows: list[dict[str, Any]]) -> None:
     print("=" * 74)
 
 
+CALIB_BANDS = [(0.0, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5), (0.5, 0.6), (0.6, 1.01)]
+
+
+def calibration_analysis(events: list[dict[str, Any]], at_sec: float = 195.0,
+                         official_only: bool = True) -> list[dict[str, Any]]:
+    """Confidence CALIBRATION (official labels): per confidence band, how often
+    did the indicator's side actually win? gap = winrate - avg_conf. A big
+    positive gap means the score under-states its own accuracy (it RANKS well
+    but is not a probability); the fix is a calibration lookup fitted on one
+    segment and verified on another — never a live re-tune on the same data.
+    One reading per round, at the sample nearest `at_sec` seconds left (mid
+    lead window)."""
+    samples, results = _split(events)
+    recs: list[tuple[float, bool]] = []
+    for r, samps in samples.items():
+        res = results.get(r)
+        if not res or (official_only and not res.get("official")):
+            continue
+        if res.get("outcome") not in ("UP", "DOWN"):
+            continue
+        best = None
+        for s in samps:
+            if s.get("ind_conf") is None or s.get("ind_dir") not in ("UP", "DOWN"):
+                continue
+            if best is None or abs((s.get("sec_left") or 0) - at_sec) < abs((best.get("sec_left") or 0) - at_sec):
+                best = s
+        if best is None:
+            continue
+        recs.append((float(best["ind_conf"]), best["ind_dir"] == res["outcome"]))
+    rows = []
+    for lo, hi in CALIB_BANDS:
+        xs = [(c, w) for c, w in recs if lo <= c < hi]
+        row: dict[str, Any] = {"band": f"{lo:.1f}-{min(hi, 1.0):.1f}", "n": len(xs)}
+        if xs:
+            n = len(xs)
+            wr = sum(1 for _, w in xs if w) / n
+            ac = sum(c for c, _ in xs) / n
+            row.update({"avg_conf": round(ac, 3), "winrate": round(wr, 4),
+                        "gap": round(wr - ac, 4)})
+        rows.append(row)
+    return rows
+
+
+def _print_calibration(rows: list[dict[str, Any]]) -> None:
+    print("=" * 70)
+    print("CONFIDENCE CALIBRATION  (indicator side vs OFFICIAL outcome, ~195s left)")
+    print("=" * 70)
+    if not any(r["n"] for r in rows):
+        print("  no official-graded rounds with indicator readings yet.")
+        print("=" * 70)
+        return
+    print(f"  {'conf band':<12}{'n':<6}{'avg conf':<10}{'winrate':<10}{'gap'}")
+    for r in rows:
+        if not r["n"]:
+            print(f"  {r['band']:<12}0")
+            continue
+        print(f"  {r['band']:<12}{r['n']:<6}{r['avg_conf']:<10.3f}{r['winrate']:<10.1%}{r['gap']:+.3f}")
+    print("-" * 70)
+    print("  Read: winrate should RISE with the band (score ranks well). 'gap' is")
+    print("  winrate minus avg conf: large positive = the score under-states its")
+    print("  accuracy — a probability it is not. Any re-mapping must be fitted on")
+    print("  an archived segment and VERIFIED on a fresh one, never tuned live.")
+    print("=" * 70)
+
+
 # 8h UTC blocks approximating the three trading sessions. Each round lands in
 # exactly one, plus a weekday/weekend bucket.
 SESSIONS = (("Asia   00-08 UTC", 0, 8),
@@ -860,6 +925,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--by-session", action="store_true",
                     help="Time-of-day/weekday regimes: per-session UP-drift and lead-setup "
                          "performance, official labels only")
+    ap.add_argument("--calibration", action="store_true",
+                    help="Confidence calibration: per conf band, how often the indicator side "
+                         "actually won (official labels) — is the score a probability or a rank?")
     ap.add_argument("--split-halves", action="store_true",
                     help="With --combo: run separately on the FIRST and SECOND half of official-graded "
                          "rounds (by time) — a same-log stand-in for the cross-segment check")
@@ -897,6 +965,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(json.dumps(rows, indent=2))
             return 0
         _print_session(rows, args.combo_min_move, args.min_conf or 0.0)
+        return 0
+    if args.calibration:
+        rows = calibration_analysis(events)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        _print_calibration(rows)
         return 0
     if args.combo:
         if args.split_halves:

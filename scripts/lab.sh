@@ -165,6 +165,8 @@ case "${1:-start}" in
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-session --min-size 100 || true
       echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --calibration || true
+      echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side indicator     || true
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-confidence     || true
@@ -195,6 +197,9 @@ case "${1:-start}" in
         echo
         echo "---- $AU 5m market: sessions ----"
         "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --by-session --min-size 100 || true
+        echo
+        echo "---- $AU 5m market: confidence calibration ----"
+        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --calibration || true
         echo
       done
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --fade              || true

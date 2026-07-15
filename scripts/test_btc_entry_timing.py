@@ -2,9 +2,10 @@
 """Offline tests for the entry-timing analyzer. Run:
     python3 scripts/test_btc_entry_timing.py"""
 
-from btc_entry_timing import (analyze, auto_min_move, confidence_bands,
-                              crossing_analysis, edge_gate_analysis,
-                              fade_analysis, session_analysis)
+from btc_entry_timing import (analyze, auto_min_move, calibration_analysis,
+                              confidence_bands, crossing_analysis,
+                              edge_gate_analysis, fade_analysis,
+                              session_analysis)
 
 
 def check(desc, cond):
@@ -277,6 +278,39 @@ def test_session_analysis_buckets_and_lead():
     check("conf floor filters lead picks", rows2["Asia   00-08 UTC"]["lead_n"] == 0)
 
 
+def test_calibration_maps_conf_to_winrate():
+    # 10 rounds at conf 0.35 where the indicator side wins 8 of 10, and 4
+    # rounds at conf 0.55 where it always loses. Only official rounds count.
+    evs = []
+    for i in range(10):
+        r = 1000 + i * 300
+        win = i < 8
+        evs.append({"type": "sample", "round": r, "sec_left": 195, "move": 5,
+                    "up_ask": 0.6, "dn_ask": 0.4, "spot": 62000,
+                    "ind_conf": 0.35, "ind_dir": "UP"})
+        evs.append({"type": "result", "round": r, "outcome": "UP" if win else "DOWN"})
+        evs.append({"type": "result_pm", "round": r, "outcome": "UP" if win else "DOWN"})
+    for i in range(4):
+        r = 9000 + i * 300
+        evs.append({"type": "sample", "round": r, "sec_left": 195, "move": 5,
+                    "up_ask": 0.6, "dn_ask": 0.4, "spot": 62000,
+                    "ind_conf": 0.55, "ind_dir": "UP"})
+        evs.append({"type": "result", "round": r, "outcome": "DOWN"})
+        evs.append({"type": "result_pm", "round": r, "outcome": "DOWN"})
+    # one unofficial round that must be excluded
+    evs.append({"type": "sample", "round": 99999, "sec_left": 195, "move": 5,
+                "up_ask": 0.6, "dn_ask": 0.4, "spot": 62000,
+                "ind_conf": 0.35, "ind_dir": "UP"})
+    evs.append({"type": "result", "round": 99999, "outcome": "UP"})
+    rows = {r["band"]: r for r in calibration_analysis(evs)}
+    b = rows["0.3-0.4"]
+    check("calibration band counts official rounds only", b["n"] == 10)
+    check("calibration winrate measured", abs(b["winrate"] - 0.8) < 1e-9)
+    check("underconfidence gap positive", b["gap"] > 0.4)
+    b2 = rows["0.5-0.6"]
+    check("losing band shows negative gap", b2["n"] == 4 and b2["gap"] < 0)
+
+
 def main():
     test_price_rises_toward_close()
     test_early_less_certain()
@@ -291,6 +325,7 @@ def main():
     test_min_move_drops_flat_rounds()
     test_auto_min_move_scales_with_price()
     test_session_analysis_buckets_and_lead()
+    test_calibration_maps_conf_to_winrate()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")
 
