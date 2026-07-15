@@ -20,6 +20,8 @@
 #                 ASSETS="eth sol xrp"   extra 5m markets to record AND trade
 #                                        alongside BTC (each gets its own
 #                                        recorder, trader, bankroll and log)
+#                 CONF_BTC/CONF_ETH/CONF_SOL/CONF_XRP   per-market conf floor
+#                                        (overrides LEAD_MIN_CONF for that market)
 #   RULE=edge enters when confidence >= live ask + EDGE_MARGIN (price = hurdle).
 #   Legacy ETH=1 still works (same as adding eth to ASSETS).
 #
@@ -41,6 +43,15 @@ RULE="${RULE:-${SAVED_RULE:-threshold}}"
 EDGE_MARGIN="${EDGE_MARGIN:-${SAVED_EDGE_MARGIN:-0.03}}"
 MAX_PRICE="${MAX_PRICE:-${SAVED_MAX_PRICE:-0.97}}"   # never buy above this ask
 LEAD_MIN_CONF="${LEAD_MIN_CONF:-${SAVED_LEAD_MIN_CONF:-0.0}}"  # lead+confidence combo floor (0 = off)
+# Per-market confidence floors override the global LEAD_MIN_CONF for that market
+# (each market calibrates + gets adversely selected differently). Any unset one
+# falls back to LEAD_MIN_CONF. NOTE: choosing these FROM the combo tables makes
+# only FORWARD trades honest evidence — the pooled table includes the in-sample
+# rounds you picked from.
+CONF_BTC="${CONF_BTC:-${SAVED_CONF_BTC:-$LEAD_MIN_CONF}}"
+CONF_ETH="${CONF_ETH:-${SAVED_CONF_ETH:-$LEAD_MIN_CONF}}"
+CONF_SOL="${CONF_SOL:-${SAVED_CONF_SOL:-$LEAD_MIN_CONF}}"
+CONF_XRP="${CONF_XRP:-${SAVED_CONF_XRP:-$LEAD_MIN_CONF}}"
 ETH="${ETH:-${SAVED_ETH:-0}}"    # legacy switch; folded into ASSETS below
 ASSETS="${ASSETS-${SAVED_ASSETS:-}}"   # extra markets: any of "eth sol xrp"
 STAKE="${STAKE:-${SAVED_STAKE:-10}}"
@@ -56,6 +67,15 @@ for A in $ASSETS; do
 done
 
 [ -x "$PY" ] || { echo "create the venv first: python3 -m venv .venv && .venv/bin/pip install requests"; exit 1; }
+
+# Per-market confidence floor for an asset (btc/eth/sol/xrp), default global.
+conf_for() {
+  case "$1" in
+    btc) echo "$CONF_BTC" ;; eth) echo "$CONF_ETH" ;;
+    sol) echo "$CONF_SOL" ;; xrp) echo "$CONF_XRP" ;;
+    *)   echo "$LEAD_MIN_CONF" ;;
+  esac
+}
 
 trader_up()   { pgrep -f "btc_live_paper.py" >/dev/null 2>&1; }
 recorder_up() { pgrep -f "btc_record.py"     >/dev/null 2>&1; }
@@ -96,6 +116,7 @@ case "${1:-start}" in
     exec "$0" start ;;
 
   status)
+    echo "conf floors:  BTC ${CONF_BTC}  ETH ${CONF_ETH}  SOL ${CONF_SOL}  XRP ${CONF_XRP}  (rule=$RULE)"
     btrader_up  && echo "trader (BTC):   RUNNING" || echo "trader (BTC):   not running"
     brec_up     && echo "recorder (BTC): RUNNING" || echo "recorder (BTC): not running"
     for A in $ASSETS; do
@@ -229,6 +250,10 @@ mkdir -p out
   echo "SAVED_EDGE_MARGIN=$EDGE_MARGIN"
   echo "SAVED_MAX_PRICE=$MAX_PRICE"
   echo "SAVED_LEAD_MIN_CONF=$LEAD_MIN_CONF"
+  echo "SAVED_CONF_BTC=$CONF_BTC"
+  echo "SAVED_CONF_ETH=$CONF_ETH"
+  echo "SAVED_CONF_SOL=$CONF_SOL"
+  echo "SAVED_CONF_XRP=$CONF_XRP"
   echo "SAVED_ASSETS=\"$ASSETS\""
   echo "SAVED_STAKE=$STAKE"
   echo "SAVED_BANKROLL=$BANKROLL"
@@ -252,7 +277,7 @@ else
   nohup "$PY" scripts/btc_live_paper.py --asset btc \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
     --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
-    --lead-min-conf "$LEAD_MIN_CONF" \
+    --lead-min-conf "$CONF_BTC" \
     --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
@@ -260,7 +285,7 @@ else
   if [ "$RULE" = "edge" ]; then
     echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
   elif [ "$RULE" = "lead" ]; then
-    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, 180-240s left, ask <= 0.72, decisive move, conf >= ${LEAD_MIN_CONF})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, 180-240s left, ask <= 0.72, decisive move, conf >= ${CONF_BTC})"
   else
     echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${THRESHOLD})"
   fi
@@ -280,15 +305,16 @@ for A in $ASSETS; do
     echo "$AU trader already running"
   else
     [ -f "out/live-$A.jsonl" ] && mv "out/live-$A.jsonl" "out/live-$A-prev.jsonl" && echo "archived prior $AU session -> out/live-$A-prev.jsonl"
+    AF="$(conf_for "$A")"
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" \
       --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
       --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
-      --lead-min-conf "$LEAD_MIN_CONF" \
+      --lead-min-conf "$AF" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
       >> "out/nohup-$A.log" 2>&1 &
-    echo "started $AU paper trader (pid $!)  same rule, own \$${BANKROLL} account (move threshold auto-scales to $AU)"
+    echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, conf >= ${AF} (move threshold auto-scales to $AU)"
   fi
 done
 
