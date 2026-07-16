@@ -33,7 +33,7 @@ def main() -> int:
     groups: dict[tuple, dict] = defaultdict(lambda: {
         "slots": 0, "entries": 0, "wins": 0, "losses": 0, "flat": 0,
         "pnl_sum": 0.0, "pnl_known": 0, "results": Counter(),
-        "close_reasons": Counter(), "sides": Counter(),
+        "close_reasons": Counter(), "sides": Counter(), "entry_px": [],
     })
 
     for f in files:
@@ -57,6 +57,8 @@ def main() -> int:
         if opened:
             g["entries"] += 1
             g["sides"][str(opened.get("side"))] += 1
+            if isinstance(opened.get("entry_price"), (int, float)):
+                g["entry_px"].append(float(opened["entry_price"]))
         if closed:
             g["close_reasons"][str(closed.get("close_reason"))] += 1
         pnl = obj.get("realized_cashflow_pnl_usdc")
@@ -74,6 +76,8 @@ def main() -> int:
     for (asset, tf, mode), g in sorted(groups.items()):
         entries = g["entries"]
         decided = g["wins"] + g["losses"]
+        px = sorted(g["entry_px"])
+        med_px = px[len(px) // 2] if px else None
         out["groups"].append({
             "asset": asset,
             "timeframe": tf,
@@ -85,6 +89,12 @@ def main() -> int:
             "losses": g["losses"],
             "flat": g["flat"],
             "win_rate": round(g["wins"] / decided, 3) if decided else None,
+            # for hold-to-resolution longs the breakeven win rate IS the
+            # entry price; for early-exit strategies it's an approximation
+            "median_entry_price": round(med_px, 3) if med_px is not None else None,
+            "breakeven_win_rate_approx": round(med_px, 3) if med_px is not None else None,
+            "edge_vs_breakeven": (round(g["wins"] / decided - med_px, 3)
+                                  if decided and med_px is not None else None),
             "pnl_sum_usdc": round(g["pnl_sum"], 6),
             "pnl_avg_usdc": round(g["pnl_sum"] / g["pnl_known"], 6) if g["pnl_known"] else None,
             "results": dict(g["results"]),
@@ -96,15 +106,24 @@ def main() -> int:
 
     if not args.json_only and out["groups"]:
         print()
-        hdr = f"{'asset':<6} {'tf':<4} {'mode':<6} {'slots':>5} {'entries':>7} {'winrate':>7} {'pnl_sum':>10} {'pnl_avg':>9}"
+        hdr = (f"{'asset':<6} {'series':<14} {'mode':<6} {'slots':>5} {'entries':>7} "
+               f"{'winrate':>7} {'b/e~':>6} {'edge':>7} {'pnl_sum':>10} {'pnl_avg':>9}")
         print(hdr)
         print("-" * len(hdr))
         for g in out["groups"]:
             wr = f"{g['win_rate']:.0%}" if g["win_rate"] is not None else "-"
+            be = (f"{g['breakeven_win_rate_approx']:.0%}"
+                  if g["breakeven_win_rate_approx"] is not None else "-")
+            ed = (f"{g['edge_vs_breakeven']:+.0%}"
+                  if g["edge_vs_breakeven"] is not None else "-")
             pa = f"{g['pnl_avg_usdc']:.4f}" if g["pnl_avg_usdc"] is not None else "-"
-            print(f"{g['asset']:<6} {g['timeframe']:<4} {g['mode']:<6} "
-                  f"{g['slots']:>5} {g['entries']:>7} {wr:>7} "
+            print(f"{g['asset']:<6} {g['timeframe']:<14} {g['mode']:<6} "
+                  f"{g['slots']:>5} {g['entries']:>7} {wr:>7} {be:>6} {ed:>7} "
                   f"{g['pnl_sum_usdc']:>10.4f} {pa:>9}")
+        print("\nb/e~ = breakeven win rate (≈ median entry price; exact for "
+              "hold-to-resolution). edge = winrate − b/e. A 15% win rate at "
+              "$0.10 entries is a GOOD result; judge underdog/arb by edge and "
+              "pnl, never by raw winrate.")
     return 0
 
 
