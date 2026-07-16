@@ -132,6 +132,15 @@ DEFAULT_PORTFOLIO: dict[str, Any] = dict(
     max_concurrent_positions=3,
     max_total_exposure_usd=15.0,
     daily_max_loss_usd=10.0,
+    # Paper-mode overrides: tight live caps make sense for money, but in a
+    # paper A/B one arm's bad hour must not freeze data collection for every
+    # other arm until UTC midnight (which is exactly what a $10 shared cap
+    # did). Keep a generous sanity backstop instead.
+    paper=dict(
+        max_concurrent_positions=9,
+        max_total_exposure_usd=60.0,
+        daily_max_loss_usd=300.0,
+    ),
 )
 
 DEFAULT_CONFIG: dict[str, Any] = dict(
@@ -208,6 +217,12 @@ class PortfolioGuard:
                 state = {}
             state.setdefault("open_positions", {})
             state.setdefault("daily", {})
+            # publish effective caps so the dashboard can explain guard halts
+            state["caps"] = {
+                "max_concurrent_positions": self.max_positions,
+                "max_total_exposure_usd": self.max_exposure_usd,
+                "daily_max_loss_usd": self.daily_max_loss_usd,
+            }
             self._roll_daily(state)
             self._prune_dead(state)
             yield state
@@ -1067,13 +1082,19 @@ def main() -> int:
     reports_dir = runtime / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    pf = cfg.get("portfolio") or {}
+    pf = dict(cfg.get("portfolio") or {})
+    if args.mode == "paper":
+        pf = _deep_merge(pf, pf.get("paper") or {})
     guard = PortfolioGuard(
         str(runtime / f"portfolio_{args.mode}.json"),
         pf.get("max_concurrent_positions", DEFAULT_PORTFOLIO["max_concurrent_positions"]),
         pf.get("max_total_exposure_usd", DEFAULT_PORTFOLIO["max_total_exposure_usd"]),
         pf.get("daily_max_loss_usd", DEFAULT_PORTFOLIO["daily_max_loss_usd"]),
     )
+    log_line({"ts": ts_utc(), "status": "portfolio_caps", "mode": args.mode,
+              "max_concurrent": guard.max_positions,
+              "max_exposure_usd": guard.max_exposure_usd,
+              "daily_max_loss_usd": guard.daily_max_loss_usd})
     worker_id = f"{args.asset}-{args.timeframe}" if args.strategy == "favorite" \
         else f"{args.asset}-{args.timeframe}-{args.strategy}"
 

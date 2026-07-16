@@ -277,6 +277,7 @@ def build_payload(runtime: Path, mode: str, rng: str) -> dict:
         "workers": workers,
         "open_positions": open_positions,
         "daily": guard.get("daily") or {},
+        "caps": guard.get("caps") or {},
         "kpi": kpi,
         "groups": group_rows,
         "pairs_all": pairs_all,
@@ -600,9 +601,14 @@ function renderKpis(d){
     "", "cap-shared across workers"));
   const daily = d.daily || {};
   const dp = daily.realized_pnl_usd;
+  const cap = (d.caps || {}).daily_max_loss_usd;
+  const capHit = (cap && dp !== undefined && dp <= -cap);
   box.appendChild(tile("Daily PnL (guard)", dp === undefined ? "–" : fmtUsd(dp),
     dp > 0 ? "pos-t" : dp < 0 ? "neg-t" : "",
-    (daily.trades || 0) + " trades · " + (daily.date || "no state yet")));
+    capHit
+      ? "⚠ DAILY CAP $" + cap + " HIT — entries paused until 00:00 UTC"
+      : (daily.trades || 0) + " trades · " + (daily.date || "no state yet")
+        + (cap ? " · cap $" + cap : "")));
 }
 
 /* ---------- cumulative PnL line chart ---------- */

@@ -21,10 +21,18 @@ assets:
 
 # Cross-worker caps shared by ALL parallel workers (fcntl-locked state file).
 # These are what make "multiple simultaneous positions" safe.
+# The top-level values apply to LIVE mode. The `paper` block overrides them
+# in paper mode: tight caps are right for money but wrong for experiments —
+# a $10 shared cap once froze ALL nine paper arms until UTC midnight after
+# one arm's two bad trades, silently costing a day of A/B data.
 portfolio:
   max_concurrent_positions: 3
   max_total_exposure_usd: 15
   daily_max_loss_usd: 10
+  paper:
+    max_concurrent_positions: 9
+    max_total_exposure_usd: 60
+    daily_max_loss_usd: 300
 
 worker:
   restart_on_exit: true
