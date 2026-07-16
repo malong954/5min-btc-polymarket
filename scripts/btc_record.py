@@ -236,7 +236,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             n += 1
             if args.max_steps is not None and n >= args.max_steps:
                 break
-            time.sleep(args.poll)
+            # The settle label is 'last spot before rollover', so its staleness
+            # equals the loop cadence. Sample at 1s through the final stretch —
+            # measured: 5s-stale closes flipped labels vs the official settle
+            # on fast finishes (half of all disagreements were reference errors).
+            now2 = time.time()
+            left2 = (bucket_5m(int(now2)) + 300) - now2
+            time.sleep(1.0 if left2 <= 20 else args.poll)
     except KeyboardInterrupt:
         print("\n# stopped", file=sys.stderr)
     finally:
