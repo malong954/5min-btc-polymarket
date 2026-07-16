@@ -78,10 +78,61 @@ def settle_report(path: Path, dry_run: bool) -> str:
     return f"settled won={won} pnl={pnl} via={settle_source}"
 
 
+def verify_spot_report(path: Path, dry_run: bool) -> str:
+    """Re-grade spot-settled outcomes against Polymarket's official
+    resolution. The trend-detection branch measured spot labels disagreeing
+    with the official settle on ~15% of rounds (near-flat rounds especially),
+    so every spot_klines settlement gets verified against gamma once the
+    market has actually resolved — flips rewrite won/PnL."""
+    try:
+        rep = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return "unreadable"
+    closed = rep.get("closed") or {}
+    if closed.get("settle_source") != "spot_klines" or closed.get("settle_verified"):
+        return "skip"
+    opened = rep.get("opened") or {}
+    slug, side = rep.get("slug"), opened.get("side")
+    if not (slug and side in ("UP", "DOWN")):
+        return "missing_fields"
+    won_official, px = resolve_outcome(slug, side, retries=2, delay=2.0)
+    if won_official is None:
+        return "official_unavailable"
+    if bool(closed.get("won")) == won_official:
+        closed["settle_verified"] = True
+        rep["closed"] = closed
+        if not dry_run:
+            path.write_text(json.dumps(rep, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+        return "confirmed"
+    shares = float(opened.get("shares") or 0)
+    cost = float(opened.get("cost_usdc") or 0)
+    proceeds = round(shares * (1.0 if won_official else 0.0), 6)
+    pnl = round(proceeds - cost, 6)
+    closed.update({
+        "won": won_official,
+        "close_price": 1.0 if won_official else 0.0,
+        "close_usdc": proceeds,
+        "settle_source": "gamma",
+        "settled_gamma_price": px,
+        "spot_label_corrected": True,
+        "settle_verified": True,
+        "verified_at": ts_utc(),
+    })
+    rep["closed"] = closed
+    rep["realized_cashflow_pnl_usdc"] = pnl
+    if not dry_run:
+        path.write_text(json.dumps(rep, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    return f"CORRECTED won={won_official} pnl={pnl}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reports-dir", default=default_reports_dir())
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="skip re-grading spot-settled outcomes against gamma")
     args = ap.parse_args()
 
     rdir = Path(args.reports_dir)
@@ -92,6 +143,11 @@ def main() -> int:
         if outcome.startswith("settled"):
             print(f"{p.name}: {outcome}")
         counts[outcome.split(" ")[0]] = counts.get(outcome.split(" ")[0], 0) + 1
+        if not args.no_verify:
+            v = verify_spot_report(p, args.dry_run)
+            if v.startswith("CORRECTED"):
+                print(f"{p.name}: {v}")
+            counts["verify_" + v.split(" ")[0]] = counts.get("verify_" + v.split(" ")[0], 0) + 1
     print(json.dumps({"scanned": len(files), "outcomes": counts,
                       "dry_run": args.dry_run}, indent=2))
     return 0
