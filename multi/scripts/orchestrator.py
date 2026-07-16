@@ -108,10 +108,31 @@ def main() -> int:
         spawn(asset, tf, strategy)
     write_workers_meta()
 
+    # periodic settle sweep: hold-to-resolution outcomes settled from the
+    # spot fallback mislabel ~22% of near-flat rounds; re-grade them against
+    # the official resolution automatically instead of relying on manual runs
+    settle_every = float(worker_cfg.get("settle_sweep_min", 30)) * 60
+    backfill_script = str(Path(__file__).resolve().with_name("settle_backfill.py"))
+    last_settle = time.time() - max(0.0, settle_every - 120)  # first sweep ~2min in
+
     pending_restart: dict[str, float] = {}
     while not STOP:
         time.sleep(3)
         changed = False
+        if settle_every > 0 and time.time() - last_settle >= settle_every:
+            last_settle = time.time()
+            try:
+                r = subprocess.run(
+                    [sys.executable, backfill_script,
+                     "--reports-dir", str(runtime / "reports")],
+                    capture_output=True, text=True, timeout=600)
+                corrected = sum(1 for ln in (r.stdout or "").splitlines()
+                                if "CORRECTED" in ln)
+                print(json.dumps({"ts": ts_utc(), "status": "settle_sweep",
+                                  "corrected": corrected}), flush=True)
+            except Exception as e:
+                print(json.dumps({"ts": ts_utc(), "status": "settle_sweep_error",
+                                  "error": str(e)[:200]}), flush=True)
         for wid, info in list(procs.items()):
             p = info["proc"]
             if p.poll() is None:

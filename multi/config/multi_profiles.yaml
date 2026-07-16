@@ -37,6 +37,10 @@ portfolio:
 worker:
   restart_on_exit: true
   restart_backoff_sec: 20
+  # periodic settle sweep: re-grades spot-settled outcomes against the
+  # official resolution (measured ~22% label-flip rate) and backfills any
+  # unresolved holds. 0 disables.
+  settle_sweep_min: 30
 
 # Per-timeframe strategy + timing. Anything omitted falls back to defaults
 # baked into multi_worker.py (same values as shown here).
@@ -75,7 +79,12 @@ timeframes:
     # hold duplicate exposure on the same market. As a paper baseline it is
     # useful for validating that multi results match og results.
     enabled: true
-    strategies: [favorite, underdog]
+    # VERDICT 2026-07-16: underdog disabled after 90 settled trades at 7-83
+    # (edge -4.5pts vs breakeven, label-corrected). The mechanical
+    # extreme-skew fade does not replicate the whale's edge — their selection
+    # signal is something we don't observe. Re-enable by adding 'underdog'
+    # back if a real selection signal lands.
+    strategies: [favorite]
     threshold: 0.70
     stake_usd: 5
     stop_loss_pct: 0.25
@@ -99,7 +108,8 @@ timeframes:
     # (0x865935, alpha 0.349) works 15m, where the book reprices slowly
     # enough that a seconds-slow copy still gets a good price.
     enabled: true
-    strategies: [favorite, underdog, impulse, arb]
+    # underdog dropped 2026-07-16 (see 5m verdict; 15m was 2-21)
+    strategies: [favorite, impulse, arb]
     threshold: 0.70
     stake_usd: 5
     stop_loss_pct: 0.25
