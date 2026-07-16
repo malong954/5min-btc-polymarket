@@ -603,12 +603,12 @@ function renderKpis(d){
   const dp = daily.realized_pnl_usd;
   const cap = (d.caps || {}).daily_max_loss_usd;
   const capHit = (cap && dp !== undefined && dp <= -cap);
-  box.appendChild(tile("Daily PnL (guard)", dp === undefined ? "–" : fmtUsd(dp),
+  box.appendChild(tile("Daily risk counter", dp === undefined ? "–" : fmtUsd(dp),
     dp > 0 ? "pos-t" : dp < 0 ? "neg-t" : "",
     capHit
       ? "⚠ DAILY CAP $" + cap + " HIT — entries paused until 00:00 UTC"
-      : (daily.trades || 0) + " trades · " + (daily.date || "no state yet")
-        + (cap ? " · cap $" + cap : "")));
+      : (daily.trades || 0) + " trades since 00:00 UTC · as-settled, "
+        + "uncorrected" + (cap ? " · cap $" + cap : "")));
 }
 
 /* ---------- cumulative PnL line chart ---------- */
