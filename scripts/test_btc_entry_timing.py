@@ -302,6 +302,40 @@ def test_combo_min_price_filters_book_disagreement():
     check("guard keeps the book-agreement winner", abs(guarded[0.0]["winrate"] - 1.0) < 1e-9)
 
 
+def test_disagreement_anatomy_classifies_by_book():
+    from btc_entry_timing import disagreement_analysis
+    # Round A: spot says UP, official says DOWN, and the book priced DOWN at
+    # 0.90 at the last sample -> reference_error (our feed was wrong).
+    # Round B: spot says UP, official says DOWN, book priced UP at 0.95 at the
+    # last sample -> photo_finish (genuine late flip).
+    # Round C: clean agreement (control, feeds avg_conf_clean).
+    evs = [
+        {"type": "sample", "round": 100, "sec_left": 195, "move": 40.0, "spot": 62040,
+         "up_ask": 0.11, "dn_ask": 0.90, "up_sz": 500, "dn_sz": 500, "ind_conf": 0.30},
+        {"type": "sample", "round": 100, "sec_left": 30, "move": 40.0, "spot": 62040,
+         "up_ask": 0.05, "dn_ask": 0.97, "up_sz": 500, "dn_sz": 500, "ind_conf": 0.30},
+        {"type": "result", "round": 100, "open": 62000, "close": 62040, "outcome": "UP"},
+        {"type": "result_pm", "round": 100, "outcome": "DOWN"},
+        {"type": "sample", "round": 400, "sec_left": 195, "move": 2.0, "spot": 62002,
+         "up_ask": 0.60, "dn_ask": 0.42, "up_sz": 500, "dn_sz": 500, "ind_conf": 0.10},
+        {"type": "sample", "round": 400, "sec_left": 30, "move": 1.0, "spot": 62001,
+         "up_ask": 0.95, "dn_ask": 0.07, "up_sz": 500, "dn_sz": 500, "ind_conf": 0.10},
+        {"type": "result", "round": 400, "open": 62000, "close": 62001, "outcome": "UP"},
+        {"type": "result_pm", "round": 400, "outcome": "DOWN"},
+        {"type": "sample", "round": 700, "sec_left": 195, "move": 30.0, "spot": 62030,
+         "up_ask": 0.65, "dn_ask": 0.37, "up_sz": 500, "dn_sz": 500, "ind_conf": 0.60},
+        {"type": "result", "round": 700, "open": 62000, "close": 62030, "outcome": "UP"},
+        {"type": "result_pm", "round": 700, "outcome": "UP"},
+    ]
+    res = disagreement_analysis(evs, min_move_signal=10.0)
+    check("two disagreements found", res["n_disagreements"] == 2)
+    check("reference error classified (book knew)", res["kinds"]["reference_error"] == 1)
+    check("photo finish classified (late flip)", res["kinds"]["photo_finish"] == 1)
+    check("clean-round conf used as control", res["avg_conf_clean"] == 0.60)
+    check("disagreement conf averaged", abs(res["avg_conf_disagreements"] - 0.20) < 1e-9)
+    check("lead-pick intersection counted", res["n_with_lead_pick"] == 1)
+
+
 def test_calibration_maps_conf_to_winrate():
     # 10 rounds at conf 0.35 where the indicator side wins 8 of 10, and 4
     # rounds at conf 0.55 where it always loses. Only official rounds count.
@@ -350,6 +384,7 @@ def main():
     test_auto_min_move_scales_with_price()
     test_session_analysis_buckets_and_lead()
     test_combo_min_price_filters_book_disagreement()
+    test_disagreement_anatomy_classifies_by_book()
     test_calibration_maps_conf_to_winrate()
     test_empty_and_missing()
     print("\nAll entry-timing tests passed.")

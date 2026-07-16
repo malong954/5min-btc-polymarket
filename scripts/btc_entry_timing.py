@@ -542,6 +542,126 @@ def _print_combo(rows: list[dict[str, Any]]) -> None:
     print("=" * 74)
 
 
+def disagreement_analysis(events: list[dict[str, Any]], at_sec: float = 195.0,
+                          min_move_signal: float = 10.0,
+                          min_size: float = 0.0) -> dict[str, Any]:
+    """Anatomy of label DISAGREEMENTS (our spot settle vs the official
+    resolution). Each one is classified by what the ORDER BOOK said at the
+    round's last recorded sample:
+
+      reference_error — the book's favorite matched the OFFICIAL outcome:
+                        the market knew all along; OUR open/close reference
+                        was wrong (fixable: better feed / faster close).
+      photo_finish    — the book's favorite matched OUR spot label: the round
+                        genuinely flipped at the very end (irreducible noise).
+
+    Also compares indicator confidence on disagreement rounds vs clean rounds
+    (are disagreements concentrated where the bot is unsure anyway?) and counts
+    how many disagreements intersected an actual lead-setup pick (real trades
+    at risk, not just labels)."""
+    spot_res: dict[int, dict[str, Any]] = {}
+    official: dict[int, str] = {}
+    samples: dict[int, list[dict[str, Any]]] = {}
+    for e in events:
+        t = e.get("type")
+        if t == "sample":
+            samples.setdefault(e["round"], []).append(e)
+        elif t == "result":
+            spot_res[e["round"]] = e
+        elif t == "result_pm" and e.get("outcome") in ("UP", "DOWN"):
+            official[e["round"]] = e["outcome"]
+
+    def conf_at(samps: list[dict[str, Any]]) -> Optional[float]:
+        best = None
+        for s in samps:
+            if s.get("ind_conf") is None:
+                continue
+            if best is None or abs((s.get("sec_left") or 0) - at_sec) < abs((best.get("sec_left") or 0) - at_sec):
+                best = s
+        return float(best["ind_conf"]) if best else None
+
+    rows = []
+    clean_confs: list[float] = []
+    for r, sres in spot_res.items():
+        if r not in official or sres.get("outcome") not in ("UP", "DOWN"):
+            continue
+        samps = samples.get(r, [])
+        c = conf_at(samps)
+        if sres["outcome"] == official[r]:
+            if c is not None:
+                clean_confs.append(c)
+            continue
+        # a disagreement — classify it by the book's last word
+        row: dict[str, Any] = {"round": r, "spot": sres["outcome"], "official": official[r],
+                               "conf": c}
+        if isinstance(sres.get("open"), (int, float)) and isinstance(sres.get("close"), (int, float)):
+            row["abs_move"] = round(abs(sres["close"] - sres["open"]), 6)
+        last = min(samps, key=lambda s: s.get("sec_left") or 1e9) if samps else None
+        if last and isinstance(last.get("up_ask"), (int, float)) and isinstance(last.get("dn_ask"), (int, float)) \
+                and last["up_ask"] != last["dn_ask"]:
+            fav = "UP" if last["up_ask"] > last["dn_ask"] else "DOWN"
+            row["book_favorite"] = fav
+            row["kind"] = "reference_error" if fav == official[r] else "photo_finish"
+        else:
+            row["kind"] = "no_book_data"
+        pick = _first_lead_pick(samps, min_move_signal=min_move_signal, min_size=min_size)
+        if pick is not None:
+            row["lead_pick"] = pick[0]
+            row["lead_pick_won_officially"] = pick[0] == official[r]
+        rows.append(row)
+
+    dis_confs = [r["conf"] for r in rows if r.get("conf") is not None]
+    n_compare = len(clean_confs) + len(dis_confs)
+    return {
+        "n_compared": n_compare,
+        "n_disagreements": len(rows),
+        "rate": round(len(rows) / n_compare, 4) if n_compare else None,
+        "kinds": {k: sum(1 for r in rows if r["kind"] == k)
+                  for k in ("reference_error", "photo_finish", "no_book_data")},
+        "avg_conf_disagreements": round(sum(dis_confs) / len(dis_confs), 3) if dis_confs else None,
+        "avg_conf_clean": round(sum(clean_confs) / len(clean_confs), 3) if clean_confs else None,
+        "n_with_lead_pick": sum(1 for r in rows if "lead_pick" in r),
+        "lead_picks_officially_right": sum(1 for r in rows if r.get("lead_pick_won_officially")),
+        "rows": sorted(rows, key=lambda r: -(r.get("abs_move") or 0)),
+    }
+
+
+def _print_disagreements(res: dict[str, Any]) -> None:
+    print("=" * 74)
+    print("DISAGREEMENT ANATOMY  (our spot label vs official; classified by the book)")
+    print("=" * 74)
+    if not res["n_disagreements"]:
+        print("  no disagreements among compared rounds — labels are clean so far.")
+        print("=" * 74)
+        return
+    k = res["kinds"]
+    print(f"  compared rounds: {res['n_compared']}   disagreements: {res['n_disagreements']} "
+          f"({res['rate']:.1%})")
+    print(f"  reference errors (book knew; OUR feed was wrong):   {k['reference_error']}")
+    print(f"  photo finishes  (book agreed with us; late flip):   {k['photo_finish']}")
+    if k["no_book_data"]:
+        print(f"  unclassifiable (no book data near the close):       {k['no_book_data']}")
+    ac, ad = res.get("avg_conf_clean"), res.get("avg_conf_disagreements")
+    if ac is not None and ad is not None:
+        rel = "LOWER than" if ad < ac else "similar to" if abs(ad - ac) < 0.05 else "HIGHER than"
+        print(f"  avg confidence: {ad:.2f} on disagreement rounds vs {ac:.2f} on clean rounds "
+              f"({rel} clean)")
+    print(f"  disagreements that intersected a LEAD-SETUP pick: {res['n_with_lead_pick']}"
+          + (f" (officially right: {res['lead_picks_officially_right']})" if res["n_with_lead_pick"] else ""))
+    print("-" * 74)
+    print(f"  {'round':<13}{'spot':<6}{'offcl':<7}{'|move|':<10}{'conf':<7}{'book fav':<10}{'kind'}")
+    for r in res["rows"][:15]:
+        mv = f"{r.get('abs_move'):.4g}" if r.get("abs_move") is not None else "-"
+        cf = f"{r['conf']:.2f}" if r.get("conf") is not None else "-"
+        print(f"  {r['round']:<13}{r['spot']:<6}{r['official']:<7}{mv:<10}{cf:<7}"
+              f"{r.get('book_favorite', '-'):<10}{r['kind']}")
+    print("-" * 74)
+    print("  reference errors are FIXABLE: a settle reference closer to the venue's")
+    print("  oracle (median of feeds, faster close sampling, or Chainlink itself)")
+    print("  removes them. Photo finishes are not — no feed resolves a tie early.")
+    print("=" * 74)
+
+
 CALIB_BANDS = [(0.0, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5), (0.5, 0.6), (0.6, 1.01)]
 
 
@@ -940,6 +1060,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--calibration", action="store_true",
                     help="Confidence calibration: per conf band, how often the indicator side "
                          "actually won (official labels) — is the score a probability or a rank?")
+    ap.add_argument("--disagreements", action="store_true",
+                    help="Anatomy of spot-vs-official label disagreements, classified by the "
+                         "order book: fixable reference errors vs irreducible photo finishes")
     ap.add_argument("--split-halves", action="store_true",
                     help="With --combo: run separately on the FIRST and SECOND half of official-graded "
                          "rounds (by time) — a same-log stand-in for the cross-segment check")
@@ -984,6 +1107,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(json.dumps(rows, indent=2))
             return 0
         _print_calibration(rows)
+        return 0
+    if args.disagreements:
+        res = disagreement_analysis(events, min_move_signal=args.combo_min_move,
+                                    min_size=args.min_size)
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        _print_disagreements(res)
         return 0
     if args.combo:
         if args.split_halves:

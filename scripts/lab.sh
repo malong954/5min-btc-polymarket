@@ -200,6 +200,8 @@ case "${1:-start}" in
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --label-check       || true
       echo
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --disagreements --min-size 100 || true
+      echo
       for v in vel_15s vel_30s; do
         "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side "$v"       || true
         echo
@@ -221,6 +223,9 @@ case "${1:-start}" in
         echo
         echo "---- $AU 5m market: confidence calibration ----"
         "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --calibration || true
+        echo
+        echo "---- $AU 5m market: disagreement anatomy ----"
+        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --disagreements --min-size 100 || true
         echo
       done
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --fade              || true
