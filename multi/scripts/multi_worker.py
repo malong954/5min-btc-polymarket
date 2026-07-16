@@ -512,6 +512,37 @@ def live_close_position(repo: str, opened: dict[str, Any], params: dict[str, Any
     }
 
 
+def fill_echo(opened: dict[str, Any], delay: float = 1.5) -> Optional[dict[str, Any]]:
+    """Paper-fill fidelity probe: ~a live order's flight time after our
+    simulated fill, is the price we 'filled' still on the book? Aggregated
+    over many entries this measures the paper-vs-live latency tax directly."""
+    time.sleep(max(0.2, delay))
+    try:
+        if opened.get("legs"):  # arb: both legs must still be there
+            after = {}
+            combined = 0.0
+            ok = True
+            for side, leg in opened["legs"].items():
+                _, ask, _, _ = md.top_of_book(leg["token_id"])
+                after[side] = ask
+                if ask is None:
+                    ok = False
+                else:
+                    combined += ask
+            entry = float(opened["entry_price"])
+            return {"delay_s": delay, "asks_after": after,
+                    "combined_after": round(combined, 4) if ok else None,
+                    "still_fillable": bool(ok and combined <= entry + 1e-9),
+                    "adverse_move": round(combined - entry, 4) if ok else None}
+        _, ask, _, ask_sz = md.top_of_book(opened["token_id"])
+        entry = float(opened["entry_price"])
+        return {"delay_s": delay, "ask_after": ask, "ask_size_after": ask_sz,
+                "still_fillable": bool(ask is not None and ask <= entry + 1e-9),
+                "adverse_move": round(ask - entry, 4) if ask is not None else None}
+    except Exception:
+        return None
+
+
 def resolve_outcome(slug: str, side: str, retries: int, delay: float) -> tuple[Optional[bool], Optional[float]]:
     """After market end, poll gamma until outcome prices settle to ~1/0.
     Returns (won, settled_price) — (None, None) if still unresolved."""
@@ -880,6 +911,12 @@ def run_slot_session(args, cfg: dict[str, Any], params: dict[str, Any],
     log_line({"ts": ts_utc(), "status": "opened", "slug": slug,
               "side": opened["side"], "entry_price": opened["entry_price"],
               "strategy": strategy, "mode": args.mode})
+
+    # paper-fill fidelity: would a real order ~1.5s behind us still fill?
+    if args.mode != "live":
+        echo = fill_echo(opened)
+        if echo is not None:
+            opened["fill_echo"] = echo
 
     # --- arb settle: a matched pair redeems exactly $1 whichever side wins,
     #     so PnL is locked at fill; just wait out the slot ---
