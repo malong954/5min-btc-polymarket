@@ -17,9 +17,13 @@ are overridable per timeframe in the multi profiles config.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import hmac
 import json
+import os
 import time
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 import requests
 
@@ -268,9 +272,105 @@ def get_side_price(slug: str, side: str) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Spot price feed (for move-size filters). Binance is the markets' resolution
-# source; Kraken is the fallback when Binance is geo-blocked (e.g. US). Both
-# open-price and live-price come from the SAME provider so the basis cancels.
+# Chainlink Data Streams (credential-gated, sub-second): the markets' actual
+# resolution feed. When CHAINLINK_STREAMS_API_KEY/SECRET and a per-asset
+# CHAINLINK_FEED_ID_<ASSET> are set (e.g. in multi/.env), Streams becomes the
+# PRIMARY spot provider for signals and settlement; Binance/Kraken remain the
+# no-credential fallbacks. Verify credentials with: multibot_ctl.sh streams
+# ---------------------------------------------------------------------------
+
+STREAMS_BASE = os.getenv("CHAINLINK_STREAMS_BASE", "https://api.dataengine.chain.link")
+
+
+def streams_creds() -> Optional[tuple[str, str]]:
+    k = os.getenv("CHAINLINK_STREAMS_API_KEY")
+    s = os.getenv("CHAINLINK_STREAMS_API_SECRET")
+    return (k, s) if k and s else None
+
+
+def streams_feed_id(asset: str) -> Optional[str]:
+    return os.getenv(f"CHAINLINK_FEED_ID_{asset.upper()}")
+
+
+def streams_get(path: str, params: dict | None = None, timeout: float = 8.0) -> dict:
+    """HMAC-authenticated GET against the Data Streams API (per the Streams
+    auth spec: sign 'METHOD path sha256(body) clientId timestampMs')."""
+    creds = streams_creds()
+    if not creds:
+        raise RuntimeError("Chainlink Streams credentials not configured")
+    key, secret = creds
+    qs = urlencode(params or {})
+    full_path = f"{path}?{qs}" if qs else path
+    ts_ms = int(time.time() * 1000)
+    body_hash = hashlib.sha256(b"").hexdigest()
+    to_sign = f"GET {full_path} {body_hash} {key} {ts_ms}"
+    sig = hmac.new(secret.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
+    r = requests.get(STREAMS_BASE + full_path, headers={
+        "Authorization": key,
+        "X-Authorization-Timestamp": str(ts_ms),
+        "X-Authorization-Signature-SHA256": sig,
+    }, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def decode_v3_report(full_report_hex: str) -> dict:
+    """Decode a Streams v3 report blob without web3: outer ABI wraps
+    (bytes32[3] ctx, bytes reportData, ...); reportData is 9 static words:
+    feedId, validFrom, observationsTs, nativeFee, linkFee, expiresAt,
+    price(int192), bid(int192), ask(int192) — 18-decimal fixed point."""
+    b = bytes.fromhex(full_report_hex.removeprefix("0x"))
+    off = int.from_bytes(b[96:128], "big")
+    ln = int.from_bytes(b[off:off + 32], "big")
+    rep = b[off + 32:off + 32 + ln]
+    if len(rep) < 9 * 32:
+        raise ValueError("short v3 report")
+
+    def word(i: int, signed: bool = False) -> int:
+        return int.from_bytes(rep[32 * i:32 * (i + 1)], "big", signed=signed)
+
+    return {
+        "feed_id": "0x" + rep[0:32].hex(),
+        "valid_from": word(1),
+        "observations_ts": word(2),
+        "expires_at": word(5),
+        "price": word(6, signed=True) / 1e18,
+        "bid": word(7, signed=True) / 1e18,
+        "ask": word(8, signed=True) / 1e18,
+    }
+
+
+def _streams_extract(j: dict) -> Optional[dict]:
+    rep = j.get("report")
+    if rep is None:
+        reps = j.get("reports") or []
+        rep = reps[0] if reps else None
+    if not rep or not rep.get("fullReport"):
+        return None
+    return decode_v3_report(rep["fullReport"])
+
+
+def streams_latest(asset: str) -> Optional[dict]:
+    feed = streams_feed_id(asset)
+    if not feed:
+        return None
+    j = streams_get("/api/v1/reports/latest", {"feedID": feed})
+    return _streams_extract(j)
+
+
+def streams_at(asset: str, ts: int) -> Optional[dict]:
+    feed = streams_feed_id(asset)
+    if not feed:
+        return None
+    j = streams_get("/api/v1/reports", {"feedID": feed, "timestamp": int(ts)})
+    return _streams_extract(j)
+
+
+# ---------------------------------------------------------------------------
+# Spot price feed (for move-size filters). Chainlink Streams (when creds are
+# configured) is the markets' actual resolution feed; Binance/Kraken are the
+# no-credential fallbacks. Both open-price and live-price come from the SAME
+# provider so the basis cancels.
 # ---------------------------------------------------------------------------
 
 SPOT_SYMBOLS = {
@@ -322,18 +422,26 @@ def _kraken_price(sym: str) -> float:
 
 
 def _spot_call(asset: str, kind: str, ts: int = 0) -> Optional[float]:
-    syms = SPOT_SYMBOLS.get(asset.lower())
-    if not syms:
-        return None
-    order = [_spot_provider.get(asset.lower())] if _spot_provider.get(asset.lower()) else []
+    a = asset.lower()
+    order = [_spot_provider.get(a)] if _spot_provider.get(a) else []
+    if streams_creds() and streams_feed_id(a):
+        order += [p for p in ("chainlink",) if p not in order]
     order += [p for p in ("binance", "kraken") if p not in order]
+    syms = SPOT_SYMBOLS.get(a)
     for prov in order:
         try:
-            if kind == "open":
+            if prov == "chainlink":
+                rep = streams_at(a, ts) if kind == "open" else streams_latest(a)
+                if rep is None or not rep.get("price"):
+                    continue
+                v = float(rep["price"])
+            elif not syms:
+                continue
+            elif kind == "open":
                 v = (_binance_open_at if prov == "binance" else _kraken_open_at)(syms[prov], ts)
             else:
                 v = (_binance_price if prov == "binance" else _kraken_price)(syms[prov])
-            _spot_provider[asset.lower()] = prov
+            _spot_provider[a] = prov
             return v
         except Exception:
             continue

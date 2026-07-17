@@ -52,7 +52,21 @@ def _http_json(url: str, payload: dict | None = None, timeout: float = 3.5):
         return json.loads(r.read().decode())
 
 
+try:  # optional: Chainlink Data Streams via market_discovery (needs requests)
+    import market_discovery as _md
+except Exception:
+    _md = None
+
+
 def _fetch_spot() -> tuple:
+    if _md is not None:
+        try:
+            if _md.streams_creds() and _md.streams_feed_id("btc"):
+                rep = _md.streams_latest("btc")
+                if rep and rep.get("price"):
+                    return float(rep["price"]), "chainlink streams"
+        except Exception:
+            pass
     try:
         d = _http_json("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
         return float(d["price"]), "binance"

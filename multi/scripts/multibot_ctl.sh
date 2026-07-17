@@ -47,6 +47,14 @@ ORCH_LOG_LINK="$RUNTIME_DIR/orchestrator.latest.log"
 
 mkdir -p "$RUNTIME_DIR"
 
+# optional multi-local env (Chainlink Data Streams creds etc.) — gitignored
+if [[ -f "$MULTI_ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$MULTI_ROOT/.env"
+  set +a
+fi
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -64,6 +72,8 @@ Usage:
                   settle_unresolved with the real outcome/PnL
   multibot_ctl.sh cohort --csv FILE      batch-scan a wallet leaderboard csv,
                   classify species, compare vs our paper results
+  multibot_ctl.sh streams                verify Chainlink Data Streams
+                  credentials (multi/.env) and discover feed IDs
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -279,6 +289,7 @@ main() {
     analyze) check_deps; "$PY" "$SCRIPT_DIR/analyze_wallet.py" "$@" ;;
     settle) check_deps; "$PY" "$SCRIPT_DIR/settle_backfill.py" --reports-dir "$RUNTIME_DIR/reports" "$@" ;;
     cohort) check_deps; "$PY" "$SCRIPT_DIR/cohort_scan.py" --reports-dir "$RUNTIME_DIR/reports" "$@" ;;
+    streams) check_deps; "$PY" "$SCRIPT_DIR/streams_probe.py" "$@" ;;
     *) usage; exit 2 ;;
   esac
 }
