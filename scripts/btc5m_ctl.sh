@@ -20,7 +20,7 @@ mkdir -p "$RUNTIME_DIR"
 usage() {
   cat <<'EOF'
 Usage:
-  btc5m_ctl.sh start [--profile conservative|aggressive] [--entry-timeout-min N] [--stake-usd N] [--threshold N] [--poll-sec N] [--close-retry-max N] [--close-retry-delay-sec N]
+  btc5m_ctl.sh start [--profile conservative|aggressive] [--window 5m|15m] [--entry-timeout-min N] [--stake-usd N] [--threshold N] [--ride-winner-price N] [--poll-sec N] [--close-retry-max N] [--close-retry-delay-sec N]
   btc5m_ctl.sh status
   btc5m_ctl.sh stop
   btc5m_ctl.sh report [--limit N]
@@ -44,9 +44,11 @@ is_running() {
 
 cmd_start() {
   local profile="conservative"
+  local window="5m"
   local entry_timeout_min="35"
   local stake_usd=""
   local threshold=""
+  local ride_winner_price=""
   local poll_sec="2"
   local close_retry_max="30"
   local close_retry_delay_sec="2"
@@ -54,9 +56,11 @@ cmd_start() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --profile) profile="$2"; shift 2;;
+      --window) window="$2"; shift 2;;
       --entry-timeout-min) entry_timeout_min="$2"; shift 2;;
       --stake-usd) stake_usd="$2"; shift 2;;
       --threshold) threshold="$2"; shift 2;;
+      --ride-winner-price) ride_winner_price="$2"; shift 2;;
       --poll-sec) poll_sec="$2"; shift 2;;
       --close-retry-max) close_retry_max="$2"; shift 2;;
       --close-retry-delay-sec) close_retry_delay_sec="$2"; shift 2;;
@@ -71,12 +75,13 @@ cmd_start() {
 
   local ts log
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  log="$RUNTIME_DIR/btc5m_${profile}_${ts}.log"
+  log="$RUNTIME_DIR/btc5m_${profile}_${window}_${ts}.log"
 
   local -a runner_cmd
-  runner_cmd=("$VENV_PY" "$RUNNER" "--profile" "$profile" "--entry-timeout-min" "$entry_timeout_min" "--poll-sec" "$poll_sec" "--close-retry-max" "$close_retry_max" "--close-retry-delay-sec" "$close_retry_delay_sec" "--execute")
+  runner_cmd=("$VENV_PY" "$RUNNER" "--profile" "$profile" "--window" "$window" "--entry-timeout-min" "$entry_timeout_min" "--poll-sec" "$poll_sec" "--close-retry-max" "$close_retry_max" "--close-retry-delay-sec" "$close_retry_delay_sec" "--execute")
   [[ -n "$stake_usd" ]] && runner_cmd+=("--stake-usd" "$stake_usd")
   [[ -n "$threshold" ]] && runner_cmd+=("--threshold" "$threshold")
+  [[ -n "$ride_winner_price" ]] && runner_cmd+=("--ride-winner-price" "$ride_winner_price")
 
   (
     if [[ -f "$ENV_FILE" ]]; then
@@ -99,6 +104,8 @@ cmd_start() {
   "startedAt": "$(date -u +%FT%TZ)",
   "pid": $pid,
   "profile": "$profile",
+  "window": "$window",
+  "rideWinnerPrice": "${ride_winner_price:-profile_default_0.90}",
   "entryTimeoutMin": $entry_timeout_min,
   "pollSec": $poll_sec,
   "closeRetryMax": $close_retry_max,
@@ -128,6 +135,13 @@ cmd_status() {
   fi
   if [[ -f "$METAFILE" ]]; then
     echo "meta=$METAFILE"
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - "$METAFILE" <<'PY' 2>/dev/null || true
+import json, sys
+m = json.load(open(sys.argv[1]))
+print(f"rules: window={m.get('window', '5m')} profile={m.get('profile')} ride_winner={m.get('rideWinnerPrice', 'off')} (entry threshold from profile; 0.65 default)")
+PY
+    fi
   fi
   if [[ -L "$LATEST_LINK" ]]; then
     echo "latest_log=$(readlink "$LATEST_LINK")"
