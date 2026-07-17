@@ -277,7 +277,8 @@ class LivePaperEngine:
 
     def step(self, now: float, bars_1m: list[Bar], spot: Optional[float] = None,
              entry_prices: Optional[dict[str, float]] = None,
-             official: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
+             official: Optional[dict[int, str]] = None,
+             provisional: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
         now = float(now)
         cur = bucket_5m(int(now))
         sec_left = (cur + 300) - now
@@ -288,11 +289,15 @@ class LivePaperEngine:
             """Prefer Polymarket's OFFICIAL resolution; our spot label breaks
             ties the wrong way (measured: 5/6 disagreements were spot=DOWN,
             official=UP, one at |move|=$0.00). Wait official_wait seconds for
-            the official settle, then fall back to the spot label."""
+            the official settle, then a Chainlink-sourced provisional grade
+            (same feed the market resolves on) if the caller supplied one,
+            then fall back to the spot label."""
             if official and official.get(rs) in ("UP", "DOWN"):
                 return official[rs], "official"
             if now < rs + 300 + self.official_wait:
                 return None, "waiting"
+            if provisional and provisional.get(rs) in ("UP", "DOWN"):
+                return provisional[rs], "chainlink"
             return outcome_direction(model, rs), "spot_fallback"
 
         # 1) Settle any entered round that has closed.
@@ -698,6 +703,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Official Polymarket resolutions for closed rounds (settle ground truth).
     official: dict[int, str] = {}
     official_tries: dict[int, int] = {}
+    # Chainlink-sourced provisional grades (used after official_wait, before
+    # the spot fallback — same feed the market resolves on). Free method A.
+    try:
+        import chainlink_feed as cl
+        cl_ok = cl.candle_creds_ok()
+    except Exception:
+        cl = None
+        cl_ok = False
+    if cl_ok:
+        print("# chainlink provisional grading: ON", file=sys.stderr)
+    provisional: dict[int, str] = {}
+    prov_tries: dict[int, int] = {}
     try:
         while args.max_steps is None or n < args.max_steps:
             try:
@@ -721,6 +738,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                             official[rs] = oc
                         else:
                             official_tries[rs] = official_tries.get(rs, 0) + 1
+                # Chainlink provisional grade for closed rounds the official
+                # settle hasn't covered yet (bounded: one round per poll).
+                if cl_ok:
+                    want = [rs for rs in list(engine.positions) + list(engine.shadows)
+                            if rs not in engine.settled and rs not in engine.shadow_settled
+                            and rs not in official and rs not in provisional
+                            and now >= rs + 305 and prov_tries.get(rs, 0) < 6]
+                    for rs in want[:1]:
+                        try:
+                            up = cl.settle_up(asset, rs, rs + 300)
+                        except Exception:
+                            up = None
+                        if up is None:
+                            prov_tries[rs] = prov_tries.get(rs, 0) + 1
+                        else:
+                            provisional[rs] = "UP" if up else "DOWN"
                 # Refresh the heavier 1m klines only every --klines-every seconds,
                 # or when we need them fresh: in the entry window, or to settle a
                 # round that has just closed. The spot tick (below) stays live.
@@ -746,7 +779,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     except Exception as e:
                         print(f"# polymarket price error: {e}", file=sys.stderr)
                 events = engine.step(now, bars, spot=spot, entry_prices=entry_prices,
-                                     official=official)
+                                     official=official, provisional=provisional)
                 for ev in events:
                     if args.quiet and ev["type"] == "heartbeat":
                         continue

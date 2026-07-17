@@ -57,6 +57,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     from btc_backtest import Bar, DEFAULT_WEIGHTS, MTFModel
     from btc_history import fetch_history
 
+    # Chainlink Candlestick API (free, same source Polymarket resolves on) for
+    # slot-boundary opens + provisional closes. Activates only when the
+    # CHAINLINK_CANDLE_* env vars are set; otherwise everything works as before.
+    try:
+        import chainlink_feed as cl
+        cl_opens = cl.candle_creds_ok()
+    except Exception:
+        cl = None
+        cl_opens = False
+
+    def cl_open(ts: int):
+        if not cl_opens:
+            return None
+        try:
+            return cl.candle_open_at(args.asset, int(ts))
+        except Exception as e:
+            print(f"# chainlink open error: {e}", file=sys.stderr)
+            return None
+
     symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT", "xrp": "XRPUSDT"}[args.asset]
     # Log precision must scale with price: a $2 asset's decisive moves live in
     # the 4th decimal — rounding them to cents flattens every move to $0.00.
@@ -129,18 +148,24 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(f"# trajectory recorder | provider={args.provider} poll={args.poll}s "
           f"window={args.min_left}-{args.max_left}s left | +indicator signal | "
+          f"chainlink opens: {'ON' if cl_opens else 'off (no CHAINLINK_CANDLE_* creds)'} | "
           f"OBSERVER (no trades)", file=sys.stderr)
 
     cur_round: Optional[int] = None
     round_open: Optional[float] = None
+    open_src: Optional[str] = None    # chainlink | kline | spot
     last_spot: Optional[float] = None
     last_klines = 0.0
     last_slot_retry = 0.0
+    last_cl_retry = 0.0
     last_diag = 0.0
     pm_missing_logged: set = set()
     # Closed rounds awaiting Polymarket's OFFICIAL resolution (the ground-truth
     # label; the spot-feed result can disagree on near-flat rounds).
     pm_pending: dict = {}
+    # Closed rounds awaiting their Chainlink close (the 1m candle AT the end
+    # boundary — same convention the market resolves on; Up iff close >= open).
+    close_pending: dict = {}
     n = 0
     try:
         while args.max_steps is None or n < args.max_steps:
@@ -151,14 +176,30 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if r != cur_round:
                     # Round rolled over -> record the previous round's outcome.
                     if cur_round is not None and round_open is not None and last_spot is not None:
-                        outcome = "UP" if last_spot > round_open else "DOWN"
-                        emit({"type": "result", "round": cur_round, "open": rnd(round_open),
-                              "close": rnd(last_spot), "outcome": outcome, "ts": int(now)})
+                        if cl_opens:
+                            # Chainlink close (open of the candle AT the end
+                            # boundary) usually needs a few seconds to exist —
+                            # grade from the pending queue below.
+                            close_pending[cur_round] = {
+                                "open": round_open, "open_src": open_src,
+                                "spot_close": last_spot, "tries": 0, "next": now + 3.0}
+                        else:
+                            outcome = "UP" if last_spot > round_open else "DOWN"
+                            emit({"type": "result", "round": cur_round, "open": rnd(round_open),
+                                  "close": rnd(last_spot), "outcome": outcome,
+                                  "open_src": open_src, "close_src": "spot", "ts": int(now)})
                         # Queue the round for its OFFICIAL Polymarket resolution
                         # (takes ~a minute to settle on-chain; poll a few times).
                         pm_pending[cur_round] = {"next": now + 45.0, "tries": 0}
                     cur_round = r
-                    round_open = feed.slot_open(r)   # exact 5m-open BTC price
+                    # Open reference priority: Chainlink candle (the source the
+                    # market resolves on) -> exchange kline -> first spot.
+                    round_open = cl_open(r)
+                    open_src = "chainlink" if round_open is not None else None
+                    if round_open is None:
+                        round_open = feed.slot_open(r)   # exact 5m-open kline price
+                        if round_open is not None:
+                            open_src = "kline"
                     last_spot = None
                     if round_open is None:
                         print(f"# slot_open failed for round {r} — will retry / "
@@ -174,12 +215,56 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # the last-spot close used to settle), and keep retrying the
                 # exact kline open every 30s.
                 if round_open is None:
-                    if spot is not None and sec_left >= 285:
+                    if spot is not None and sec_left >= 285 and not cl_opens:
                         round_open = spot
+                        open_src = "spot"
                         print(f"# round {r}: using first spot {spot:.2f} as open", file=sys.stderr)
                     elif now - last_slot_retry >= 30:
                         last_slot_retry = now
                         round_open = feed.slot_open(r)
+                        if round_open is not None:
+                            open_src = "kline"
+                # Prefer the Chainlink open: if the round started on a kline/spot
+                # open (or none), keep trying to UPGRADE during the first minute —
+                # the decision window opens at 240s left, so converge before it.
+                if cl_opens and open_src != "chainlink" and sec_left >= 240 and now - last_cl_retry >= 5:
+                    last_cl_retry = now
+                    v = cl_open(r)
+                    if v is not None:
+                        round_open = v
+                        open_src = "chainlink"
+                    elif round_open is None and spot is not None and sec_left >= 270:
+                        # Do not sit blind while Chainlink lags: take the spot as
+                        # a provisional open; the upgrade above keeps retrying.
+                        round_open = spot
+                        open_src = "spot"
+                # Grade closed rounds against the Chainlink close (the candle AT
+                # the end boundary). Falls back to the last spot after ~30s so a
+                # Candlestick outage never silently drops results.
+                for rs in list(close_pending):
+                    p = close_pending[rs]
+                    if now < p["next"]:
+                        continue
+                    c = cl_open(rs + 300)
+                    if c is not None:
+                        o = p["open"]
+                        emit({"type": "result", "round": rs, "open": rnd(o),
+                              "close": rnd(c),
+                              "outcome": "UP" if c >= o else "DOWN",   # ties -> UP (market rule)
+                              "open_src": p.get("open_src"), "close_src": "chainlink",
+                              "ts": int(now)})
+                        del close_pending[rs]
+                    else:
+                        p["tries"] += 1
+                        p["next"] = now + 5.0
+                        if p["tries"] >= 6:
+                            o, sc = p["open"], p["spot_close"]
+                            emit({"type": "result", "round": rs, "open": rnd(o),
+                                  "close": rnd(sc),
+                                  "outcome": "UP" if sc > o else "DOWN",
+                                  "open_src": p.get("open_src"), "close_src": "spot_fallback",
+                                  "ts": int(now)})
+                            del close_pending[rs]
                 # Fetch official resolutions for recently closed rounds.
                 for rs in list(pm_pending):
                     p = pm_pending[rs]

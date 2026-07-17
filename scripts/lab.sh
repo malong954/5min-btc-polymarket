@@ -28,6 +28,10 @@
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root
+# Gitignored .env carries Chainlink credentials (CHAINLINK_CANDLE_*) etc. —
+# export everything so recorders/traders inherit it. No inline comments on
+# env lines (a stray character there has broken sourcing before).
+if [ -f .env ]; then set -a; . ./.env; set +a; fi
 PY=".venv/bin/python"
 TLOG="out/live.jsonl"        # trader stream (BTC)
 RLOG="out/trajectory.jsonl"  # recorder stream (BTC)

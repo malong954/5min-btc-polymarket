@@ -249,6 +249,33 @@ def test_no_market_price_expires_to_skip():
           any(e["type"] == "shadow_settle" for e in events))
 
 
+def test_settle_precedence_official_chainlink_spot():
+    # settle_outcome order: official first; after official_wait a Chainlink
+    # provisional grade beats the spot fallback; official always wins over both.
+    bars = synth_bars(6000, autocorr=0.5, seed=44)
+    warm = bars[0].ts + 40 * 60
+    rs = bucket_5m(warm) + 300           # a full round after warm-up
+    after_wait = rs + 300 + 200.0        # past official_wait=150
+
+    def run(official, provisional):
+        eng = LivePaperEngine(entry_threshold=0.5)
+        eng.positions[rs] = {"side": "UP", "entry_price": 0.65, "confidence": 0.6,
+                             "opened_ts": rs, "stake_usd": 10.0, "price_source": "polymarket"}
+        evs = eng.step(after_wait, visible_bars(bars, after_wait),
+                       official=official, provisional=provisional)
+        return next((e for e in evs if e["type"] == "settle"), None)
+
+    ev = run(None, {rs: "UP"})
+    check("chainlink provisional used after the wait",
+          ev is not None and ev["settle_source"] == "chainlink" and ev["actual"] == "UP")
+    ev2 = run({rs: "DOWN"}, {rs: "UP"})
+    check("official beats provisional",
+          ev2 is not None and ev2["settle_source"] == "official" and ev2["actual"] == "DOWN")
+    ev3 = run(None, None)
+    check("no provisional -> spot fallback still settles",
+          ev3 is not None and ev3["settle_source"] == "spot_fallback")
+
+
 def test_requote_pays_worse_never_better():
     # Honest fill: entries re-price to the WORSE of decision ask vs fresh ask.
     eng = LivePaperEngine(entry_threshold=0.5)
@@ -294,6 +321,7 @@ def main():
     test_new_indicators_feed_the_model()
     test_no_market_price_retries_then_fills()
     test_no_market_price_expires_to_skip()
+    test_settle_precedence_official_chainlink_spot()
     test_requote_pays_worse_never_better()
     test_format_event_smoke()
     print("\nAll live paper-trading tests passed.")
