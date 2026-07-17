@@ -315,6 +315,13 @@ def build_payload(runtime: Path, mode: str, rng: str) -> dict:
                         "alive": pid_alive(w.get("pid")),
                         "restarts": w.get("restarts"),
                         "started_at": w.get("started_at")})
+    live_meta = load_json(runtime / "live_worker.meta.json") or {}
+    if live_meta.get("pid"):
+        workers.append({"id": "🔴 LIVE " + str(live_meta.get("worker") or ""),
+                        "pid": live_meta["pid"],
+                        "alive": pid_alive(live_meta["pid"]),
+                        "restarts": None,
+                        "started_at": live_meta.get("startedAt")})
 
     guard = load_json(runtime / f"portfolio_{mode}.json") or {}
     open_positions = []

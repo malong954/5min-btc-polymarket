@@ -252,10 +252,10 @@ cmd_golive() {
       kill "$(cat "$LIVE_PIDFILE")" || true
       sleep 2
       if live_running; then kill -9 "$(cat "$LIVE_PIDFILE")" || true; fi
-      rm -f "$LIVE_PIDFILE"
+      rm -f "$LIVE_PIDFILE" "$RUNTIME_DIR/live_worker.meta.json"
       echo "live worker stopped"
     else
-      rm -f "$LIVE_PIDFILE"
+      rm -f "$LIVE_PIDFILE" "$RUNTIME_DIR/live_worker.meta.json"
       echo "live worker already_stopped"
     fi
     return 0
@@ -302,6 +302,14 @@ cmd_golive() {
   )
   sleep 1
   if live_running; then
+    cat >"$RUNTIME_DIR/live_worker.meta.json" <<JSON
+{
+  "pid": $(cat "$LIVE_PIDFILE"),
+  "worker": "btc_${tf}_${strat}",
+  "startedAt": "$(date -u +%FT%TZ)",
+  "log": "$log"
+}
+JSON
     echo "LIVE worker started: $strat on $tf (pid=$(cat "$LIVE_PIDFILE"))"
     echo "  log:       $log"
     echo "  dashboard: switch the mode filter to 'live' to watch it"
@@ -338,6 +346,23 @@ cmd_archive() {
   else
     rmdir "$dest" 2>/dev/null || true
     echo "nothing to archive"
+  fi
+  # a clean paper epoch includes the day counter — reset the PAPER guard only
+  # (the live guard's daily loss memory is never touched by tooling)
+  if [[ -f "$RUNTIME_DIR/portfolio_paper.json" ]]; then
+    "$PY" - "$RUNTIME_DIR/portfolio_paper.json" <<'PYEOF'
+import datetime, json, sys
+p = sys.argv[1]
+try:
+    s = json.load(open(p))
+except Exception:
+    sys.exit(0)
+s["daily"] = {"date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+              "realized_pnl_usd": 0.0, "trades": 0}
+s["open_positions"] = {}
+json.dump(s, open(p, "w"), indent=2)
+print("paper guard daily counter reset for the new epoch")
+PYEOF
   fi
 }
 
