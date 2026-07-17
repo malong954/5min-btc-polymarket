@@ -17,6 +17,7 @@ import json
 import os
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -24,6 +25,88 @@ from urllib.parse import parse_qs, urlparse
 UTC = dt.timezone.utc
 TF_ORDER = ["5m", "15m", "1h", "4h", "1d"]
 ARB_THRESHOLD_DEFAULT = 0.99  # buy both sides when asks sum <= this
+
+# ---------------------------------------------------------------------------
+# Live BTC reference prices: the trading spot feed (Binance/Kraken, same one
+# the workers signal from) plus Chainlink's public on-chain BTC/USD feed on
+# Polygon — the same oracle network these markets resolve against. (Chainlink
+# Data Streams proper is credential-gated; the on-chain aggregate is the
+# public reference.)
+# ---------------------------------------------------------------------------
+
+CHAINLINK_BTC_USD_POLYGON = "0xc907E116054Ad103354f2D350FD2514433D57F6f"
+POLYGON_RPCS = ["https://polygon-rpc.com",
+                "https://polygon-bor-rpc.publicnode.com",
+                "https://polygon.llamarpc.com"]
+_px_lock = threading.Lock()
+_px = {"spot": None, "spot_src": None, "spot_ts": 0.0,
+       "cl": None, "cl_updated": None, "cl_ts": 0.0}
+
+
+def _http_json(url: str, payload: dict | None = None, timeout: float = 3.5):
+    req = urllib.request.Request(
+        url, headers={"Content-Type": "application/json",
+                      "User-Agent": "btc-multi-dashboard"},
+        data=json.dumps(payload).encode() if payload is not None else None)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def _fetch_spot() -> tuple:
+    try:
+        d = _http_json("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+        return float(d["price"]), "binance"
+    except Exception:
+        pass
+    try:
+        d = _http_json("https://api.kraken.com/0/public/Ticker?pair=XBTUSDT")
+        row = next(iter(d.get("result", {}).values()))
+        return float(row["c"][0]), "kraken"
+    except Exception:
+        return None, None
+
+
+def _fetch_chainlink() -> tuple:
+    """latestRoundData() on the BTC/USD aggregator: returns (price, updated_at)."""
+    call = {"jsonrpc": "2.0", "id": 1, "method": "eth_call",
+            "params": [{"to": CHAINLINK_BTC_USD_POLYGON, "data": "0xfeaf968c"},
+                       "latest"]}
+    for rpc in POLYGON_RPCS:
+        try:
+            d = _http_json(rpc, call)
+            hexstr = (d.get("result") or "").removeprefix("0x")
+            if len(hexstr) < 320:
+                continue
+            answer = int(hexstr[64:128], 16)
+            if answer >= 2 ** 255:  # int256 sign (never negative for BTC/USD)
+                continue
+            updated_at = int(hexstr[192:256], 16)
+            return answer / 1e8, updated_at
+        except Exception:
+            continue
+    return None, None
+
+
+def btc_prices() -> dict:
+    now = time.time()
+    with _px_lock:
+        if now - _px["spot_ts"] > 4:
+            _px["spot_ts"] = now
+            spot, src = _fetch_spot()
+            if spot is not None:
+                _px["spot"], _px["spot_src"] = spot, src
+        if now - _px["cl_ts"] > 10:
+            _px["cl_ts"] = now
+            cl, upd = _fetch_chainlink()
+            if cl is not None:
+                _px["cl"], _px["cl_updated"] = cl, upd
+        return {
+            "spot": _px["spot"],
+            "spot_source": _px["spot_src"],
+            "chainlink": _px["cl"],
+            "chainlink_age_s": (round(now - _px["cl_updated"])
+                                if _px["cl_updated"] else None),
+        }
 
 _cache_lock = threading.Lock()
 _report_cache: dict[str, tuple[float, dict]] = {}
@@ -278,6 +361,7 @@ def build_payload(runtime: Path, mode: str, rng: str) -> dict:
         "open_positions": open_positions,
         "daily": guard.get("daily") or {},
         "caps": guard.get("caps") or {},
+        "btc": btc_prices(),
         "kpi": kpi,
         "groups": group_rows,
         "pairs_all": pairs_all,
@@ -398,6 +482,7 @@ button.theme{margin-left:8px;font:inherit;font-size:12px;border:1px solid var(--
   <h1>BTC Multi-Timeframe Bot</h1>
   <span class="chip" id="orchChip"><span class="dot"></span><span id="orchTxt">…</span></span>
   <span class="chip" id="modeChip">mode: …</span>
+  <span class="chip" id="pxChip" style="display:none"></span>
   <span class="live" id="liveTxt">connecting…</span>
   <button class="theme" id="themeBtn" title="theme">auto</button>
 </header>
@@ -569,6 +654,22 @@ function render(d){
   const dotColor = orch.running ? css("--status-good") : css("--status-critical");
   $("orchChip").querySelector(".dot").style.background = dotColor;
   $("modeChip").textContent = "mode: " + d.mode;
+
+  const px = d.btc || {};
+  const chip = $("pxChip");
+  if (px.spot != null || px.chainlink != null){
+    const parts = [];
+    if (px.spot != null)
+      parts.push("BTC $" + Math.round(px.spot).toLocaleString()
+                 + (px.spot_source ? " · " + px.spot_source : ""));
+    if (px.chainlink != null)
+      parts.push("Chainlink $" + Math.round(px.chainlink).toLocaleString()
+                 + (px.chainlink_age_s != null ? " (" + px.chainlink_age_s + "s)" : ""));
+    chip.textContent = parts.join("  |  ");
+    chip.style.display = "";
+  } else {
+    chip.style.display = "none";
+  }
 
   renderKpis(d);
   renderLine(d);
