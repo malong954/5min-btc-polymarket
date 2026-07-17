@@ -80,6 +80,9 @@ Usage:
                   classify species, compare vs our paper results
   multibot_ctl.sh streams                verify Chainlink Data Streams
                   credentials (multi/.env) and discover feed IDs
+  multibot_ctl.sh golive TF STRATEGY [--stake-usd N]   run ONE live worker
+                  (real orders, og .env auth) alongside the paper fleet
+  multibot_ctl.sh golive stop
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -229,6 +232,87 @@ cmd_probe() {
   "$PY" "$SCRIPT_DIR/probe_markets.py" --config "$CONFIG_DEFAULT" "$@"
 }
 
+LIVE_PIDFILE="$RUNTIME_DIR/live_worker.pid"
+
+live_running() {
+  if [[ -f "$LIVE_PIDFILE" ]]; then
+    local pid
+    pid="$(cat "$LIVE_PIDFILE" 2>/dev/null || true)"
+    [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+cmd_golive() {
+  if [[ "${1:-}" == "stop" ]]; then
+    if live_running; then
+      kill "$(cat "$LIVE_PIDFILE")" || true
+      sleep 2
+      if live_running; then kill -9 "$(cat "$LIVE_PIDFILE")" || true; fi
+      rm -f "$LIVE_PIDFILE"
+      echo "live worker stopped"
+    else
+      rm -f "$LIVE_PIDFILE"
+      echo "live worker already_stopped"
+    fi
+    return 0
+  fi
+  local tf="${1:-}" strat="${2:-}"
+  if [[ -z "$tf" || -z "$strat" ]]; then
+    echo "Usage: multibot_ctl.sh golive TF STRATEGY [--stake-usd N]"
+    echo "   eg: multibot_ctl.sh golive 15m impulse --stake-usd 2"
+    exit 2
+  fi
+  shift 2
+  local -a extra=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stake-usd) extra+=("--stake-usd" "$2"); shift 2;;
+      *) echo "Unknown arg: $1"; exit 2;;
+    esac
+  done
+  if live_running; then
+    echo "live worker already_running pid=$(cat "$LIVE_PIDFILE") — golive stop first"
+    return 0
+  fi
+  if [[ ! -x "$REPO/.venv/bin/python" ]]; then
+    echo "live mode needs the trading repo venv at $REPO (BTCMULTI_REPO to override)"
+    exit 1
+  fi
+  check_deps
+  local ts log
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  log="$RUNTIME_DIR/logs/live_${tf}_${strat}.log"
+  mkdir -p "$RUNTIME_DIR/logs"
+  (
+    if [[ -f "$ENV_FILE" ]]; then
+      set -a
+      # shellcheck disable=SC1090
+      source "$ENV_FILE"
+      set +a
+    fi
+    nohup "$PY" "$SCRIPT_DIR/multi_worker.py" \
+      --asset btc --timeframe "$tf" --strategy "$strat" --mode live \
+      --config "$CONFIG_DEFAULT" --repo "$REPO" --runtime-dir "$RUNTIME_DIR" \
+      "${extra[@]}" >>"$log" 2>&1 &
+    echo $! >"$LIVE_PIDFILE"
+  )
+  sleep 1
+  if live_running; then
+    echo "LIVE worker started: $strat on $tf (pid=$(cat "$LIVE_PIDFILE"))"
+    echo "  log:       $log"
+    echo "  dashboard: switch the mode filter to 'live' to watch it"
+    echo "  caps:      live guard (3 pos / \$15 exposure / \$10 daily) is active"
+    if [[ "$strat" == "impulse" || "$strat" == "underdog" ]]; then
+      echo "  NOTE: $strat holds to resolution — WINNING shares must be claimed"
+      echo "  on Polymarket (positions page) until auto-redeem is built."
+    fi
+  else
+    echo "live worker failed_to_start (check $log)"
+    exit 1
+  fi
+}
 DASH_PIDFILE="$RUNTIME_DIR/dashboard.pid"
 
 dash_running() {
@@ -296,6 +380,7 @@ main() {
     settle) check_deps; "$PY" "$SCRIPT_DIR/settle_backfill.py" --reports-dir "$RUNTIME_DIR/reports" "$@" ;;
     cohort) check_deps; "$PY" "$SCRIPT_DIR/cohort_scan.py" --reports-dir "$RUNTIME_DIR/reports" "$@" ;;
     streams) check_deps; "$PY" "$SCRIPT_DIR/streams_probe.py" "$@" ;;
+    golive) cmd_golive "$@" ;;
     *) usage; exit 2 ;;
   esac
 }

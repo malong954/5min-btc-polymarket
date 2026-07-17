@@ -74,11 +74,10 @@ worker:
 # + 1 impulse = 8. If you enable more variants, colors start repeating.
 timeframes:
   5m:
-    # NOTE: the og bot trades this market live. Keep the multi 5m worker in
-    # paper mode (or disable it) when the og bot is running live, so you never
-    # hold duplicate exposure on the same market. As a paper baseline it is
-    # useful for validating that multi results match og results.
-    enabled: true
+    # VERDICT 2026-07-17: favorite retired after 298 trades at -$0.18/trade
+    # (60% wr vs 82% breakeven, fill✓ 57%) — matches the cohort's verdict on
+    # the crowded 5m favorite trade. The og live bot should not size this.
+    enabled: false
     # VERDICT 2026-07-16: underdog disabled after 90 settled trades at 7-83
     # (edge -4.5pts vs breakeven, label-corrected). The mechanical
     # extreme-skew fade does not replicate the whale's edge — their selection
