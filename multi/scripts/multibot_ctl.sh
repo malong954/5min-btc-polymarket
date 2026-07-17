@@ -83,6 +83,8 @@ Usage:
   multibot_ctl.sh golive TF STRATEGY [--stake-usd N]   run ONE live worker
                   (real orders, og .env auth) alongside the paper fleet
   multibot_ctl.sh golive stop
+  multibot_ctl.sh archive                move reports+logs to a timestamped
+                  archive: dashboards/reports restart from a clean epoch
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -313,6 +315,32 @@ cmd_golive() {
     exit 1
   fi
 }
+cmd_archive() {
+  if is_running || live_running; then
+    echo "stop everything first: multibot_ctl.sh stop && multibot_ctl.sh golive stop"
+    exit 1
+  fi
+  local ts dest moved=0
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  dest="$RUNTIME_DIR/archive_$ts"
+  mkdir -p "$dest"
+  local d
+  for d in reports logs; do
+    if [[ -d "$RUNTIME_DIR/$d" ]]; then
+      mv "$RUNTIME_DIR/$d" "$dest/$d"
+      moved=1
+    fi
+  done
+  if [[ "$moved" == 1 ]]; then
+    echo "archived -> $dest"
+    echo "dashboard + report now start from a clean epoch on next start."
+    echo "old data stays queryable:  multibot_ctl.sh report --reports-dir $dest/reports"
+  else
+    rmdir "$dest" 2>/dev/null || true
+    echo "nothing to archive"
+  fi
+}
+
 DASH_PIDFILE="$RUNTIME_DIR/dashboard.pid"
 
 dash_running() {
@@ -381,6 +409,7 @@ main() {
     cohort) check_deps; "$PY" "$SCRIPT_DIR/cohort_scan.py" --reports-dir "$RUNTIME_DIR/reports" "$@" ;;
     streams) check_deps; "$PY" "$SCRIPT_DIR/streams_probe.py" "$@" ;;
     golive) cmd_golive "$@" ;;
+    archive) cmd_archive ;;
     *) usage; exit 2 ;;
   esac
 }
