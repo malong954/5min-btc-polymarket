@@ -474,7 +474,7 @@ def _first_lead_pick(samps: list[dict[str, Any]], win_hi: float = 240.0, win_lo:
             c = s.get("ind_conf")
             if c is None or c < floor:
                 continue
-        return side, float(price)
+        return side, float(price), float(sl)
     return None
 
 
@@ -539,6 +539,109 @@ def _print_combo(rows: list[dict[str, Any]]) -> None:
     print("  Row 0.00 = the plain lead rule (baseline). A floor only matters if it")
     print("  BEATS the baseline with n >= 100 and holds across segments — sweeping")
     print("  floors over one sample WILL find a lucky row; do not trust small n.")
+    print("=" * 74)
+
+
+def exit_policy_analysis(events: list[dict[str, Any]], min_move_signal: float = 10.0,
+                         min_size: float = 0.0, floor: float = 0.0,
+                         lock_bid: float = 0.90, stop_bid: float = 0.30,
+                         official_only: bool = True) -> dict[str, Any]:
+    """Early-exit study on recorded BIDS: for every historical lead-rule entry,
+    compare four exit policies per $1 share (all graded on official outcomes):
+
+      hold  — settle at $1 / $0 (the current rule)
+      sell  — always sell at the bid of the LAST recorded sample (~30s left)
+      lock  — sell at the last bid only if it >= lock_bid (cash the near-certain
+              win, your 'guarantee the win' proposal); otherwise settle
+      stop  — sell at the FIRST moment the bid <= stop_bid (cut the loser);
+              otherwise settle
+      both  — stop-loss first, else lock at the end, else settle
+
+    If late prices are calibrated, no early exit can BEAT hold on EV (you pay
+    the spread) — the question this answers is what the insurance costs, and
+    whether photo-finish/reference-error rounds make it cheap or even free."""
+    samples, results = _split(events)
+    recs: list[dict[str, Any]] = []
+    for r, samps in samples.items():
+        res = results.get(r)
+        if not res or (official_only and not res.get("official")):
+            continue
+        if res.get("outcome") not in ("UP", "DOWN"):
+            continue
+        pick = _first_lead_pick(samps, min_move_signal=min_move_signal,
+                                min_size=min_size, floor=floor)
+        if pick is None:
+            continue
+        side, entry, entry_sl = pick
+        win = side == res["outcome"]
+        hold = 1.0 if win else 0.0
+        bidkey = "up_bid" if side == "UP" else "dn_bid"
+        later = sorted((s for s in samps if (s.get("sec_left") or 0) < entry_sl),
+                       key=lambda s: -(s.get("sec_left") or 0))
+        final = later[-1] if later else None
+        fbid = final.get(bidkey) if final else None
+        fbid = float(fbid) if isinstance(fbid, (int, float)) else None
+        sell = fbid if fbid is not None else hold      # unsellable -> settle
+        lock = fbid if (fbid is not None and fbid >= lock_bid) else hold
+        stop = hold
+        stopped = False
+        for s in later:
+            b = s.get(bidkey)
+            if isinstance(b, (int, float)) and b <= stop_bid:
+                stop = float(b)
+                stopped = True
+                break
+        both = stop if stopped else lock
+        recs.append({"entry": entry, "win": win, "hold": hold, "sell": sell,
+                     "lock": lock, "stop": stop, "both": both,
+                     "final_sl": final.get("sec_left") if final else None})
+    n = len(recs)
+    out: dict[str, Any] = {"n": n, "floor": floor, "lock_bid": lock_bid, "stop_bid": stop_bid}
+    if not n:
+        return out
+    avg_entry = sum(x["entry"] for x in recs) / n
+    out["avg_entry"] = round(avg_entry, 4)
+    fsl = [x["final_sl"] for x in recs if x["final_sl"] is not None]
+    out["avg_exit_sec_left"] = round(sum(fsl) / len(fsl), 1) if fsl else None
+    for pol in ("hold", "sell", "lock", "stop", "both"):
+        proceeds = sum(x[pol] for x in recs) / n
+        out[pol] = {
+            "avg_proceeds": round(proceeds, 4),
+            "ev_pct": round((proceeds - avg_entry) / avg_entry, 4),
+            # a 'bust' loses most of the stake: proceeds under half the entry
+            "busts": sum(1 for x in recs if x[pol] < 0.5 * x["entry"]),
+        }
+    return out
+
+
+def _print_exit(res: dict[str, Any]) -> None:
+    print("=" * 74)
+    print(f"EXIT-POLICY STUDY  (lead entries, conf >= {res.get('floor', 0):g}; "
+          f"sell at recorded BIDS; official labels)")
+    print("=" * 74)
+    if not res.get("n"):
+        print("  no qualifying entries with bid data yet — needs samples recorded")
+        print("  after bid capture was enabled.")
+        print("=" * 74)
+        return
+    exit_sl = res.get("avg_exit_sec_left")
+    print(f"  entries: {res['n']}   avg entry: {res['avg_entry']:.3f}   "
+          f"last sellable sample: ~{exit_sl:.0f}s left" if exit_sl else f"  entries: {res['n']}")
+    print(f"  {'policy':<26}{'avg proceeds':<14}{'EV/trade':<11}{'busts'}")
+    labels = {
+        "hold": "hold to settlement",
+        "sell": "sell at ~30s always",
+        "lock": f"lock: sell if bid >= {res['lock_bid']:.2f}",
+        "stop": f"stop: sell if bid <= {res['stop_bid']:.2f}",
+        "both": "stop-loss + lock",
+    }
+    for pol in ("hold", "sell", "lock", "stop", "both"):
+        p = res[pol]
+        print(f"  {labels[pol]:<26}{p['avg_proceeds']:<14.3f}{p['ev_pct']:<+11.1%}{p['busts']}")
+    print("-" * 74)
+    print("  busts = trades losing over half the stake. If an exit policy has FAR")
+    print("  fewer busts for <= ~1-2% EV, that is cheap insurance (and a maker exit")
+    print("  would pay no fee); if EV drops more, the market charges too much for it.")
     print("=" * 74)
 
 
@@ -1063,6 +1166,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--disagreements", action="store_true",
                     help="Anatomy of spot-vs-official label disagreements, classified by the "
                          "order book: fixable reference errors vs irreducible photo finishes")
+    ap.add_argument("--exit", action="store_true", dest="exit_study",
+                    help="Exit-policy study on recorded bids: hold vs sell-at-30s vs lock-the-win "
+                         "vs stop-loss, for lead entries at conf >= --min-conf")
+    ap.add_argument("--lock-bid", type=float, default=0.90,
+                    help="With --exit: sell early when our side's bid reaches this (default 0.90)")
+    ap.add_argument("--stop-bid", type=float, default=0.30,
+                    help="With --exit: cut the position when our side's bid falls to this (default 0.30)")
     ap.add_argument("--split-halves", action="store_true",
                     help="With --combo: run separately on the FIRST and SECOND half of official-graded "
                          "rounds (by time) — a same-log stand-in for the cross-segment check")
@@ -1115,6 +1225,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(json.dumps(res, indent=2))
             return 0
         _print_disagreements(res)
+        return 0
+    if args.exit_study:
+        res = exit_policy_analysis(events, min_move_signal=args.combo_min_move,
+                                   min_size=args.min_size, floor=args.min_conf or 0.0,
+                                   lock_bid=args.lock_bid, stop_bid=args.stop_bid)
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        _print_exit(res)
         return 0
     if args.combo:
         if args.split_halves:

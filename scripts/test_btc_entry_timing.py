@@ -302,6 +302,41 @@ def test_combo_min_price_filters_book_disagreement():
     check("guard keeps the book-agreement winner", abs(guarded[0.0]["winrate"] - 1.0) < 1e-9)
 
 
+def test_exit_policies_priced_from_bids():
+    from btc_entry_timing import exit_policy_analysis
+    # Three UP entries at 0.65 (move +40 in the window):
+    #  A: winner, final bid 0.97  -> lock cashes 0.97, hold gets 1.0
+    #  B: photo-finish loser, final bid 0.50 -> sell salvages 0.50, hold/lock get 0
+    #  C: crashed loser: bid hits 0.25 mid-round, 0.02 at the end
+    def rnd(r, bids, outcome):
+        evs = [{"type": "sample", "round": r, "sec_left": 200, "move": 40.0, "spot": 62040,
+                "up_ask": 0.65, "dn_ask": 0.37, "up_sz": 500, "dn_sz": 500,
+                "up_bid": 0.60, "dn_bid": 0.33, "ind_conf": 0.5, "ind_dir": "UP"}]
+        for sl, b in bids:
+            evs.append({"type": "sample", "round": r, "sec_left": sl, "move": 40.0,
+                        "spot": 62040, "up_ask": min(b + 0.02, 0.99), "dn_ask": 0.99 - b,
+                        "up_sz": 500, "dn_sz": 500, "up_bid": b, "dn_bid": 0.97 - b,
+                        "ind_conf": 0.5, "ind_dir": "UP"})
+        evs.append({"type": "result", "round": r, "open": 62000, "close": 62040, "outcome": outcome})
+        evs.append({"type": "result_pm", "round": r, "outcome": outcome})
+        return evs
+    evs = (rnd(1000, [(100, 0.85), (35, 0.97)], "UP")
+           + rnd(2000, [(100, 0.60), (35, 0.50)], "DOWN")
+           + rnd(3000, [(100, 0.25), (35, 0.02)], "DOWN"))
+    res = exit_policy_analysis(evs, min_move_signal=10.0)
+    check("three entries simulated", res["n"] == 3)
+    check("hold = settlement outcomes", abs(res["hold"]["avg_proceeds"] - 1.0 / 3) < 1e-3)
+    check("sell uses the final bids", abs(res["sell"]["avg_proceeds"] - (0.97 + 0.50 + 0.02) / 3) < 1e-3)
+    check("lock cashes only the near-certain win",
+          abs(res["lock"]["avg_proceeds"] - 0.97 / 3) < 1e-3)
+    check("stop cuts the crashed loser at 0.25",
+          abs(res["stop"]["avg_proceeds"] - (1.0 + 0.0 + 0.25) / 3) < 1e-3)
+    check("combined applies stop first then lock",
+          abs(res["both"]["avg_proceeds"] - (0.97 + 0.0 + 0.25) / 3) < 1e-3)
+    check("hold busts both losers", res["hold"]["busts"] == 2)
+    check("sell salvages the photo finish", res["sell"]["busts"] == 1)
+
+
 def test_disagreement_anatomy_classifies_by_book():
     from btc_entry_timing import disagreement_analysis
     # Round A: spot says UP, official says DOWN, and the book priced DOWN at
@@ -384,6 +419,7 @@ def main():
     test_auto_min_move_scales_with_price()
     test_session_analysis_buckets_and_lead()
     test_combo_min_price_filters_book_disagreement()
+    test_exit_policies_priced_from_bids()
     test_disagreement_anatomy_classifies_by_book()
     test_calibration_maps_conf_to_winrate()
     test_empty_and_missing()
