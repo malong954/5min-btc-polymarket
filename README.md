@@ -16,6 +16,20 @@ This skill is aligned with a short-horizon momentum strategy:
 
 This is a momentum-following approach, not a reversal strategy.
 
+### Registry-informed tuning (2026-07)
+Analysis of ~1,500 tracked BTC up/down accounts (107k+ plays) led to three changes:
+
+1. **Entry threshold lowered to 0.65** (was 0.70). Trade-weighted, the 0.65-0.70
+   entry band showed the best ROI (~+16% per trade vs ~+8% above 0.70), proven at
+   volume by the top-performing accounts.
+2. **Ride-winner rule**: at the time-exit checkpoint, if the side price is >= 0.90
+   the position is held to resolution instead of sold (`--ride-winner-price`,
+   default 0.90, 0 disables). Alpha in these markets realizes at resolution;
+   selling winners 20 seconds early forfeits the final segment and pays spread.
+   The stop-loss stays armed the whole way.
+3. **15m market support** (`--window 15m`): the 15m cohort shows ~50% higher
+   median alpha per trade than 5m and is less latency-crowded.
+
 ## Repository Structure
 - `SKILL.md` — skill definition and operating rules
 - `config/` — profiles and risk parameters

@@ -33,6 +33,12 @@ shared_rules:
     monitor_continuous: true
     min_entry_seconds_left: 60
     exit_before_sec: 20
+    ride_winner_price: 0.90
+    ride_winner_note: "At the time-exit checkpoint, hold to resolution instead of selling when side price >= 0.90; stop-loss stays armed. Registry analysis: alpha realizes at resolution, early exit forfeits it."
+  market_windows:
+    supported: ["5m", "15m"]
+    default: "5m"
+    note: "15m cohort in the account registry shows ~50% higher median alpha per trade than 5m (less latency-crowded)."
 
 profiles:
   conservative:
@@ -40,7 +46,7 @@ profiles:
     signal:
       trigger_source: "clob_best_ask"
       direction_rule: "follow_stronger_side_over_threshold"
-      threshold_price: 0.70
+      threshold_price: 0.65
     sizing:
       stake_mode: "fixed_or_cap"
       stake_usd: 5
@@ -64,7 +70,7 @@ profiles:
     signal:
       trigger_source: "clob_best_ask"
       direction_rule: "follow_stronger_side_over_threshold"
-      threshold_price: 0.70
+      threshold_price: 0.65
     sizing:
       stake_mode: "fixed_or_cap"
       stake_usd: 5
@@ -93,9 +99,11 @@ runner_mapping:
     - "--min-entry-seconds-left"
     - "--entry-timeout-min"
     - "--poll-sec"
+    - "--window"
+    - "--ride-winner-price"
     - "--execute"
-  example_conservative_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --threshold 0.70 --stake-usd 4 --stop-loss-pct 0.25 --exit-before-sec 20 --min-entry-seconds-left 60 --entry-timeout-min 60 --poll-sec 5 --execute"
-  example_aggressive_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --threshold 0.70 --stake-usd 6 --stop-loss-pct 0.30 --exit-before-sec 20 --min-entry-seconds-left 60 --entry-timeout-min 60 --poll-sec 5 --execute"
+  example_conservative_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --threshold 0.65 --stake-usd 4 --stop-loss-pct 0.25 --exit-before-sec 20 --min-entry-seconds-left 60 --entry-timeout-min 60 --poll-sec 5 --execute"
+  example_aggressive_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --threshold 0.65 --stake-usd 6 --stop-loss-pct 0.30 --exit-before-sec 20 --min-entry-seconds-left 60 --entry-timeout-min 60 --poll-sec 5 --execute"
 
 notes:
   - "Current 5m runner uses threshold/side-strength logic; impulse filter integration can be extended at strategy layer."

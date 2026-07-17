@@ -46,8 +46,11 @@ def parse_json_objects(text: str) -> list[dict[str, Any]]:
     return out
 
 
-def bucket_5m(ts: int) -> int:
-    return ts - (ts % 300)
+WINDOW_SLOT_SEC = {'5m': 300, '15m': 900}
+
+
+def bucket_slot(ts: int, slot_sec: int) -> int:
+    return ts - (ts % slot_sec)
 
 
 def fetch_event(slug: str) -> Optional[dict[str, Any]]:
@@ -57,11 +60,12 @@ def fetch_event(slug: str) -> Optional[dict[str, Any]]:
     return arr[0] if arr else None
 
 
-def resolve_active_current_5m_market() -> Optional[dict[str, Any]]:
-    """Return active BTC 5m market for the current slot only."""
+def resolve_active_current_market(window: str = '5m') -> Optional[dict[str, Any]]:
+    """Return active BTC up/down market for the current slot only."""
+    slot_sec = WINDOW_SLOT_SEC[window]
     now = int(time.time())
-    cur = bucket_5m(now)
-    slug = f'btc-updown-5m-{cur}'
+    cur = bucket_slot(now, slot_sec)
+    slug = f'btc-updown-{window}-{cur}'
 
     try:
         ev = fetch_event(slug)
@@ -283,22 +287,24 @@ def get_side_price_from_slug(slug: str, side: str) -> Optional[float]:
 
 PROFILES: dict[str, dict[str, Any]] = {
     'conservative': {
-        'threshold': 0.70,
+        'threshold': 0.65,
         'stake_usd': 5.0,
         'stop_loss_pct': 0.25,
         'exit_before_sec': 20,
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        'ride_winner_price': 0.90,
     },
     'aggressive': {
-        'threshold': 0.70,
+        'threshold': 0.65,
         'stake_usd': 5.0,
         'stop_loss_pct': 0.30,
         'exit_before_sec': 20,
         'min_entry_seconds_left': 60,
         'entry_timeout_min': 60,
         'poll_sec': 5.0,
+        'ride_winner_price': 0.90,
     },
 }
 
@@ -319,6 +325,8 @@ def apply_profile(args: argparse.Namespace) -> argparse.Namespace:
         args.entry_timeout_min = int(prof['entry_timeout_min'])
     if args.poll_sec is None:
         args.poll_sec = float(prof['poll_sec'])
+    if args.ride_winner_price is None:
+        args.ride_winner_price = float(prof['ride_winner_price'])
     return args
 
 
@@ -333,7 +341,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--repo', default=default_repo_path())
     ap.add_argument('--profile', choices=['conservative', 'aggressive'], default='conservative')
+    ap.add_argument('--window', choices=['5m', '15m'], default='5m', help='Market interval: btc-updown-5m or btc-updown-15m slots')
     ap.add_argument('--threshold', type=float, default=None)
+    ap.add_argument('--ride-winner-price', type=float, default=None, help='At the time-exit checkpoint, hold to resolution instead of selling if side price >= this (0 disables)')
     ap.add_argument('--stake-usd', type=float, default=None)
     ap.add_argument('--stop-loss-pct', type=float, default=None, help='0.30 means -30%% from entry price')
     ap.add_argument('--exit-before-sec', type=int, default=None)
@@ -349,7 +359,9 @@ def main():
         'started_at': ts_utc(),
         'params': {
             'profile': args.profile,
+            'window': args.window,
             'threshold': args.threshold,
+            'ride_winner_price': args.ride_winner_price,
             'stake_usd': args.stake_usd,
             'stop_loss_pct': args.stop_loss_pct,
             'exit_before_sec': args.exit_before_sec,
@@ -368,7 +380,7 @@ def main():
 
     while time.time() < deadline:
         try:
-            m = resolve_active_current_5m_market()
+            m = resolve_active_current_market(args.window)
             if not m:
                 report['attempts'].append({'ts': ts_utc(), 'status': 'heartbeat_no_current_market'})
                 time.sleep(args.poll_sec)
@@ -487,16 +499,19 @@ def main():
     try:
         end_ts = dt.datetime.fromisoformat(opened['market_end_iso'].replace('Z', '+00:00')).timestamp()
     except Exception:
-        end_ts = time.time() + 300
+        end_ts = time.time() + WINDOW_SLOT_SEC[args.window]
 
     sl_price = opened['entry_price'] * (1.0 - args.stop_loss_pct)
     report['stop_loss_price'] = sl_price
 
     close_reason = None
+    held_to_resolution = False
+    riding = False
     while True:
         now = time.time()
-        if now >= (end_ts - args.exit_before_sec):
-            close_reason = f'time_exit_{args.exit_before_sec}s_before_end'
+        if now >= end_ts:
+            close_reason = 'held_to_resolution'
+            held_to_resolution = True
             break
 
         side_px = get_side_price_from_slug(opened['market_slug'], opened['side'])
@@ -505,7 +520,32 @@ def main():
         if side_px is not None and side_px <= sl_price:
             close_reason = f"stop_loss_{int(args.stop_loss_pct * 100)}pct"
             break
+
+        if now >= (end_ts - args.exit_before_sec):
+            # Ride-winner rule: alpha realizes at resolution, so when the side is
+            # near-certain at the exit checkpoint, hold instead of selling early.
+            # Stop-loss above stays armed the whole way.
+            if args.ride_winner_price > 0 and side_px is not None and side_px >= args.ride_winner_price:
+                if not riding:
+                    riding = True
+                    report['riding_winner_since'] = ts_utc()
+            else:
+                close_reason = 'ride_abort_price_drop' if riding else f'time_exit_{args.exit_before_sec}s_before_end'
+                break
         time.sleep(args.poll_sec)
+
+    if held_to_resolution:
+        report['closed'] = {
+            'close_reason': close_reason,
+            'closed_at': ts_utc(),
+            'held_to_resolution': True,
+            'note': 'no sell order placed; winning shares redeem to USDC after market resolution',
+        }
+        report['expected_payout_usdc_if_won'] = round(opened['shares'], 6)
+        report['finished_at'] = ts_utc()
+        report['result'] = 'done'
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
 
     close_debug: list[dict[str, Any]] = []
     close_obj: dict[str, Any] = {}

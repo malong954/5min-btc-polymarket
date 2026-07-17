@@ -27,7 +27,7 @@ def canonical_script() -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--threshold", type=float, default=0.70)
+    ap.add_argument("--threshold", type=float, default=0.65)
     ap.add_argument("--stake-usd", type=float, default=4.0)
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--repo", default=default_repo())
