@@ -461,30 +461,44 @@ def candles_history(symbol: str, resolution: str, frm: int, to: int,
 
 
 def _candle_first_open(j: dict, min_ts: int) -> Optional[float]:
-    """Parse either columnar ({'t':[...],'o':[...]}) or row-list
-    ({'candles':[{'t':..,'o':..}]}) shapes; return the open of the first
-    candle at/after min_ts."""
+    """Parse candle responses in any of the observed shapes — columnar
+    ({'t':[...],'o':[...]}), dict rows ({'candles':[{'t':..,'o':..}]}), or
+    the live API's array rows ({'candles':[[t,o,h,l,c,v],...]}, NEWEST
+    first, prices in 18-decimal fixed point). Returns the open of the
+    earliest candle at/after min_ts, else the latest available."""
     ts_list, opens = None, None
     if isinstance(j, dict):
         if isinstance(j.get("t"), list) and isinstance(j.get("o"), list):
             ts_list, opens = j["t"], j["o"]
         else:
             rows = j.get("candles") or j.get("rows") or j.get("data")
-            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
-                ts_list = [r.get("t") or r.get("time") or r.get("timestamp") for r in rows]
-                opens = [r.get("o") or r.get("open") for r in rows]
+            if isinstance(rows, list) and rows:
+                if isinstance(rows[0], dict):
+                    ts_list = [r.get("t") or r.get("time") or r.get("timestamp") for r in rows]
+                    opens = [r.get("o") or r.get("open") for r in rows]
+                elif isinstance(rows[0], (list, tuple)) and len(rows[0]) >= 2:
+                    ts_list = [r[0] for r in rows]
+                    opens = [r[1] for r in rows]
     if not ts_list or not opens:
         return None
+
+    def scale(v: float) -> float:
+        # 18-decimal fixed point when raw (no real spot quote exceeds 1e9)
+        return v / 1e18 if abs(v) > 1e9 else v
+
+    cands = []
     for t, o in zip(ts_list, opens):
         try:
-            if o is not None and float(t) >= min_ts:
-                return float(o)
+            if o is not None:
+                cands.append((float(t), scale(float(o))))
         except (TypeError, ValueError):
             continue
-    try:  # fall back to the first parseable open
-        return float(next(o for o in opens if o is not None))
-    except (StopIteration, TypeError, ValueError):
+    if not cands:
         return None
+    after = [c for c in cands if c[0] >= min_ts]
+    if after:
+        return min(after, key=lambda c: c[0])[1]
+    return max(cands, key=lambda c: c[0])[1]
 
 
 def candle_open_at(asset: str, ts: int) -> Optional[float]:
