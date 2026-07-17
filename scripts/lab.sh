@@ -208,6 +208,8 @@ case "${1:-start}" in
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --exit --min-size 100 --min-conf "$CONF_BTC" || true
       echo
+      "$PY" scripts/btc_executor_check.py --log "$RLOG" --trader-log "$TLOG" --floor "$CONF_BTC" --min-size 100 || true
+      echo
       for v in vel_15s vel_30s; do
         "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side "$v"       || true
         echo

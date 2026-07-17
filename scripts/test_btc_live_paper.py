@@ -249,6 +249,41 @@ def test_no_market_price_expires_to_skip():
           any(e["type"] == "shadow_settle" for e in events))
 
 
+def test_lead_persistence_gate():
+    # The full lead setup must HOLD lead_persist seconds before entering: a
+    # single armed poll (a 2s threshold-graze) must not fire; the same setup
+    # sustained past the persistence window must. Audited motivation: grazes
+    # ran 60% winrate / -15.8% EV vs 75% / +9.0% on rule-matched rounds.
+    bars = synth_bars(6000, autocorr=0.5, seed=52)
+    warm = bars[0].ts + 40 * 60
+    prices = {"UP": 0.65, "DOWN": 0.37, "UP_size": 500, "DOWN_size": 500}
+
+    def mk(persist):
+        return LivePaperEngine(entry_rule="lead", lead_min_move=0.0001,
+                               lead_window=(240.0, 180.0), lead_persist=persist)
+
+    target = None
+    for k in range(60):
+        rs = bucket_5m(warm) + 300 * (k + 1)
+        t0 = rs + 70                      # 230s left — inside the lead window
+        evs = mk(0.0).step(t0, visible_bars(bars, t0), entry_prices=prices)
+        if any(e["type"] == "entry" for e in evs):
+            target = t0
+            break
+    check("legacy persist=0 enters on the first armed poll", target is not None)
+    t0 = target
+    eng = mk(5.0)
+    e1 = eng.step(t0, visible_bars(bars, t0), entry_prices=prices)
+    check("persist: first armed poll does not enter",
+          not any(e["type"] == "entry" for e in e1))
+    e2 = eng.step(t0 + 2, visible_bars(bars, t0 + 2), entry_prices=prices)
+    check("persist: a 2s graze still does not enter",
+          not any(e["type"] == "entry" for e in e2))
+    e3 = eng.step(t0 + 6, visible_bars(bars, t0 + 6), entry_prices=prices)
+    check("persist: setup sustained past 5s enters",
+          any(e["type"] == "entry" for e in e3))
+
+
 def test_settle_precedence_official_chainlink_spot():
     # settle_outcome order: official first; after official_wait a Chainlink
     # provisional grade beats the spot fallback; official always wins over both.
@@ -321,6 +356,7 @@ def main():
     test_new_indicators_feed_the_model()
     test_no_market_price_retries_then_fills()
     test_no_market_price_expires_to_skip()
+    test_lead_persistence_gate()
     test_settle_precedence_official_chainlink_spot()
     test_requote_pays_worse_never_better()
     test_format_event_smoke()

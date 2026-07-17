@@ -121,9 +121,18 @@ class LivePaperEngine:
         lead_max_price: float = 0.72,
         lead_min_move: float = 10.0,
         lead_min_conf: float = 0.0,
+        lead_persist: float = 5.0,
         official_wait: float = 150.0,
         asset: str = "BTC",
     ):
+        # Lead rule: the FULL setup must hold continuously this many seconds
+        # before entering. The measured combo table is built from 5s samples,
+        # so it only counts rounds where the setup survives a sampling
+        # interval; the 2s-polling executor was also buying momentary
+        # threshold-grazes — audited at 60% winrate / -15.8% EV (vs 75% /
+        # +9.0% on rule-matched rounds). Persistence makes the executor
+        # trade the rule that was actually validated. 0 = legacy fire-at-once.
+        self.lead_persist = lead_persist
         # Which market this engine trades ("BTC"/"ETH"); stamped on every
         # emitted event so a merged multi-market dashboard can tell them apart.
         self.asset = asset
@@ -480,6 +489,19 @@ class LivePaperEngine:
                     # stake to win pennies. Keep watching; asks can dip back.
                     self.watch["capped"] = True
                     armed = False
+                if self.entry_rule == "lead" and self.lead_persist > 0:
+                    # Sustained-arming gate: a single armed poll is not enough —
+                    # the setup must still be armed lead_persist seconds after it
+                    # first appeared. Any unarmed poll resets the clock.
+                    if armed:
+                        since = self.watch.get("armed_since")
+                        if since is None:
+                            self.watch["armed_since"] = now
+                            armed = False
+                        elif now - since < self.lead_persist:
+                            armed = False
+                    else:
+                        self.watch.pop("armed_since", None)
                 if armed:
                     reserved = sum(p.get("stake_usd", 0.0)
                                    for r0, p in self.positions.items() if r0 not in self.settled)
@@ -606,6 +628,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "open (default is price-scaled per asset: BTC 10, ETH 0.35)")
     ap.add_argument("--lead-min-conf", type=float, default=0.0,
                     help="lead rule: also require confidence >= this (the lead+confidence combo; 0 = off)")
+    ap.add_argument("--lead-persist", type=float, default=5.0,
+                    help="lead rule: the FULL setup must hold this many seconds before entering "
+                         "(matches the 5s-sampled validation; audited: momentary grazes lose). 0 = off")
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
     ap.add_argument("--max-entry-price", type=float, default=0.97,
                     help="Never buy above this ask — near $1.00 you risk the whole stake to win pennies")
@@ -673,7 +698,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_entry_price=args.max_entry_price,
         lead_window=(args.lead_hi, args.lead_lo),
         lead_max_price=args.lead_max_price, lead_min_move=args.lead_min_move,
-        lead_min_conf=args.lead_min_conf,
+        lead_min_conf=args.lead_min_conf, lead_persist=args.lead_persist,
         asset=asset.upper(),
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
@@ -691,7 +716,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "edge_margin": args.edge_margin, "max_entry_price": args.max_entry_price,
         "lead_hi": args.lead_hi, "lead_lo": args.lead_lo,
         "lead_max_price": args.lead_max_price, "lead_min_move": args.lead_min_move,
-        "lead_min_conf": args.lead_min_conf,
+        "lead_min_conf": args.lead_min_conf, "lead_persist": args.lead_persist,
         "sizing": args.sizing, "stake_usd": args.stake_usd,
         "bankroll": args.bankroll, "price_source": args.entry_price_source,
         "provider": args.provider,
