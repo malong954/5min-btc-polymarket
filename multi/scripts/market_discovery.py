@@ -372,10 +372,83 @@ def streams_at(asset: str, ts: int) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Chainlink Candlestick API (Bearer-auth, separate host from Streams):
+# OHLC history at 1m resolution. Used for slot-boundary OPEN prices —
+# resolution-network-sourced data for settlement without the mainnet Streams
+# subscription. Set CHAINLINK_CANDLE_API_KEY (+ optional CHAINLINK_CANDLE_BASE
+# once the probe identifies the working host).
+# ---------------------------------------------------------------------------
+
+CANDLE_BASE_MAINNET = "https://priceapi.dataengine.chain.link"
+CANDLE_BASE_TESTNET = "https://priceapi.testnet-dataengine.chain.link"
+CANDLE_SYMBOLS = {"btc": "BTCUSD", "eth": "ETHUSD", "sol": "SOLUSD",
+                  "xrp": "XRPUSD", "doge": "DOGEUSD"}
+
+
+def candle_api_key() -> Optional[str]:
+    return os.getenv("CHAINLINK_CANDLE_API_KEY") or os.getenv("CHAINLINK_STREAMS_API_KEY")
+
+
+def candle_base() -> Optional[str]:
+    return os.getenv("CHAINLINK_CANDLE_BASE")
+
+
+def candles_history(symbol: str, resolution: str, frm: int, to: int,
+                    base: Optional[str] = None,
+                    api_key: Optional[str] = None) -> dict:
+    key = api_key or candle_api_key()
+    if not key:
+        raise RuntimeError("no candlestick API key configured")
+    b = base or candle_base() or CANDLE_BASE_TESTNET
+    r = requests.get(f"{b}/api/v1/history/rows",
+                     params={"symbol": symbol, "resolution": resolution,
+                             "from": int(frm), "to": int(to)},
+                     headers={"Authorization": f"Bearer {key}"}, timeout=8)
+    r.raise_for_status()
+    return r.json()
+
+
+def _candle_first_open(j: dict, min_ts: int) -> Optional[float]:
+    """Parse either columnar ({'t':[...],'o':[...]}) or row-list
+    ({'candles':[{'t':..,'o':..}]}) shapes; return the open of the first
+    candle at/after min_ts."""
+    ts_list, opens = None, None
+    if isinstance(j, dict):
+        if isinstance(j.get("t"), list) and isinstance(j.get("o"), list):
+            ts_list, opens = j["t"], j["o"]
+        else:
+            rows = j.get("candles") or j.get("rows") or j.get("data")
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                ts_list = [r.get("t") or r.get("time") or r.get("timestamp") for r in rows]
+                opens = [r.get("o") or r.get("open") for r in rows]
+    if not ts_list or not opens:
+        return None
+    for t, o in zip(ts_list, opens):
+        try:
+            if o is not None and float(t) >= min_ts:
+                return float(o)
+        except (TypeError, ValueError):
+            continue
+    try:  # fall back to the first parseable open
+        return float(next(o for o in opens if o is not None))
+    except (StopIteration, TypeError, ValueError):
+        return None
+
+
+def candle_open_at(asset: str, ts: int) -> Optional[float]:
+    sym = CANDLE_SYMBOLS.get(asset.lower())
+    if not sym or not (candle_base() and candle_api_key()):
+        return None
+    j = candles_history(sym, "1m", int(ts), int(ts) + 120)
+    return _candle_first_open(j, int(ts))
+
+
+# ---------------------------------------------------------------------------
 # Spot price feed (for move-size filters). Chainlink Streams (when creds are
-# configured) is the markets' actual resolution feed; Binance/Kraken are the
-# no-credential fallbacks. Both open-price and live-price come from the SAME
-# provider so the basis cancels.
+# configured) is the markets' actual resolution feed; the Candlestick API
+# serves slot-boundary opens; Binance/Kraken are the no-credential fallbacks.
+# Both open-price and live-price come from the SAME provider so the basis
+# cancels.
 # ---------------------------------------------------------------------------
 
 SPOT_SYMBOLS = {
@@ -433,6 +506,11 @@ def _spot_call(asset: str, kind: str, ts: int = 0) -> Optional[float]:
         order += [p for p in ("chainlink",) if p not in order]
     order += [p for p in ("binance", "kraken") if p not in order]
     syms = SPOT_SYMBOLS.get(a)
+    # candle API serves boundary opens only (1m history) — try it for 'open'
+    # right after Streams, before the exchange fallbacks
+    if kind == "open" and candle_base() and candle_api_key():
+        idx = 1 if "chainlink" in order else 0
+        order.insert(idx, "cl_candles")
     for prov in order:
         try:
             if prov == "chainlink":
@@ -440,6 +518,13 @@ def _spot_call(asset: str, kind: str, ts: int = 0) -> Optional[float]:
                 if rep is None or not rep.get("price"):
                     continue
                 v = float(rep["price"])
+            elif prov == "cl_candles":
+                if kind != "open":
+                    continue
+                v = candle_open_at(a, ts)
+                if v is None:
+                    continue
+                return v  # not cached as the sticky provider: opens-only
             elif not syms:
                 continue
             elif kind == "open":

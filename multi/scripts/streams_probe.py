@@ -84,42 +84,54 @@ def check_base(base: str, feed: str | None) -> dict:
     return out
 
 
-def discover_candles(bases: list[str], feed: str | None) -> None:
-    print("\n=== CANDLESTICK API DISCOVERY ===")
-    candle_key = os.getenv("CHAINLINK_CANDLE_API_KEY")
-    keys = [("streams-key", None)]
-    if candle_key:
-        keys.append(("candle-key", candle_key))
-    else:
-        print("(set CHAINLINK_CANDLE_API_KEY in multi/.env to also try that key)")
-    now = int(time.time())
-    paths = ["/api/v1/candles", "/api/v1/candlesticks", "/api/v1/ohlc"]
-    params_sets = [
-        {"feedID": feed or "", "interval": "1m", "from": now - 3600, "to": now},
-        {"feedID": feed or "", "resolution": "60", "startTimestamp": now - 3600,
-         "endTimestamp": now},
-    ]
+def discover_candles(_bases, _feed) -> None:
+    """Probe the documented Candlestick API (separate priceapi.* host,
+    Bearer auth): GET /api/v1/history/rows?symbol=BTCUSD&resolution=1m."""
     import requests
-    for base in bases:
-        md.STREAMS_BASE = base
-        for path in paths:
-            for kname, key in keys:
-                for i, ps in enumerate(params_sets):
-                    try:
-                        j = md.streams_get(path, ps, api_key=key)
-                        print(f"✔ {base}{path} [{kname} p{i}] -> 200 "
-                              f"{json.dumps(j)[:160]}")
-                        break
-                    except requests.HTTPError as e:
-                        code = e.response.status_code if e.response is not None else "?"
-                        if code == 404 and i == 0:
-                            continue  # try next param shape only on non-404s
-                        print(f"✘ {base}{path} [{kname} p{i}] -> {http_err(e)}")
-                        break
-                    except Exception as e:
-                        print(f"✘ {base}{path} [{kname}] -> {str(e)[:120]}")
-                        break
-    print("Paste this section back and the working endpoint gets wired in.")
+    print("\n=== CANDLESTICK API (priceapi hosts, Bearer auth) ===")
+    keys = []
+    if os.getenv("CHAINLINK_CANDLE_API_KEY"):
+        keys.append(("candle-key", os.environ["CHAINLINK_CANDLE_API_KEY"]))
+    if md.streams_creds():
+        keys.append(("streams-key", md.streams_creds()[0]))
+    if not keys:
+        print("no keys configured")
+        return
+    now = int(time.time())
+    working = None
+    for base in (md.CANDLE_BASE_MAINNET, md.CANDLE_BASE_TESTNET):
+        for kname, key in keys:
+            try:
+                j = md.candles_history("BTCUSD", "1m", now - 300, now,
+                                       base=base, api_key=key)
+                o = md._candle_first_open(j, now - 300)
+                print(f"✔ {base} [{kname}] -> 200, last-5min BTC candle open: "
+                      f"{('$%s' % f'{o:,.2f}') if o else 'shape? '}"
+                      f"{'' if o else json.dumps(j)[:200]}")
+                working = working or (base, kname)
+            except requests.HTTPError as e:
+                print(f"✘ {base} [{kname}] -> {http_err(e)}")
+            except Exception as e:
+                print(f"✘ {base} [{kname}] -> {str(e)[:140]}")
+        # quick reconnaissance for the 1s live endpoint
+        for path in ("/api/v1/live/rows", "/api/v1/latest", "/api/v1/price"):
+            try:
+                r = requests.get(base + path, params={"symbol": "BTCUSD"},
+                                 headers={"Authorization": f"Bearer {keys[0][1]}"},
+                                 timeout=6)
+                print(f"  live-guess {path} -> {r.status_code} {r.text[:120]}")
+            except Exception as e:
+                print(f"  live-guess {path} -> {str(e)[:80]}")
+    if working:
+        base, kname = working
+        print("\nCandles WORK — add to multi/.env:")
+        print(f"  CHAINLINK_CANDLE_BASE={base}")
+        if kname == "streams-key" and not os.getenv("CHAINLINK_CANDLE_API_KEY"):
+            print("  (streams key doubles as the candle key — nothing more needed)")
+        print("Slot-boundary opens for settlement then use Chainlink-source "
+              "candles automatically after a bot restart.")
+    else:
+        print("\nNo candle host accepted the keys — paste this back.")
 
 
 def main() -> int:
