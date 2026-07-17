@@ -556,6 +556,10 @@ def exit_policy_analysis(events: list[dict[str, Any]], min_move_signal: float = 
       stop  — sell at the FIRST moment the bid <= stop_bid (cut the loser);
               otherwise settle
       both  — stop-loss first, else lock at the end, else settle
+      flat  — sell at the last bid ONLY when the round is finishing near-flat
+              (|move| at the last sample below the decisive threshold): the
+              exact rounds where photo-finish/reference-error label risk lives
+              and holding is a coin flip anyway; decisive rounds are held
 
     If late prices are calibrated, no early exit can BEAT hold on EV (you pay
     the spread) — the question this answers is what the insurance costs, and
@@ -592,8 +596,12 @@ def exit_policy_analysis(events: list[dict[str, Any]], min_move_signal: float = 
                 stopped = True
                 break
         both = stop if stopped else lock
+        fmv = final.get("move") if final else None
+        finishing_flat = isinstance(fmv, (int, float)) and abs(fmv) < min_move_signal
+        flat = sell if (finishing_flat and fbid is not None) else hold
         recs.append({"entry": entry, "win": win, "hold": hold, "sell": sell,
-                     "lock": lock, "stop": stop, "both": both,
+                     "lock": lock, "stop": stop, "both": both, "flat": flat,
+                     "was_flat": finishing_flat,
                      "final_sl": final.get("sec_left") if final else None})
     n = len(recs)
     out: dict[str, Any] = {"n": n, "floor": floor, "lock_bid": lock_bid, "stop_bid": stop_bid}
@@ -603,7 +611,8 @@ def exit_policy_analysis(events: list[dict[str, Any]], min_move_signal: float = 
     out["avg_entry"] = round(avg_entry, 4)
     fsl = [x["final_sl"] for x in recs if x["final_sl"] is not None]
     out["avg_exit_sec_left"] = round(sum(fsl) / len(fsl), 1) if fsl else None
-    for pol in ("hold", "sell", "lock", "stop", "both"):
+    out["n_finishing_flat"] = sum(1 for x in recs if x["was_flat"])
+    for pol in ("hold", "sell", "lock", "stop", "both", "flat"):
         proceeds = sum(x[pol] for x in recs) / n
         out[pol] = {
             "avg_proceeds": round(proceeds, 4),
@@ -627,18 +636,22 @@ def _print_exit(res: dict[str, Any]) -> None:
     exit_sl = res.get("avg_exit_sec_left")
     print(f"  entries: {res['n']}   avg entry: {res['avg_entry']:.3f}   "
           f"last sellable sample: ~{exit_sl:.0f}s left" if exit_sl else f"  entries: {res['n']}")
-    print(f"  {'policy':<26}{'avg proceeds':<14}{'EV/trade':<11}{'busts'}")
+    print(f"  {'policy':<31}{'avg proceeds':<14}{'EV/trade':<11}{'busts'}")
     labels = {
         "hold": "hold to settlement",
         "sell": "sell at ~30s always",
         "lock": f"lock: sell if bid >= {res['lock_bid']:.2f}",
         "stop": f"stop: sell if bid <= {res['stop_bid']:.2f}",
         "both": "stop-loss + lock",
+        "flat": "flat-guard: sell flat finishes",
     }
-    for pol in ("hold", "sell", "lock", "stop", "both"):
+    for pol in ("hold", "sell", "lock", "stop", "both", "flat"):
         p = res[pol]
-        print(f"  {labels[pol]:<26}{p['avg_proceeds']:<14.3f}{p['ev_pct']:<+11.1%}{p['busts']}")
+        print(f"  {labels[pol]:<31}{p['avg_proceeds']:<14.3f}{p['ev_pct']:<+11.1%}{p['busts']}")
     print("-" * 74)
+    nf = res.get("n_finishing_flat", 0)
+    print(f"  flat-guard sells only rounds finishing near-flat ({nf} of {res['n']} here) —")
+    print("  the label-risk rounds where holding is a coin flip anyway.")
     print("  busts = trades losing over half the stake. If an exit policy has FAR")
     print("  fewer busts for <= ~1-2% EV, that is cheap insurance (and a maker exit")
     print("  would pay no fee); if EV drops more, the market charges too much for it.")

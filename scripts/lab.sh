@@ -229,6 +229,9 @@ case "${1:-start}" in
         echo "---- $AU 5m market: disagreement anatomy ----"
         "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --disagreements --min-size 100 || true
         echo
+        echo "---- $AU 5m market: exit policies ----"
+        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --exit --min-size 100 --min-conf "$(conf_for "$A")" || true
+        echo
       done
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --fade              || true
       echo

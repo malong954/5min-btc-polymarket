@@ -323,8 +323,27 @@ def test_exit_policies_priced_from_bids():
     evs = (rnd(1000, [(100, 0.85), (35, 0.97)], "UP")
            + rnd(2000, [(100, 0.60), (35, 0.50)], "DOWN")
            + rnd(3000, [(100, 0.25), (35, 0.02)], "DOWN"))
+    # Round D: decisive at entry (+40) but finishing near-flat (move 0.5 at the
+    # last sample, bid 0.50) and losing officially — the flat-guard sells at
+    # 0.50 where hold rides the label risk to 0.
+    evs += [{"type": "sample", "round": 4000, "sec_left": 200, "move": 40.0, "spot": 62040,
+             "up_ask": 0.65, "dn_ask": 0.37, "up_sz": 500, "dn_sz": 500,
+             "up_bid": 0.60, "dn_bid": 0.33, "ind_conf": 0.5, "ind_dir": "UP"},
+            {"type": "sample", "round": 4000, "sec_left": 35, "move": 0.5, "spot": 62000.5,
+             "up_ask": 0.52, "dn_ask": 0.49, "up_sz": 500, "dn_sz": 500,
+             "up_bid": 0.50, "dn_bid": 0.47, "ind_conf": 0.5, "ind_dir": "UP"},
+            {"type": "result", "round": 4000, "open": 62000, "close": 62000.5, "outcome": "UP"},
+            {"type": "result_pm", "round": 4000, "outcome": "DOWN"}]
     res = exit_policy_analysis(evs, min_move_signal=10.0)
-    check("three entries simulated", res["n"] == 3)
+    check("four entries simulated", res["n"] == 4)
+    check("one round finishing flat", res["n_finishing_flat"] == 1)
+    check("flat-guard sells only the flat finish",
+          abs(res["flat"]["avg_proceeds"] - (1.0 + 0.0 + 0.0 + 0.50) / 4) < 1e-3)
+    check("flat-guard beats hold when label risk bites",
+          res["flat"]["avg_proceeds"] > res["hold"]["avg_proceeds"])
+    res3 = exit_policy_analysis(evs[:-4], min_move_signal=10.0)   # first three rounds only
+    check("three entries simulated", res3["n"] == 3)
+    res = res3
     check("hold = settlement outcomes", abs(res["hold"]["avg_proceeds"] - 1.0 / 3) < 1e-3)
     check("sell uses the final bids", abs(res["sell"]["avg_proceeds"] - (0.97 + 0.50 + 0.02) / 3) < 1e-3)
     check("lock cashes only the near-certain win",
