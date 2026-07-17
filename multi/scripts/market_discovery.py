@@ -292,13 +292,18 @@ def streams_feed_id(asset: str) -> Optional[str]:
     return os.getenv(f"CHAINLINK_FEED_ID_{asset.upper()}")
 
 
-def streams_get(path: str, params: dict | None = None, timeout: float = 8.0) -> dict:
+def streams_get(path: str, params: dict | None = None, timeout: float = 8.0,
+                api_key: Optional[str] = None) -> dict:
     """HMAC-authenticated GET against the Data Streams API (per the Streams
-    auth spec: sign 'METHOD path sha256(body) clientId timestampMs')."""
+    auth spec: sign 'METHOD path sha256(body) clientId timestampMs').
+    api_key overrides the client id (e.g. the candlestick API key) while
+    signing with the same shared secret."""
     creds = streams_creds()
     if not creds:
         raise RuntimeError("Chainlink Streams credentials not configured")
     key, secret = creds
+    if api_key:
+        key = api_key
     qs = urlencode(params or {})
     full_path = f"{path}?{qs}" if qs else path
     ts_ms = int(time.time() * 1000)
