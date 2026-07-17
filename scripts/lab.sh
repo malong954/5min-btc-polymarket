@@ -20,6 +20,10 @@
 #                 ASSETS="eth sol xrp"   extra 5m markets to record AND trade
 #                                        alongside BTC (each gets its own
 #                                        recorder, trader, bankroll and log)
+#                 M15="btc"              assets to ALSO trade on the 15m window
+#                                        (any of "btc eth sol xrp"; each gets its
+#                                        own trader + log, tagged e.g. BTC15 on
+#                                        the dashboard; lead windows scale x3)
 #                 CONF_BTC/CONF_ETH/CONF_SOL/CONF_XRP   per-market conf floor
 #                                        (overrides LEAD_MIN_CONF for that market)
 #   RULE=edge enters when confidence >= live ask + EDGE_MARGIN (price = hurdle).
@@ -58,6 +62,7 @@ CONF_SOL="${CONF_SOL:-${SAVED_CONF_SOL:-$LEAD_MIN_CONF}}"
 CONF_XRP="${CONF_XRP:-${SAVED_CONF_XRP:-$LEAD_MIN_CONF}}"
 ETH="${ETH:-${SAVED_ETH:-0}}"    # legacy switch; folded into ASSETS below
 ASSETS="${ASSETS-${SAVED_ASSETS:-}}"   # extra markets: any of "eth sol xrp"
+M15="${M15-${SAVED_M15:-}}"      # assets to ALSO trade on the 15m window
 STAKE="${STAKE:-${SAVED_STAKE:-10}}"
 BANKROLL="${BANKROLL:-${SAVED_BANKROLL:-100}}"
 
@@ -68,6 +73,10 @@ fi
 ASSETS="$(echo "$ASSETS" | tr 'A-Z' 'a-z')"
 for A in $ASSETS; do
   case "$A" in eth|sol|xrp) ;; *) echo "unknown asset in ASSETS: $A (allowed: eth sol xrp)"; exit 1 ;; esac
+done
+M15="$(echo "$M15" | tr 'A-Z' 'a-z')"
+for A in $M15; do
+  case "$A" in btc|eth|sol|xrp) ;; *) echo "unknown asset in M15: $A (allowed: btc eth sol xrp)"; exit 1 ;; esac
 done
 
 [ -x "$PY" ] || { echo "create the venv first: python3 -m venv .venv && .venv/bin/pip install requests"; exit 1; }
@@ -85,15 +94,18 @@ trader_up()   { pgrep -f "btc_live_paper.py" >/dev/null 2>&1; }
 recorder_up() { pgrep -f "btc_record.py"     >/dev/null 2>&1; }
 # Per-market checks. BTC = 'any such process that is NOT an --asset extra'
 # (also matches launches from before --asset existed); extras match their flag.
-btrader_up()  { ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -vE -- "--asset (eth|sol|xrp)" | grep -q .; }
+# 5m matchers exclude --window 15m so a 15m trader never masks its 5m sibling.
+btrader_up()  { ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -vE -- "--asset (eth|sol|xrp)" | grep -v -- "--window 15m" | grep -q .; }
 brec_up()     { ps ax -o command 2>/dev/null | grep "[b]tc_record.py"     | grep -vE -- "--asset (eth|sol|xrp)" | grep -q .; }
-atrader_up()  { ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -q -- "--asset $1"; }
+atrader_up()  { ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -- "--asset $1" | grep -v -- "--window 15m" | grep -q .; }
 arec_up()     { ps ax -o command 2>/dev/null | grep "[b]tc_record.py"     | grep -q -- "--asset $1"; }
+m15trader_up(){ ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -- "--window 15m" | grep -q -- "--asset $1"; }
 
 # Extra trader logs -> dashboard merge flags (string, not array: macOS bash 3.2
 # chokes on empty-array expansion under set -u; paths contain no spaces).
 MERGEOPTS=""
 for A in $ASSETS; do MERGEOPTS="$MERGEOPTS --merge out/live-$A.jsonl"; done
+for A in $M15;    do MERGEOPTS="$MERGEOPTS --merge out/live-$A-15m.jsonl"; done
 
 case "${1:-start}" in
   stop)
@@ -116,6 +128,9 @@ case "${1:-start}" in
       [ -f "out/live-$A.jsonl" ] && mv "out/live-$A.jsonl" "out/live-$A-$TS.jsonl" && echo "archived $A trader log -> out/live-$A-$TS.jsonl"
       [ -f "out/trajectory-$A.jsonl" ] && mv "out/trajectory-$A.jsonl" "out/trajectory-$A-$TS.jsonl" && echo "archived $A recorder log -> out/trajectory-$A-$TS.jsonl"
     done
+    for A in btc eth sol xrp; do
+      [ -f "out/live-$A-15m.jsonl" ] && mv "out/live-$A-15m.jsonl" "out/live-$A-15m-$TS.jsonl" && echo "archived $A 15m trader log -> out/live-$A-15m-$TS.jsonl"
+    done
     echo "starting a fresh run..."
     exec "$0" start ;;
 
@@ -127,6 +142,10 @@ case "${1:-start}" in
       AU="$(echo "$A" | tr 'a-z' 'A-Z')"
       atrader_up "$A" && echo "trader ($AU):   RUNNING" || echo "trader ($AU):   not running"
       arec_up "$A"    && echo "recorder ($AU): RUNNING" || echo "recorder ($AU): not running"
+    done
+    for A in $M15; do
+      AU="$(echo "$A" | tr 'a-z' 'A-Z')"
+      m15trader_up "$A" && echo "trader (${AU} 15m): RUNNING" || echo "trader (${AU} 15m): not running"
     done
     # NOTE: grep -c prints its count but exits 1 when the count is 0, so the
     # naive `grep -c ... || echo 0` printed BOTH a 0 and the fallback 0 (and
@@ -144,6 +163,12 @@ case "${1:-start}" in
       [ -f "out/trajectory-$A.jsonl" ] && AREC="$(grep -c '"type":"result"' "out/trajectory-$A.jsonl" 2>/dev/null || true)"
       [ -f "out/trajectory-$A.jsonl" ] && ASAMP="$(grep -c '"type":"sample"' "out/trajectory-$A.jsonl" 2>/dev/null || true)"
       echo "$AU trades settled: ${ASET:-0}   rounds recorded: ${AREC:-0}  (samples: ${ASAMP:-0})"
+    done
+    for A in $M15; do
+      AU="$(echo "$A" | tr 'a-z' 'A-Z')"
+      MSET=0
+      [ -f "out/live-$A-15m.jsonl" ] && MSET="$(grep -c '"type":"settle"' "out/live-$A-15m.jsonl" 2>/dev/null || true)"
+      echo "${AU} 15m trades settled: ${MSET:-0}"
     done
     # A recorder that is 'RUNNING' but writing nothing is a hidden failure —
     # surface its recent stderr so the cause is visible right here.
@@ -271,6 +296,7 @@ mkdir -p out
   echo "SAVED_CONF_SOL=$CONF_SOL"
   echo "SAVED_CONF_XRP=$CONF_XRP"
   echo "SAVED_ASSETS=\"$ASSETS\""
+  echo "SAVED_M15=\"$M15\""
   echo "SAVED_STAKE=$STAKE"
   echo "SAVED_BANKROLL=$BANKROLL"
 } > "$CONF"
@@ -331,6 +357,27 @@ for A in $ASSETS; do
       --log "out/live-$A.jsonl" --quiet \
       >> "out/nohup-$A.log" 2>&1 &
     echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, conf >= ${AF} (move threshold auto-scales to $AU)"
+  fi
+done
+
+# --- 15m markets: one trader per asset in M15 (registry analysis: the 15m
+# --- cohort shows ~50% higher alpha per trade and is less latency-crowded) ---
+for A in $M15; do
+  AU="$(echo "$A" | tr 'a-z' 'A-Z')"
+  if m15trader_up "$A"; then
+    echo "$AU 15m trader already running"
+  else
+    [ -f "out/live-$A-15m.jsonl" ] && mv "out/live-$A-15m.jsonl" "out/live-$A-15m-prev.jsonl" && echo "archived prior $AU 15m session -> out/live-$A-15m-prev.jsonl"
+    AF="$(conf_for "$A")"
+    nohup "$PY" scripts/btc_live_paper.py --asset "$A" --window 15m \
+      --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
+      --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
+      --lead-min-conf "$AF" \
+      --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
+      --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
+      --log "out/live-$A-15m.jsonl" --quiet \
+      >> "out/nohup-$A-15m.log" 2>&1 &
+    echo "started $AU 15m paper trader (pid $!)  own \$${BANKROLL} account, conf >= ${AF} (lead windows scale x3 for 900s rounds)"
   fi
 done
 

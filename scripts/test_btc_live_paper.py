@@ -344,6 +344,39 @@ def test_format_event_smoke():
     check("format_event renders settle line", "SETTLE" in s and "WIN" in s)
 
 
+def test_15m_window_rounds_and_tagging():
+    """--window 15m: rounds are 900s buckets, events are stamped window=15m, and
+    settles grade the full 15m round (open of first 1m bar vs close of last)."""
+    bars = synth_bars(6000, autocorr=0.5, seed=31)
+    eng = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, window="15m")
+    events = drive(eng, bars)
+
+    check("15m stream emits entries", any(e["type"] == "entry" for e in events))
+    check("15m events stamped window=15m", all(e.get("window") == "15m" for e in events))
+    check("15m rounds are 900s-aligned",
+          all(e["round"] % 900 == 0 for e in events if "round" in e))
+    settles = [e for e in events if e["type"] == "settle"]
+    check("15m rounds settle", len(settles) > 0)
+    # Grade each settle against the true 15m open->close from the raw bars.
+    by_ts = {b.ts: b for b in bars}
+    ok = True
+    for s in settles:
+        rs = s["round"]
+        o, c = by_ts.get(rs), by_ts.get(rs + 840)
+        if o is None or c is None:
+            continue
+        truth = "UP" if c.c > o.o else "DOWN" if c.c < o.o else "FLAT"
+        if truth in ("UP", "DOWN") and s["actual"] != truth:
+            ok = False
+    check("15m settles match the true 15m open->close", ok)
+    # 5m engine untouched: same drive still emits 300s-aligned window=5m events.
+    eng5 = LivePaperEngine(entry_threshold=0.0, entry_price=0.85)
+    ev5 = drive(eng5, bars)
+    check("5m default unchanged (window=5m, 300s rounds)",
+          all(e.get("window") == "5m" for e in ev5)
+          and all(e["round"] % 300 == 0 for e in ev5 if "round" in e))
+
+
 def main():
     test_stream_produces_full_lifecycle()
     test_no_double_entry_per_round()
@@ -360,6 +393,7 @@ def main():
     test_settle_precedence_official_chainlink_spot()
     test_requote_pays_worse_never_better()
     test_format_event_smoke()
+    test_15m_window_rounds_and_tagging()
     print("\nAll live paper-trading tests passed.")
 
 

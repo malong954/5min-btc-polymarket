@@ -34,8 +34,15 @@ from typing import Any, Callable, Optional, TextIO
 from btc_backtest import Bar, DEFAULT_WEIGHTS, MTFModel, outcome_direction
 
 
+WINDOW_SLOT = {"5m": 300, "15m": 900}
+
+
 def bucket_5m(ts: int) -> int:
     return ts - (ts % 300)
+
+
+def bucket_slot(ts: int, slot: int) -> int:
+    return ts - (ts % slot)
 
 
 def _rnd(v: Any, nd: int) -> Optional[float]:
@@ -124,7 +131,12 @@ class LivePaperEngine:
         lead_persist: float = 5.0,
         official_wait: float = 150.0,
         asset: str = "BTC",
+        window: str = "5m",
     ):
+        # Market interval: 5m (300s rounds) or 15m (900s rounds). Stamped on
+        # every event so the dashboard can separate e.g. BTC 5m from BTC 15m.
+        self.window = window
+        self.slot = WINDOW_SLOT[window]
         # Lead rule: the FULL setup must hold continuously this many seconds
         # before entering. The measured combo table is built from 5s samples,
         # so it only counts rounds where the setup survives a sampling
@@ -201,6 +213,7 @@ class LivePaperEngine:
 
     def _emit(self, ev: dict[str, Any]) -> dict[str, Any]:
         ev.setdefault("asset", self.asset)
+        ev.setdefault("window", self.window)
         if self.log is not None:
             self.log.write(json.dumps(ev, separators=(",", ":")) + "\n")
             self.log.flush()
@@ -289,10 +302,24 @@ class LivePaperEngine:
              official: Optional[dict[int, str]] = None,
              provisional: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
         now = float(now)
-        cur = bucket_5m(int(now))
-        sec_left = (cur + 300) - now
+        cur = bucket_slot(int(now), self.slot)
+        sec_left = (cur + self.slot) - now
         events: list[dict[str, Any]] = []
         model = MTFModel(bars_1m, weights=self.weights, confluence=self.confluence)
+
+        def spot_label(rs: int) -> Optional[str]:
+            """Window-aware spot grade: outcome_direction() reads the 5m bar
+            aggregation, so 15m rounds are graded straight from the 1m bars
+            (open of the round's first bar vs close of its last)."""
+            if self.slot == 300:
+                return outcome_direction(model, rs)
+            i_open = model.idx_1m.get(rs)
+            i_close = model.idx_1m.get(rs + self.slot - 60)
+            if i_open is None or i_close is None:
+                return None
+            o = model.bars_1m[i_open].o
+            c = model.bars_1m[i_close].c
+            return "UP" if c > o else "DOWN" if c < o else "FLAT"
 
         def settle_outcome(rs: int) -> tuple[Optional[str], str]:
             """Prefer Polymarket's OFFICIAL resolution; our spot label breaks
@@ -303,15 +330,15 @@ class LivePaperEngine:
             then fall back to the spot label."""
             if official and official.get(rs) in ("UP", "DOWN"):
                 return official[rs], "official"
-            if now < rs + 300 + self.official_wait:
+            if now < rs + self.slot + self.official_wait:
                 return None, "waiting"
             if provisional and provisional.get(rs) in ("UP", "DOWN"):
                 return provisional[rs], "chainlink"
-            return outcome_direction(model, rs), "spot_fallback"
+            return spot_label(rs), "spot_fallback"
 
         # 1) Settle any entered round that has closed.
         for rs in sorted(self.positions):
-            if rs in self.settled or now < rs + 300:
+            if rs in self.settled or now < rs + self.slot:
                 continue
             actual, settle_src = settle_outcome(rs)
             if actual not in ("UP", "DOWN"):
@@ -348,7 +375,7 @@ class LivePaperEngine:
         # 1b) Settle SHADOW rounds (predicted but skipped) — no money, just record
         # whether the call would have won, so skips are analyzable after the fact.
         for rs in sorted(self.shadows):
-            if rs in self.shadow_settled or now < rs + 300:
+            if rs in self.shadow_settled or now < rs + self.slot:
                 continue
             actual, settle_src = settle_outcome(rs)
             if actual not in ("UP", "DOWN"):
@@ -370,7 +397,7 @@ class LivePaperEngine:
         # out, only then record the final no_market_price skip (+ shadow).
         for rs in list(self.pending):
             pend = self.pending[rs]
-            rs_left = (rs + 300) - now
+            rs_left = (rs + self.slot) - now
             if rs == cur and rs_left >= self.min_entry_sec:
                 ev = self._try_enter(rs, now, pend["side"], pend["confidence"],
                                      pend["features"], pend["note"], entry_prices,
@@ -568,7 +595,8 @@ def format_event(ev: dict[str, Any]) -> str:
             return f"{clk}  · (no price)"
         mv = ev.get("round_move")
         mv_s = f" move={mv:+.0f}" if mv is not None else ""
-        return (f"{clk}  · ${ev['price']:,.2f}{mv_s}  round+{300 - ev['seconds_left']:.0f}s  "
+        slot = WINDOW_SLOT.get(str(ev.get("window") or "5m"), 300)
+        return (f"{clk}  · ${ev['price']:,.2f}{mv_s}  round+{slot - ev['seconds_left']:.0f}s  "
                 f"open={ev['open_positions']} pnl={ev['cum_pnl']:+.3f}")
     if t == "prediction":
         return (f"{clk}  ? PREDICT {ev['direction'] or '--'} conf={ev['confidence']:.2f} "
@@ -611,7 +639,11 @@ def fetch_spot(provider: str, symbol: str = "BTCUSDT") -> Optional[float]:
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Live paper-trading + streaming logger (5m Up/Down)")
     ap.add_argument("--asset", default="btc", choices=["btc", "eth", "sol", "xrp"],
-                    help="Which Polymarket 5m Up/Down market to trade (sets slug + spot symbol)")
+                    help="Which Polymarket Up/Down market to trade (sets slug + spot symbol)")
+    ap.add_argument("--window", default="5m", choices=["5m", "15m"],
+                    help="Market interval: 5m (300s rounds) or 15m (900s rounds). Window-shaped "
+                         "defaults (--entry-window, --min-entry, --lead-hi/--lead-lo) scale x3 "
+                         "for 15m unless passed explicitly")
     ap.add_argument("--provider", default="binance", choices=["binance", "cryptocompare"],
                     help="1m data source for live prediction")
     ap.add_argument("--poll", type=float, default=2.0, help="Seconds between polls (live spot price ticks at this cadence)")
@@ -620,8 +652,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge", "lead"],
                     help="threshold: conf >= --entry-threshold | edge: conf >= live ask + --edge-margin | "
                          "lead: buy the leading side in the sweet-spot window when the ask is cheap (the measured candidate)")
-    ap.add_argument("--lead-hi", type=float, default=240.0, help="lead rule: window opens at this many seconds left")
-    ap.add_argument("--lead-lo", type=float, default=180.0, help="lead rule: window closes at this many seconds left")
+    ap.add_argument("--lead-hi", type=float, default=None, help="lead rule: window opens at this many seconds left (default 240; x3 for --window 15m)")
+    ap.add_argument("--lead-lo", type=float, default=None, help="lead rule: window closes at this many seconds left (default 180; x3 for --window 15m)")
     ap.add_argument("--lead-max-price", type=float, default=0.72, help="lead rule: only enter while the ask is at/below this")
     ap.add_argument("--lead-min-move", type=float, default=None,
                     help="lead rule: require the asset moved at least this many dollars from the round "
@@ -634,10 +666,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
     ap.add_argument("--max-entry-price", type=float, default=0.97,
                     help="Never buy above this ask — near $1.00 you risk the whole stake to win pennies")
-    ap.add_argument("--entry-window", type=float, default=240.0,
-                    help="Start deciding when this many seconds remain (the measured sweet-spot "
-                         "crossings fire at 170-190s left, so evaluation must start well above them)")
-    ap.add_argument("--min-entry", type=float, default=30.0, help="Stop entering/retrying prices below this many seconds left")
+    ap.add_argument("--entry-window", type=float, default=None,
+                    help="Start deciding when this many seconds remain (default 240; x3 for --window "
+                         "15m; the measured 5m sweet-spot crossings fire at 170-190s left, so "
+                         "evaluation must start well above them)")
+    ap.add_argument("--min-entry", type=float, default=None, help="Stop entering/retrying prices below this many seconds left (default 30; x3 for --window 15m)")
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting paper account balance in USD")
     ap.add_argument("--stake-usd", type=float, default=10.0, help="Base USD deployed per trade")
@@ -657,6 +690,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     asset = args.asset.lower()
     symbol = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT", "xrp": "XRPUSDT"}[asset]
+    slot = WINDOW_SLOT[args.window]
+    scale = slot / 300.0   # window-shaped defaults were measured on 5m rounds
+    if args.entry_window is None:
+        args.entry_window = 240.0 * scale
+    if args.min_entry is None:
+        args.min_entry = 30.0 * scale
+    if args.lead_hi is None:
+        args.lead_hi = 240.0 * scale
+    if args.lead_lo is None:
+        args.lead_lo = 180.0 * scale
     if asset != "btc" and args.provider != "binance":
         print("non-BTC assets need --provider binance (other feeds are BTC-pinned)", file=sys.stderr)
         return 2
@@ -699,11 +742,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         lead_window=(args.lead_hi, args.lead_lo),
         lead_max_price=args.lead_max_price, lead_min_move=args.lead_min_move,
         lead_min_conf=args.lead_min_conf, lead_persist=args.lead_persist,
-        asset=asset.upper(),
+        asset=asset.upper(), window=args.window,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")
-    print(f"# live paper trader | asset={asset.upper()} ({symbol}) provider={args.provider} poll={args.poll}s "
+    print(f"# live paper trader | asset={asset.upper()} {args.window} ({symbol}) provider={args.provider} poll={args.poll}s "
           f"entry_threshold={args.entry_threshold} price_source={price_desc} "
           f"bankroll=${args.bankroll:.2f} stake=${args.stake_usd:.2f} "
           f"| PAPER MODE (no real orders)", file=sys.stderr)
@@ -712,6 +755,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # lead-rule trader under a header claiming 'need >= 0.60').
     engine._emit({
         "ts": int(time.time()), "type": "config",
+        "window": args.window,
         "entry_rule": args.entry_rule, "entry_threshold": args.entry_threshold,
         "edge_margin": args.edge_margin, "max_entry_price": args.max_entry_price,
         "lead_hi": args.lead_hi, "lead_lo": args.lead_lo,
@@ -744,19 +788,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         while args.max_steps is None or n < args.max_steps:
             try:
                 now = time.time()
-                cur = bucket_5m(int(now))
-                sec_left = (cur + 300) - now
+                cur = bucket_slot(int(now), slot)
+                sec_left = (cur + slot) - now
                 # Fetch the official resolution for any closed round we still
                 # hold (or shadow) — the spot label breaks ties the wrong way.
                 if use_pm:
                     from btc_polymarket import current_slug, resolved_outcome
                     waiting = [rs for rs in list(engine.positions) + list(engine.shadows)
                                if rs not in engine.settled and rs not in engine.shadow_settled
-                               and rs not in official and now >= rs + 345
+                               and rs not in official and now >= rs + slot + 45
                                and official_tries.get(rs, 0) < 6]
                     for rs in waiting[:2]:   # bounded per poll
                         try:
-                            oc = resolved_outcome(current_slug(rs, asset))
+                            oc = resolved_outcome(current_slug(rs, asset, args.window))
                         except Exception:
                             oc = None
                         if oc in ("UP", "DOWN"):
@@ -769,10 +813,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     want = [rs for rs in list(engine.positions) + list(engine.shadows)
                             if rs not in engine.settled and rs not in engine.shadow_settled
                             and rs not in official and rs not in provisional
-                            and now >= rs + 305 and prov_tries.get(rs, 0) < 6]
+                            and now >= rs + slot + 5 and prov_tries.get(rs, 0) < 6]
                     for rs in want[:1]:
                         try:
-                            up = cl.settle_up(asset, rs, rs + 300)
+                            up = cl.settle_up(asset, rs, rs + slot)
                         except Exception:
                             up = None
                         if up is None:
@@ -782,7 +826,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # Refresh the heavier 1m klines only every --klines-every seconds,
                 # or when we need them fresh: in the entry window, or to settle a
                 # round that has just closed. The spot tick (below) stays live.
-                pending_settle = any(rs + 300 <= now and rs not in engine.settled
+                pending_settle = any(rs + slot <= now and rs not in engine.settled
                                      for rs in engine.positions)
                 in_window = engine.min_entry_sec <= sec_left <= engine.entry_window_sec
                 if (not bars or now - last_klines >= args.klines_every
@@ -796,7 +840,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if use_pm and in_window:
                     try:
                         from btc_polymarket import current_prices
-                        pm = current_prices(now, asset=asset)
+                        pm = current_prices(now, asset=asset, window=args.window)
                         if pm:
                             entry_prices = {"UP": pm.get("UP"), "DOWN": pm.get("DOWN"),
                                             "UP_size": pm.get("UP_size"),
@@ -819,7 +863,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                             continue
                         try:
                             from btc_polymarket import current_prices
-                            pm2 = current_prices(time.time(), asset=asset)
+                            pm2 = current_prices(time.time(), asset=asset, window=args.window)
                         except Exception:
                             pm2 = None
                         if pm2:

@@ -40,14 +40,22 @@ def _get_json(url: str, params: Optional[dict[str, Any]] = None, timeout: float 
     return r.json()
 
 
+WINDOW_SLOT = {"5m": 300, "15m": 900}
+
+
 def bucket_5m(ts: int) -> int:
     return ts - (ts % 300)
 
 
-def current_slug(now_ts: float, asset: str = "btc") -> str:
-    """Slug of the asset's live 5m Up/Down market (btc-updown-5m-<bucket>,
-    eth-updown-5m-<bucket>, ...)."""
-    return f"{asset.lower()}-updown-5m-{bucket_5m(int(now_ts))}"
+def bucket_window(ts: int, window: str = "5m") -> int:
+    slot = WINDOW_SLOT[window]
+    return ts - (ts % slot)
+
+
+def current_slug(now_ts: float, asset: str = "btc", window: str = "5m") -> str:
+    """Slug of the asset's live Up/Down market for the given interval
+    (btc-updown-5m-<bucket>, btc-updown-15m-<bucket>, eth-updown-5m-<bucket>, ...)."""
+    return f"{asset.lower()}-updown-{window}-{bucket_window(int(now_ts), window)}"
 
 
 def parse_json_field(v: Any) -> Any:
@@ -124,10 +132,10 @@ def _side_tokens(market: dict[str, Any]) -> Optional[tuple[str, str, str]]:
 
 
 def current_prices(now_ts: float, getter: Callable[..., Any] = _get_json,
-                   asset: str = "btc") -> Optional[dict[str, Any]]:
-    """Return the live UP/DOWN best-ask prices for the current 5m market, or None
-    if the market can't be resolved. Prices are floats in (0,1) or None per side."""
-    slug = current_slug(now_ts, asset)
+                   asset: str = "btc", window: str = "5m") -> Optional[dict[str, Any]]:
+    """Return the live UP/DOWN best-ask prices for the current 5m/15m market, or
+    None if the market can't be resolved. Prices are floats in (0,1) or None per side."""
+    slug = current_slug(now_ts, asset, window)
     ev = fetch_event(slug, getter)
     if not ev:
         return None

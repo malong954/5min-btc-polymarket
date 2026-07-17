@@ -152,6 +152,42 @@ def test_skip_rows_graded_by_shadow_settle():
     check("other market's shadow does not grade it", "actual" not in st2["activity"][-1])
 
 
+def test_15m_stream_is_a_separate_market():
+    """A BTC 15m trader merged into the panel must not pollute the BTC 5m
+    stream: its rows tag as BTC15, it gets its own per-market accounting, the
+    header lists both windows, and the rules line states the hold-to-resolution
+    + ask-cap rules from the trader's config event."""
+    st = new_state()
+    fold_event(st, {"type": "config", "asset": "BTC", "window": "5m", "bankroll": 100.0,
+                    "entry_rule": "lead", "lead_min_conf": 0.40, "lead_max_price": 0.72})
+    fold_event(st, {"type": "config", "asset": "BTC", "window": "15m", "bankroll": 100.0})
+    fold_event(st, {"type": "heartbeat", "asset": "BTC", "window": "5m",
+                    "price": 60000.0, "seconds_left": 100, "round": 300})
+    fold_event(st, {"type": "heartbeat", "asset": "BTC", "window": "15m",
+                    "price": 60000.0, "seconds_left": 700, "round": 900})
+    fold_event(st, dict(settle(1, "UP", "UP", 0.15, 0.15), asset="BTC", window="5m",
+                        pnl_usd=1.5, round=300))
+    fold_event(st, dict(settle(2, "UP", "DOWN", -0.85, -0.70), asset="BTC", window="15m",
+                        pnl_usd=-10.0, round=900))
+    check("5m and 15m are separate market streams",
+          set(st["assets"]) == {"BTC", "BTC15"})
+    check("PnL lands on the right stream",
+          st["assets"]["BTC"]["pnl_usd"] > 0 > st["assets"]["BTC15"]["pnl_usd"])
+    out = render(st, 0.85, Painter(color=False))
+    check("header lists both windows", "5m+15m" in out)
+    check("rows tag the 15m market", "BTC15" in out)
+    check("rules line shows hold to resolution", "hold to resolution" in out)
+    check("rules line shows the ask cap", "ask <= 0.72" in out)
+    # A 15m shadow settle must not grade a 5m skip of the same round number.
+    st2 = new_state()
+    fold_event(st2, {"type": "skip", "asset": "BTC", "window": "5m", "round": 900,
+                     "reason": "no_lead_setup", "side": "UP", "confidence": 0.5})
+    fold_event(st2, {"type": "shadow_settle", "asset": "BTC", "window": "15m",
+                     "round": 900, "actual": "UP", "result": "win"})
+    skip_row = st2["activity"][0]
+    check("15m shadow does not grade the 5m skip", "actual" not in skip_row)
+
+
 def test_missing_file_is_safe():
     evs, off = read_new_events("/nonexistent/path/live.jsonl", 0)
     check("missing file returns empty", evs == [] and off == 0)
@@ -165,6 +201,7 @@ def main():
     test_breakeven_verdict_flips_color()
     test_incremental_read_and_truncation()
     test_skip_rows_graded_by_shadow_settle()
+    test_15m_stream_is_a_separate_market()
     test_missing_file_is_safe()
     print("\nAll live monitor tests passed.")
 

@@ -49,6 +49,19 @@ RECENT_N = 12
 ASSET_COLOR = {"BTC": YELLOW, "ETH": CYAN, "SOL": MAGENTA, "XRP": BLUE}
 
 
+def _mkt_name(ev: dict[str, Any]) -> str:
+    """Display name of the market a row belongs to: the asset, suffixed with the
+    interval when it isn't the default 5m — so a BTC 5m and a BTC 15m trader
+    merged into one panel stay separate streams ('BTC' vs 'BTC15')."""
+    a = str(ev.get("asset") or "BTC").upper()
+    w = str(ev.get("window") or "5m")
+    return a if w == "5m" else f"{a}{w[:-1]}"
+
+
+def _color_for(name: str) -> str:
+    return ASSET_COLOR.get(name, ASSET_COLOR.get(name[:3], GREY))
+
+
 def _fmt_move(mv: float) -> str:
     """Dollar-move string at a precision matching the asset's scale: BTC moves
     are whole dollars, ETH/SOL cents, XRP fractions of a cent."""
@@ -179,7 +192,8 @@ def _unit_to_usd(unit_pnl: float, stake_usd: float, entry_price: float) -> float
 def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
     t = ev.get("type")
     ts = ev.get("ts")
-    a = str(ev.get("asset") or "BTC").upper()
+    a = _mkt_name(ev)
+    state.setdefault("windows", set()).add(str(ev.get("window") or "5m"))
     if ts and (state.get("first_ts") is None or ts < state["first_ts"]):
         state["first_ts"] = ts   # session start = first event in the log
     if t == "config":
@@ -200,6 +214,10 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
             state["stake_usd"] = ev["stake_usd"]
         if ev.get("lead_min_conf") is not None:
             state["lead_min_conf"] = ev["lead_min_conf"]
+        if ev.get("lead_max_price") is not None:
+            state["lead_max_price"] = ev["lead_max_price"]
+        if ev.get("max_entry_price") is not None:
+            state["max_entry_price"] = ev["max_entry_price"]
         return state
     if t == "heartbeat":
         state["last_hb"] = ev
@@ -232,7 +250,7 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         # would have won.
         for row in reversed(state["activity"]):
             if (row.get("type") == "skip" and row.get("round") == ev.get("round")
-                    and str(row.get("asset") or "BTC").upper() == a):
+                    and _mkt_name(row) == a):
                 row["actual"] = ev.get("actual")
                 row["shadow_result"] = ev.get("result")
                 break
@@ -294,14 +312,14 @@ class Painter:
 
 
 def _asset_tag(ev: dict[str, Any], p: Painter) -> str:
-    """'BTC ' / 'ETH ' column so a merged multi-market feed says which market
-    each line belongs to. Events from older single-market logs have no asset
-    field and get no tag (rows render exactly as before)."""
-    a = ev.get("asset")
-    if not a:
+    """'BTC ' / 'ETH ' / 'BTC15 ' column so a merged multi-market feed says
+    which market each line belongs to. Events from older single-market logs have
+    no asset field and get no tag (rows render exactly as before)."""
+    if not ev.get("asset"):
         return ""
-    a = str(a).upper()
-    return p.c(f"{a:<4}", ASSET_COLOR.get(a, GREY), BOLD)
+    a = _mkt_name(ev)
+    pad = f"{a:<4}" if len(a) <= 4 else a + " "
+    return p.c(pad, _color_for(a), BOLD)
 
 
 def _activity_row(ev: dict[str, Any], p: Painter) -> str:
@@ -387,7 +405,8 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
     up_s = ""
     if state.get("first_ts"):
         up_s = "  up " + _fmt_uptime(time.time() - state["first_ts"])
-    lines.append(p.c("  FLIPPOLYBOT ", BOLD, CYAN) + p.c("+".join(names) + " 5m", CYAN)
+    windows = sorted(state.get("windows") or {"5m"}, key=lambda x: int(x[:-1]))
+    lines.append(p.c("  FLIPPOLYBOT ", BOLD, CYAN) + p.c("+".join(names) + " " + "+".join(windows), CYAN)
                  + p.c(f"  {now}", GREY) + p.c(up_s, YELLOW) + p.c(f"  build {BUILD}", GREY))
     lines.append(p.c("  " + "─" * 56, GREY))
 
@@ -396,18 +415,23 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
     rule = state.get("entry_rule", "threshold")
     margin = state.get("edge_margin", 0.03)
     lmc = state.get("lead_min_conf") or 0.0
-    lead_desc = "lead rule: leading side in the sweet-spot window" + (
-        f", conf >= {lmc:.2f}" if lmc > 0 else "")
+    lmp = state.get("lead_max_price")
+    lead_desc = ("lead rule: leading side in the sweet-spot window"
+                 + (f", ask <= {lmp:.2f}" if lmp else "")
+                 + (f", conf >= {lmc:.2f}" if lmc > 0 else "")
+                 + " · hold to resolution")
 
     if multi:
         # One compact line per market: live price, round move, live call.
-        sl = None
+        # Mixed 5m/15m streams tick down different rounds — one countdown per window.
+        sls: dict[str, float] = {}
         for a in names:
             ast = assets[a]
             ahb = ast.get("hb") or {}
             apred = ast.get("pred") or {}
-            if sl is None:
-                sl = ahb.get("seconds_left")
+            w = str(ahb.get("window") or "5m")
+            if w not in sls and ahb.get("seconds_left") is not None:
+                sls[w] = ahb["seconds_left"]
             price = ahb.get("price")
             price_s = f"${price:,.2f}" if price is not None else "—"
             mv = ahb.get("round_move")
@@ -417,7 +441,7 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
                                        GREEN if mv > 0 else RED if mv < 0 else GREY, BOLD)
             live = ahb.get("confidence") is not None and ahb.get("round") == apred.get("round")
             d = (ahb.get("direction") if live else None) or apred.get("direction")
-            tag = p.c(f"{a:<4}", ASSET_COLOR.get(a, GREY), BOLD)
+            tag = p.c(f"{a:<4}" if len(a) <= 4 else a + " ", _color_for(a), BOLD)
             if d:
                 conf = ahb.get("confidence") if live else apred.get("confidence")
                 conf = conf if conf is not None else 0.0
@@ -426,7 +450,13 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
             else:
                 call = p.c("predict —", GREY)
             lines.append(f"  {tag} {p.c(price_s, BOLD)}{mv_s}   {call}")
-        countdown = f"{sl:.0f}s left" if sl is not None else "—"
+        if len(sls) > 1:
+            countdown = "  ".join(f"{w} in {s:.0f}s"
+                                  for w, s in sorted(sls.items(), key=lambda kv: int(kv[0][:-1])))
+        elif sls:
+            countdown = f"{next(iter(sls.values())):.0f}s left"
+        else:
+            countdown = "—"
         if rule == "edge":
             status = p.c(f"edge rule: enters when conf >= ask + {margin:.2f}", CYAN)
         elif rule == "lead":
@@ -499,7 +529,7 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
             ast = assets[a]
             abal = ast["bankroll"] + ast["pnl_usd"]
             acol = GREEN if abal >= ast["bankroll"] else RED
-            parts.append(p.c(f"{a:<4}", ASSET_COLOR.get(a, GREY), BOLD)
+            parts.append(p.c(f"{a:<4}" if len(a) <= 4 else a + " ", _color_for(a), BOLD)
                          + p.c(f"${abal:,.2f}", acol, BOLD)
                          + p.c(f" (start ${ast['bankroll']:,.0f})", GREY))
         lines.append("  " + "   ".join(parts))
@@ -690,7 +720,7 @@ def print_history(events: list[dict[str, Any]], p: Painter, bankroll: float,
             ast = assets[a]
             abal = ast["bankroll"] + ast["pnl_usd"]
             acol = GREEN if abal >= ast["bankroll"] else RED
-            parts.append(p.c(f"{a} ", ASSET_COLOR.get(a, GREY), BOLD)
+            parts.append(p.c(f"{a} ", _color_for(a), BOLD)
                          + p.c(f"${abal:,.2f}", acol, BOLD))
         print("  " + "   ".join(parts))
 

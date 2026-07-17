@@ -21,6 +21,10 @@ def check(desc, cond):
 def test_slug_and_parse():
     slug = current_slug(1_700_000_123)
     check("slug uses the 5m bucket", slug == f"btc-updown-5m-{bucket_5m(1_700_000_123)}")
+    ts = 1_700_000_123
+    slug15 = current_slug(ts, "btc", "15m")
+    check("15m slug uses the 900s bucket",
+          slug15 == f"btc-updown-15m-{ts - (ts % 900)}")
     check("parse_json_field decodes a JSON string list", parse_json_field('["a","b"]') == ["a", "b"])
     check("parse_json_field passes through a real list", parse_json_field(["x"]) == ["x"])
     check("parse_json_field returns None on garbage", parse_json_field("{not json") is None)
