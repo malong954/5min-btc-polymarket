@@ -85,53 +85,77 @@ def check_base(base: str, feed: str | None) -> dict:
 
 
 def discover_candles(_bases, _feed) -> None:
-    """Probe the documented Candlestick API (separate priceapi.* host,
-    Bearer auth): GET /api/v1/history/rows?symbol=BTCUSD&resolution=1m."""
+    """Candlestick API auth flow: POST /api/v1/authorize (login+password
+    form) -> JWT -> Bearer for /history/rows etc. We don't know which of the
+    user's three secrets maps to login/password, so try the combinations."""
     import requests
-    print("\n=== CANDLESTICK API (priceapi hosts, Bearer auth) ===")
-    keys = []
-    if os.getenv("CHAINLINK_CANDLE_API_KEY"):
-        keys.append(("candle-key", os.environ["CHAINLINK_CANDLE_API_KEY"]))
-    if md.streams_creds():
-        keys.append(("streams-key", md.streams_creds()[0]))
-    if not keys:
-        print("no keys configured")
+    print("\n=== CANDLESTICK API (priceapi hosts, authorize -> JWT) ===")
+    u = (md.streams_creds() or (None, None))[0]
+    s = (md.streams_creds() or (None, None))[1]
+    c = os.getenv("CHAINLINK_CANDLE_API_KEY")
+    combos = []
+    if u and c:
+        combos.append(("login=streams-user pw=candle-key", u, c))
+    if c and s:
+        combos.append(("login=candle-key pw=hmac-secret", c, s))
+    if u and s:
+        combos.append(("login=streams-user pw=hmac-secret", u, s))
+    if c and u:
+        combos.append(("login=candle-key pw=streams-user", c, u))
+    if not combos:
+        print("need CHAINLINK_STREAMS_API_KEY(+SECRET) and/or CHAINLINK_CANDLE_API_KEY")
         return
     now = int(time.time())
     working = None
-    for base in (md.CANDLE_BASE_MAINNET, md.CANDLE_BASE_TESTNET):
-        for kname, key in keys:
+    for base in (md.CANDLE_BASE_TESTNET, md.CANDLE_BASE_MAINNET):
+        for name, lg, pw in combos:
+            md._candle_tok.clear()
+            try:
+                token = md.candles_authorize(base, lg, pw)
+                print(f"✔ {base} authorize [{name}] -> JWT ({len(token)} chars)")
+            except requests.HTTPError as e:
+                print(f"✘ {base} authorize [{name}] -> {http_err(e)}")
+                continue
+            except Exception as e:
+                print(f"✘ {base} authorize [{name}] -> {str(e)[:140]}")
+                continue
             try:
                 j = md.candles_history("BTCUSD", "1m", now - 300, now,
-                                       base=base, api_key=key)
+                                       base=base, login=lg, password=pw)
                 o = md._candle_first_open(j, now - 300)
-                print(f"✔ {base} [{kname}] -> 200, last-5min BTC candle open: "
-                      f"{('$%s' % f'{o:,.2f}') if o else 'shape? '}"
-                      f"{'' if o else json.dumps(j)[:200]}")
-                working = working or (base, kname)
-            except requests.HTTPError as e:
-                print(f"✘ {base} [{kname}] -> {http_err(e)}")
+                if o:
+                    print(f"  ✔ history/rows -> last-5min BTC candle open ${o:,.2f}")
+                else:
+                    print(f"  ✔ history/rows 200, unrecognized shape: {json.dumps(j)[:200]}")
+                working = working or (base, name, lg, pw, token)
             except Exception as e:
-                print(f"✘ {base} [{kname}] -> {str(e)[:140]}")
-        # quick reconnaissance for the 1s live endpoint
-        for path in ("/api/v1/live/rows", "/api/v1/latest", "/api/v1/price"):
-            try:
-                r = requests.get(base + path, params={"symbol": "BTCUSD"},
-                                 headers={"Authorization": f"Bearer {keys[0][1]}"},
-                                 timeout=6)
-                print(f"  live-guess {path} -> {r.status_code} {r.text[:120]}")
-            except Exception as e:
-                print(f"  live-guess {path} -> {str(e)[:80]}")
+                print(f"  ✘ history/rows -> {str(e)[:160]}")
+            # live-price reconnaissance with a real token (UDF-style endpoints)
+            for path, ps in (("/api/v1/quotes", {"symbols": "BTCUSD"}),
+                             ("/api/v1/symbol_info", {}),
+                             ("/api/v1/time", {})):
+                try:
+                    r = requests.get(base + path, params=ps,
+                                     headers={"Authorization": f"Bearer {token}"},
+                                     timeout=6)
+                    print(f"  live-guess {path} -> {r.status_code} {r.text[:140]}")
+                except Exception as e:
+                    print(f"  live-guess {path} -> {str(e)[:80]}")
+            if working:
+                break
+        if working:
+            break
     if working:
-        base, kname = working
-        print("\nCandles WORK — add to multi/.env:")
+        base, name, lg, pw, _ = working
+        print(f"\nCANDLES WORK via [{name}] — put in multi/.env:")
         print(f"  CHAINLINK_CANDLE_BASE={base}")
-        if kname == "streams-key" and not os.getenv("CHAINLINK_CANDLE_API_KEY"):
-            print("  (streams key doubles as the candle key — nothing more needed)")
-        print("Slot-boundary opens for settlement then use Chainlink-source "
-              "candles automatically after a bot restart.")
+        print(f"  CHAINLINK_CANDLE_LOGIN={lg}")
+        print(f"  CHAINLINK_CANDLE_API_KEY={pw}")
+        print("then restart the bots: slot-boundary opens switch to "
+              "Chainlink-source candles. Paste the live-guess lines back — a 200 "
+              "on /quotes means we can wire ~1s live prices too.")
     else:
-        print("\nNo candle host accepted the keys — paste this back.")
+        print("\nNo authorize combo produced a working token — paste this back.")
 
 
 def main() -> int:

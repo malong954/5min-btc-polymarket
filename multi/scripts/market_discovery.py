@@ -393,19 +393,71 @@ def candle_base() -> Optional[str]:
     return os.getenv("CHAINLINK_CANDLE_BASE")
 
 
-def candles_history(symbol: str, resolution: str, frm: int, to: int,
-                    base: Optional[str] = None,
-                    api_key: Optional[str] = None) -> dict:
-    key = api_key or candle_api_key()
-    if not key:
-        raise RuntimeError("no candlestick API key configured")
+def candle_login() -> Optional[str]:
+    return os.getenv("CHAINLINK_CANDLE_LOGIN") or os.getenv("CHAINLINK_STREAMS_API_KEY")
+
+
+_candle_tok: dict[str, tuple[str, float]] = {}
+
+
+def candles_authorize(base: Optional[str] = None, login: Optional[str] = None,
+                      password: Optional[str] = None) -> str:
+    """POST /api/v1/authorize (login+password form) -> Bearer JWT, cached
+    until shortly before its exp claim."""
     b = base or candle_base() or CANDLE_BASE_TESTNET
-    r = requests.get(f"{b}/api/v1/history/rows",
-                     params={"symbol": symbol, "resolution": resolution,
-                             "from": int(frm), "to": int(to)},
-                     headers={"Authorization": f"Bearer {key}"}, timeout=8)
+    lg = login or candle_login()
+    pw = password or os.getenv("CHAINLINK_CANDLE_API_KEY")
+    if not lg or not pw:
+        raise RuntimeError("candlestick login/password not configured")
+    ck = f"{b}|{lg}"
+    cached = _candle_tok.get(ck)
+    if cached and cached[1] > time.time() + 30:
+        return cached[0]
+    r = requests.post(f"{b}/api/v1/authorize",
+                      data={"login": lg, "password": pw},
+                      headers={"Content-Type": "application/x-www-form-urlencoded"},
+                      timeout=8)
     r.raise_for_status()
-    return r.json()
+    j = r.json()
+    token = None
+    for src in (j, j.get("d") if isinstance(j.get("d"), dict) else {}):
+        for k in ("access_token", "accessToken", "token", "jwt"):
+            v = (src or {}).get(k)
+            if isinstance(v, str) and v.count(".") == 2:
+                token = v
+                break
+        if token:
+            break
+    if not token:
+        raise RuntimeError(f"no token in authorize response: {str(j)[:160]}")
+    exp = time.time() + 540
+    try:
+        import base64
+        seg = token.split(".")[1]
+        seg += "=" * (-len(seg) % 4)
+        exp = float(json.loads(base64.urlsafe_b64decode(seg)).get("exp", exp))
+    except Exception:
+        pass
+    _candle_tok[ck] = (token, exp)
+    return token
+
+
+def candles_history(symbol: str, resolution: str, frm: int, to: int,
+                    base: Optional[str] = None, login: Optional[str] = None,
+                    password: Optional[str] = None) -> dict:
+    b = base or candle_base() or CANDLE_BASE_TESTNET
+    for attempt in (1, 2):
+        token = candles_authorize(b, login, password)
+        r = requests.get(f"{b}/api/v1/history/rows",
+                         params={"symbol": symbol, "resolution": resolution,
+                                 "from": int(frm), "to": int(to)},
+                         headers={"Authorization": f"Bearer {token}"}, timeout=8)
+        if r.status_code == 401 and attempt == 1:
+            _candle_tok.pop(f"{b}|{login or candle_login()}", None)
+            continue
+        r.raise_for_status()
+        return r.json()
+    raise RuntimeError("unreachable")
 
 
 def _candle_first_open(j: dict, min_ts: int) -> Optional[float]:
