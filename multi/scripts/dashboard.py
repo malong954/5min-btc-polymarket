@@ -458,8 +458,14 @@ tr:last-child td{border-bottom:0}
 .status{display:flex;gap:8px;align-items:center;font-size:13px;padding:4px 0}
 .status .nm{min-width:76px;font-variant-numeric:tabular-nums}
 .status .meta{color:var(--muted);font-size:12px}
-.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin-top:8px}
+.legend{display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin-top:8px}
 .legend span{display:inline-flex;align-items:center}
+.legend button.lg{display:inline-flex;align-items:center;background:none;border:0;
+  padding:2px 6px;font:inherit;font-size:12px;color:var(--ink2);cursor:pointer;
+  border-radius:6px}
+.legend button.lg:hover{background:var(--grid)}
+.legend button.lg.off{opacity:.35}
+.legend button.lg:focus-visible{outline:2px solid var(--ink2)}
 .empty{color:var(--muted);font-size:13px;padding:22px 0;text-align:center}
 .chart-wrap{position:relative}
 .tip{position:absolute;pointer-events:none;background:var(--surface);
@@ -559,7 +565,16 @@ const state = {
   range: ["today","24h","7d","all"].includes(qs.get("range")) ? qs.get("range") : "all",
   data: null,
   theme: ["light","dark"].includes(qs.get("theme")) ? qs.get("theme") : "auto",
+  hidden: new Set(),
 };
+try {
+  (JSON.parse(localStorage.getItem("btcmulti.hidden")) || [])
+    .forEach(k => state.hidden.add(k));
+} catch (e) {}
+function saveHidden(){
+  try { localStorage.setItem("btcmulti.hidden", JSON.stringify([...state.hidden])); }
+  catch (e) {}
+}
 
 const $ = id => document.getElementById(id);
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -716,12 +731,45 @@ function renderKpis(d){
 function renderLine(d){
   const holder = $("lineChart"), tip = $("lineTip"), legend = $("lineLegend");
   holder.replaceChildren(); legend.replaceChildren(); tip.style.display = "none";
-  const series = (d.pairs_all || [])
+  const allSeries = (d.pairs_all || [])
     .filter(p => (d.series && d.series[p] || []).length)
     .map(p => ({key:p, color:colorOf(p), pts:d.series[p]}));
-  if (!series.length){
+
+  // clickable legend: click toggles a series, double-click solos it; the
+  // y-scale recomputes from visible series only. Color stays bound to the
+  // entity regardless of what's hidden.
+  for (const s of allSeries){
+    const off = state.hidden.has(s.key);
+    const it = el("button", {class: "lg" + (off ? " off" : ""), type: "button",
+      "aria-pressed": String(!off),
+      title: "click: show/hide · double-click: only this one"});
+    const key = el("span", {class:"key"}); key.style.background = s.color;
+    it.appendChild(key); it.appendChild(document.createTextNode(s.key));
+    it.addEventListener("click", () => {
+      if (state.hidden.has(s.key)) state.hidden.delete(s.key);
+      else state.hidden.add(s.key);
+      saveHidden(); render(state.data);
+    });
+    it.addEventListener("dblclick", () => {
+      const others = allSeries.map(x => x.key).filter(k => k !== s.key);
+      const soloed = !state.hidden.has(s.key)
+        && others.every(k => state.hidden.has(k));
+      state.hidden.clear();
+      if (!soloed) others.forEach(k => state.hidden.add(k));
+      saveHidden(); render(state.data);
+    });
+    legend.appendChild(it);
+  }
+
+  if (!allSeries.length){
     holder.appendChild(el("div", {class:"empty"},
       "No closed trades in this range yet — entries appear once a slot's entry window triggers."));
+    return;
+  }
+  const series = allSeries.filter(s => !state.hidden.has(s.key));
+  if (!series.length){
+    holder.appendChild(el("div", {class:"empty"},
+      "All series hidden — click a legend item below to show it."));
     return;
   }
   const W = Math.max(320, holder.clientWidth || holder.parentNode.clientWidth || 600);
@@ -810,12 +858,6 @@ function renderLine(d){
     tip.style.display = "none"; hair.setAttribute("visibility", "hidden");
   });
   holder.appendChild(svg);
-  for (const s of series){
-    const it = el("span");
-    const key = el("span", {class:"key"}); key.style.background = s.color;
-    it.appendChild(key); it.appendChild(document.createTextNode(s.key));
-    legend.appendChild(it);
-  }
 }
 function niceStep(raw){
   const p = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1e-9))));
