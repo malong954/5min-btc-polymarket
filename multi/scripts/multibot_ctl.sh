@@ -47,12 +47,18 @@ ORCH_LOG_LINK="$RUNTIME_DIR/orchestrator.latest.log"
 
 mkdir -p "$RUNTIME_DIR"
 
-# optional multi-local env (Chainlink Data Streams creds etc.) — gitignored
+# optional multi-local env (Chainlink Data Streams creds etc.) — gitignored.
+# Parse-check first: a stray character in .env must degrade to a warning,
+# never abort every ctl command.
 if [[ -f "$MULTI_ROOT/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$MULTI_ROOT/.env"
-  set +a
+  if bash -n "$MULTI_ROOT/.env" 2>/dev/null; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$MULTI_ROOT/.env"
+    set +a
+  else
+    echo "warning: multi/.env has a shell syntax error — ignoring it" >&2
+  fi
 fi
 
 usage() {

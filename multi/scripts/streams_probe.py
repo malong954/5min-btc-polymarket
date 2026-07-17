@@ -46,9 +46,19 @@ def main() -> int:
         print(f"✘ /api/v1/feeds unreachable: {e}")
         return 1
 
-    rows = feeds.get("feeds") or feeds.get("data") or feeds
+    rows = feeds.get("feeds")
+    if rows is None:
+        rows = feeds.get("data")
+    if rows is None and isinstance(feeds, list):
+        rows = feeds
     btc_candidates = []
-    if isinstance(rows, list):
+    if isinstance(rows, list) and not rows:
+        print("✔ authenticated OK, but the account has NO streams enabled yet.")
+        print("  In your Chainlink dashboard, open Data Streams and enable the")
+        print("  BTC/USD stream for this key (docs.chain.link/data-streams/crypto-streams")
+        print("  lists all stream IDs). Then set CHAINLINK_FEED_ID_BTC in multi/.env")
+        print("  and re-run this probe — /reports may work once the feed is granted.")
+    if isinstance(rows, list) and rows:
         print(f"✔ account has {len(rows)} feed(s):")
         for f in rows[:25]:
             fid = f.get("feedID") or f.get("feed_id") or f.get("id") or "?"
@@ -56,7 +66,7 @@ def main() -> int:
             print(f"    {fid}  {name}")
             if "btc" in str(name).lower() or "btc" in str(fid).lower():
                 btc_candidates.append(fid)
-    else:
+    if rows is None:
         print(f"✔ feeds response: {json.dumps(feeds)[:400]}")
 
     feed = md.streams_feed_id("btc") or (btc_candidates[0] if btc_candidates else None)
