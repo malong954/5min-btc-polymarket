@@ -225,8 +225,10 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
                 state["lead_lo"] = ev["lead_lo"]
         if ev.get("max_entry_price") is not None:
             state["max_entry_price"] = ev["max_entry_price"]
-        if ev.get("regime_min_move") is not None and str(ev.get("window") or "5m") == "5m":
-            state["regime_min_move"] = ev["regime_min_move"]
+        # The gate's dollar floor differs per asset (auto-scaled), so a merged
+        # panel shows the shared FRACTION, not whichever trader configured last.
+        if ev.get("regime_frac") is not None:
+            state["regime_frac"] = ev["regime_frac"]
         return state
     if t == "heartbeat":
         state["last_hb"] = ev
@@ -432,8 +434,8 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
             win_desc += " (x3 on 15m)"
     else:
         win_desc = "leading side in the sweet-spot window"
-    rmm = state.get("regime_min_move") or 0.0
-    regime_s = f" · regime gate ${rmm:g}" if rmm > 0 else ""
+    rfrac = state.get("regime_frac") or 0.0
+    regime_s = f" · regime gate {rfrac:g}x move" if rfrac > 0 else ""
     lead_desc = ("lead rule: " + win_desc
                  + (f", ask <= {lmp:.2f}" if lmp else "")
                  + (f", conf >= {lmc:.2f}" if lmc > 0 else "")
