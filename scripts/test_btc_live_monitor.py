@@ -159,8 +159,10 @@ def test_15m_stream_is_a_separate_market():
     + ask-cap rules from the trader's config event."""
     st = new_state()
     fold_event(st, {"type": "config", "asset": "BTC", "window": "5m", "bankroll": 100.0,
-                    "entry_rule": "lead", "lead_min_conf": 0.40, "lead_max_price": 0.72})
-    fold_event(st, {"type": "config", "asset": "BTC", "window": "15m", "bankroll": 100.0})
+                    "entry_rule": "lead", "lead_min_conf": 0.40, "lead_max_price": 0.72,
+                    "lead_hi": 270.0, "lead_lo": 180.0})
+    fold_event(st, {"type": "config", "asset": "BTC", "window": "15m", "bankroll": 100.0,
+                    "lead_hi": 810.0, "lead_lo": 540.0})
     fold_event(st, {"type": "heartbeat", "asset": "BTC", "window": "5m",
                     "price": 60000.0, "seconds_left": 100, "round": 300})
     fold_event(st, {"type": "heartbeat", "asset": "BTC", "window": "15m",
@@ -178,6 +180,8 @@ def test_15m_stream_is_a_separate_market():
     check("rows tag the 15m market", "BTC15" in out)
     check("rules line shows hold to resolution", "hold to resolution" in out)
     check("rules line shows the ask cap", "ask <= 0.72" in out)
+    check("rules line shows the 5m lead window, not the 15m x3 one",
+          "180-270s left (x3 on 15m)" in out)
     # A 15m shadow settle must not grade a 5m skip of the same round number.
     st2 = new_state()
     fold_event(st2, {"type": "skip", "asset": "BTC", "window": "5m", "round": 900,

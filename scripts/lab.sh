@@ -17,6 +17,8 @@
 #
 # Tunables (env): PROVIDER=binance THRESHOLD=0.60 STAKE=10 BANKROLL=100
 #                 RULE=threshold|edge|lead EDGE_MARGIN=0.03 LEAD_MIN_CONF=0.40
+#                 LEAD_HI=240 LEAD_LO=180   lead-rule window (seconds left when
+#                                        it opens/closes; 15m traders get x3)
 #                 ASSETS="eth sol xrp"   extra 5m markets to record AND trade
 #                                        alongside BTC (each gets its own
 #                                        recorder, trader, bankroll and log)
@@ -51,6 +53,8 @@ RULE="${RULE:-${SAVED_RULE:-threshold}}"
 EDGE_MARGIN="${EDGE_MARGIN:-${SAVED_EDGE_MARGIN:-0.03}}"
 MAX_PRICE="${MAX_PRICE:-${SAVED_MAX_PRICE:-0.97}}"   # never buy above this ask
 LEAD_MIN_CONF="${LEAD_MIN_CONF:-${SAVED_LEAD_MIN_CONF:-0.0}}"  # lead+confidence combo floor (0 = off)
+LEAD_HI="${LEAD_HI:-${SAVED_LEAD_HI:-240}}"   # lead window opens at this many seconds left
+LEAD_LO="${LEAD_LO:-${SAVED_LEAD_LO:-180}}"   # ...and closes at this many seconds left
 # Per-market confidence floors override the global LEAD_MIN_CONF for that market
 # (each market calibrates + gets adversely selected differently). Any unset one
 # falls back to LEAD_MIN_CONF. NOTE: choosing these FROM the combo tables makes
@@ -136,6 +140,7 @@ case "${1:-start}" in
 
   status)
     echo "conf floors:  BTC ${CONF_BTC}  ETH ${CONF_ETH}  SOL ${CONF_SOL}  XRP ${CONF_XRP}  (rule=$RULE)"
+    echo "lead window:  ${LEAD_HI}-${LEAD_LO}s left  (15m traders: x3)"
     btrader_up  && echo "trader (BTC):   RUNNING" || echo "trader (BTC):   not running"
     brec_up     && echo "recorder (BTC): RUNNING" || echo "recorder (BTC): not running"
     for A in $ASSETS; do
@@ -291,6 +296,8 @@ mkdir -p out
   echo "SAVED_EDGE_MARGIN=$EDGE_MARGIN"
   echo "SAVED_MAX_PRICE=$MAX_PRICE"
   echo "SAVED_LEAD_MIN_CONF=$LEAD_MIN_CONF"
+  echo "SAVED_LEAD_HI=$LEAD_HI"
+  echo "SAVED_LEAD_LO=$LEAD_LO"
   echo "SAVED_CONF_BTC=$CONF_BTC"
   echo "SAVED_CONF_ETH=$CONF_ETH"
   echo "SAVED_CONF_SOL=$CONF_SOL"
@@ -319,7 +326,7 @@ else
   nohup "$PY" scripts/btc_live_paper.py --asset btc \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
     --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
-    --lead-min-conf "$CONF_BTC" \
+    --lead-min-conf "$CONF_BTC" --lead-hi "$LEAD_HI" --lead-lo "$LEAD_LO" \
     --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
@@ -327,7 +334,7 @@ else
   if [ "$RULE" = "edge" ]; then
     echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
   elif [ "$RULE" = "lead" ]; then
-    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, 180-240s left, ask <= 0.72, decisive move, conf >= ${CONF_BTC})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, ${LEAD_LO}-${LEAD_HI}s left, ask <= 0.72, decisive move, conf >= ${CONF_BTC})"
   else
     echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${THRESHOLD})"
   fi
@@ -351,7 +358,7 @@ for A in $ASSETS; do
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" \
       --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
       --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
-      --lead-min-conf "$AF" \
+      --lead-min-conf "$AF" --lead-hi "$LEAD_HI" --lead-lo "$LEAD_LO" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
@@ -362,6 +369,10 @@ done
 
 # --- 15m markets: one trader per asset in M15 (registry analysis: the 15m
 # --- cohort shows ~50% higher alpha per trade and is less latency-crowded) ---
+# Passing --lead-hi/--lead-lo explicitly overrides the trader's own x3 window
+# scaling, so scale here (awk: LEAD_* may be non-integer).
+LEAD_HI15="$(awk "BEGIN{print $LEAD_HI*3}")"
+LEAD_LO15="$(awk "BEGIN{print $LEAD_LO*3}")"
 for A in $M15; do
   AU="$(echo "$A" | tr 'a-z' 'A-Z')"
   if m15trader_up "$A"; then
@@ -372,7 +383,7 @@ for A in $M15; do
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" --window 15m \
       --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
       --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
-      --lead-min-conf "$AF" \
+      --lead-min-conf "$AF" --lead-hi "$LEAD_HI15" --lead-lo "$LEAD_LO15" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A-15m.jsonl" --quiet \

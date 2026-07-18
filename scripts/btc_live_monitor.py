@@ -216,6 +216,13 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
             state["lead_min_conf"] = ev["lead_min_conf"]
         if ev.get("lead_max_price") is not None:
             state["lead_max_price"] = ev["lead_max_price"]
+        # Window seconds from the 5m trader only — a 15m trader's x3-scaled
+        # numbers must not overwrite the headline (it's annotated instead).
+        if str(ev.get("window") or "5m") == "5m":
+            if ev.get("lead_hi") is not None:
+                state["lead_hi"] = ev["lead_hi"]
+            if ev.get("lead_lo") is not None:
+                state["lead_lo"] = ev["lead_lo"]
         if ev.get("max_entry_price") is not None:
             state["max_entry_price"] = ev["max_entry_price"]
         return state
@@ -416,7 +423,14 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
     margin = state.get("edge_margin", 0.03)
     lmc = state.get("lead_min_conf") or 0.0
     lmp = state.get("lead_max_price")
-    lead_desc = ("lead rule: leading side in the sweet-spot window"
+    lhi, llo = state.get("lead_hi"), state.get("lead_lo")
+    if lhi and llo:
+        win_desc = f"leading side {llo:.0f}-{lhi:.0f}s left"
+        if "15m" in (state.get("windows") or set()):
+            win_desc += " (x3 on 15m)"
+    else:
+        win_desc = "leading side in the sweet-spot window"
+    lead_desc = ("lead rule: " + win_desc
                  + (f", ask <= {lmp:.2f}" if lmp else "")
                  + (f", conf >= {lmc:.2f}" if lmc > 0 else "")
                  + " · hold to resolution")
