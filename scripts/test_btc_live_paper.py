@@ -377,6 +377,27 @@ def test_15m_window_rounds_and_tagging():
           and all(e["round"] % 300 == 0 for e in ev5 if "round" in e))
 
 
+def test_regime_gate_blocks_flat_markets():
+    """regime_min_move: an unreachable floor blocks every entry (skipped as
+    flat_regime, still shadow-graded); a negligible floor changes nothing."""
+    bars = synth_bars(6000, autocorr=0.5, seed=31)
+    eng = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, regime_min_move=1e9)
+    events = drive(eng, bars)
+    check("huge regime floor blocks every entry",
+          not any(e["type"] == "entry" for e in events))
+    sided_skips = [e for e in events if e["type"] == "skip" and e.get("side")]
+    check("blocked rounds skip as flat_regime",
+          sided_skips and all(e["reason"] == "flat_regime" for e in sided_skips))
+    check("flat_regime skips report the measured trailing move",
+          all(e.get("regime_move") is not None for e in sided_skips))
+    check("flat_regime skips still shadow-grade",
+          any(e["type"] == "shadow_settle" for e in events))
+    eng2 = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, regime_min_move=1e-9)
+    ev2 = drive(eng2, bars)
+    check("negligible regime floor does not block entries",
+          any(e["type"] == "entry" for e in ev2))
+
+
 def main():
     test_stream_produces_full_lifecycle()
     test_no_double_entry_per_round()
@@ -394,6 +415,7 @@ def main():
     test_requote_pays_worse_never_better()
     test_format_event_smoke()
     test_15m_window_rounds_and_tagging()
+    test_regime_gate_blocks_flat_markets()
     print("\nAll live paper-trading tests passed.")
 
 

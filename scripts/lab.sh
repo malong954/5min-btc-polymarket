@@ -19,6 +19,10 @@
 #                 RULE=threshold|edge|lead EDGE_MARGIN=0.03 LEAD_MIN_CONF=0.40
 #                 LEAD_HI=240 LEAD_LO=180   lead-rule window (seconds left when
 #                                        it opens/closes; 15m traders get x3)
+#                 REGIME=0.5             volatility regime gate: median trailing
+#                                        round |move| must reach this fraction of
+#                                        the asset's decisive-move threshold or
+#                                        the round skips as flat_regime (0 = off)
 #                 ASSETS="eth sol xrp"   extra 5m markets to record AND trade
 #                                        alongside BTC (each gets its own
 #                                        recorder, trader, bankroll and log)
@@ -55,6 +59,7 @@ MAX_PRICE="${MAX_PRICE:-${SAVED_MAX_PRICE:-0.97}}"   # never buy above this ask
 LEAD_MIN_CONF="${LEAD_MIN_CONF:-${SAVED_LEAD_MIN_CONF:-0.0}}"  # lead+confidence combo floor (0 = off)
 LEAD_HI="${LEAD_HI:-${SAVED_LEAD_HI:-240}}"   # lead window opens at this many seconds left
 LEAD_LO="${LEAD_LO:-${SAVED_LEAD_LO:-180}}"   # ...and closes at this many seconds left
+REGIME="${REGIME:-${SAVED_REGIME:-0}}"        # regime gate fraction (0 = off)
 # Per-market confidence floors override the global LEAD_MIN_CONF for that market
 # (each market calibrates + gets adversely selected differently). Any unset one
 # falls back to LEAD_MIN_CONF. NOTE: choosing these FROM the combo tables makes
@@ -141,6 +146,7 @@ case "${1:-start}" in
   status)
     echo "conf floors:  BTC ${CONF_BTC}  ETH ${CONF_ETH}  SOL ${CONF_SOL}  XRP ${CONF_XRP}  (rule=$RULE)"
     echo "lead window:  ${LEAD_HI}-${LEAD_LO}s left  (15m traders: x3)"
+    echo "regime gate:  ${REGIME}  (fraction of decisive move; 0 = off)"
     btrader_up  && echo "trader (BTC):   RUNNING" || echo "trader (BTC):   not running"
     brec_up     && echo "recorder (BTC): RUNNING" || echo "recorder (BTC): not running"
     for A in $ASSETS; do
@@ -279,6 +285,19 @@ case "${1:-start}" in
     else
       echo "(no trader data yet: $TLOG missing)"
     fi
+    # 15m trader streams (no recorder yet — the paper trader's own timeline:
+    # entries, settles, shadow-graded skips, confidence bands).
+    for A in btc eth sol xrp; do
+      MLOG="out/live-$A-15m.jsonl"
+      [ -f "$MLOG" ] || continue
+      AU="$(echo "$A" | tr 'a-z' 'A-Z')"
+      echo
+      echo "---- $AU 15m market: trader timeline (paper stream) ----"
+      MSET="$(grep -c '"type":"settle"' "$MLOG" 2>/dev/null || true)"
+      MFLAT="$(grep -c '"reason":"flat_regime"' "$MLOG" 2>/dev/null || true)"
+      echo "  settled: ${MSET:-0}   flat_regime skips: ${MFLAT:-0}"
+      "$PY" scripts/btc_timeline_analyze.py --log "$MLOG"                 || true
+    done
     echo; echo "######################## END ##########################"
     exit 0 ;;
 
@@ -298,6 +317,7 @@ mkdir -p out
   echo "SAVED_LEAD_MIN_CONF=$LEAD_MIN_CONF"
   echo "SAVED_LEAD_HI=$LEAD_HI"
   echo "SAVED_LEAD_LO=$LEAD_LO"
+  echo "SAVED_REGIME=$REGIME"
   echo "SAVED_CONF_BTC=$CONF_BTC"
   echo "SAVED_CONF_ETH=$CONF_ETH"
   echo "SAVED_CONF_SOL=$CONF_SOL"
@@ -326,7 +346,7 @@ else
   nohup "$PY" scripts/btc_live_paper.py --asset btc \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
     --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
-    --lead-min-conf "$CONF_BTC" --lead-hi "$LEAD_HI" --lead-lo "$LEAD_LO" \
+    --lead-min-conf "$CONF_BTC" --lead-hi "$LEAD_HI" --lead-lo "$LEAD_LO" --regime-frac "$REGIME" \
     --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
@@ -358,7 +378,7 @@ for A in $ASSETS; do
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" \
       --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
       --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
-      --lead-min-conf "$AF" --lead-hi "$LEAD_HI" --lead-lo "$LEAD_LO" \
+      --lead-min-conf "$AF" --lead-hi "$LEAD_HI" --lead-lo "$LEAD_LO" --regime-frac "$REGIME" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
@@ -383,7 +403,7 @@ for A in $M15; do
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" --window 15m \
       --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
       --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
-      --lead-min-conf "$AF" --lead-hi "$LEAD_HI15" --lead-lo "$LEAD_LO15" \
+      --lead-min-conf "$AF" --lead-hi "$LEAD_HI15" --lead-lo "$LEAD_LO15" --regime-frac "$REGIME" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A-15m.jsonl" --quiet \

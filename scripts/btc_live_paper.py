@@ -132,7 +132,19 @@ class LivePaperEngine:
         official_wait: float = 150.0,
         asset: str = "BTC",
         window: str = "5m",
+        regime_min_move: float = 0.0,
+        regime_lookback: int = 12,
     ):
+        # Volatility regime gate: only trade when the market itself is moving.
+        # Requires the MEDIAN |open->close| of the trailing regime_lookback
+        # completed rounds to reach regime_min_move dollars (0 = off). Measured
+        # motivation: a weekday segment with median round move $22.9 had every
+        # official-label entry band positive; a weekend chop segment with
+        # median $4.9 had every band negative. Blocked rounds are skipped as
+        # 'flat_regime' but still predicted + shadow-settled, so the gate's
+        # cost/benefit stays measurable.
+        self.regime_min_move = regime_min_move
+        self.regime_lookback = regime_lookback
         # Market interval: 5m (300s rounds) or 15m (900s rounds). Stamped on
         # every event so the dashboard can separate e.g. BTC 5m from BTC 15m.
         self.window = window
@@ -210,6 +222,26 @@ class LivePaperEngine:
     @property
     def balance(self) -> float:
         return self.bankroll + self.stats["pnl_usd"]
+
+    def _regime_move(self, model: Any, cur: int) -> Optional[float]:
+        """Median |open -> close| of the trailing regime_lookback COMPLETED
+        rounds, from the 1m bars. None when there isn't a single measurable
+        round in the history window (gate then fails closed: no trade without
+        evidence the market is moving)."""
+        moves: list[float] = []
+        rs = cur - self.slot
+        while len(moves) < self.regime_lookback and rs >= 0:
+            i_open = model.idx_1m.get(rs)
+            i_close = model.idx_1m.get(rs + self.slot - 60)
+            if i_open is None or i_close is None:
+                break
+            moves.append(abs(model.bars_1m[i_close].c - model.bars_1m[i_open].o))
+            rs -= self.slot
+        if not moves:
+            return None
+        moves.sort()
+        mid = len(moves) // 2
+        return moves[mid] if len(moves) % 2 else (moves[mid - 1] + moves[mid]) / 2.0
 
     def _emit(self, ev: dict[str, Any]) -> dict[str, Any]:
         ev.setdefault("asset", self.asset)
@@ -437,6 +469,8 @@ class LivePaperEngine:
             if rs not in self.positions and rs not in self.pending and rs not in self.skipped:
                 if not w.get("side"):
                     reason = "no_direction"
+                elif w.get("flat_regime"):
+                    reason = "flat_regime"    # setup armed, but the market is flat
                 elif w.get("capped"):
                     reason = "price_capped"   # armed, but the ask stayed near $1
                 elif self.entry_rule == "edge":
@@ -456,6 +490,7 @@ class LivePaperEngine:
                     "ts": int(now), "type": "skip", "round": rs, "reason": reason,
                     "side": w.get("side"), "confidence": w.get("conf"),
                     "ask": w.get("ask"),   # the price the rule refused (edge/capped skips)
+                    "regime_move": w.get("regime_move"),  # trailing median move (flat_regime skips)
                     "features": w.get("features"), "note": w.get("note"),
                 }))
             if w["round"] != cur:
@@ -516,6 +551,15 @@ class LivePaperEngine:
                     # stake to win pennies. Keep watching; asks can dip back.
                     self.watch["capped"] = True
                     armed = False
+                if armed and self.regime_min_move > 0:
+                    # Regime gate: the setup fired, but is the market actually
+                    # moving? Median trailing round move below the floor -> a
+                    # coin-flip regime where the leading side mean-reverts.
+                    rm = self._regime_move(model, cur)
+                    self.watch["regime_move"] = round(rm, 6) if rm is not None else None
+                    if rm is None or rm < self.regime_min_move:
+                        self.watch["flat_regime"] = True
+                        armed = False
                 if self.entry_rule == "lead" and self.lead_persist > 0:
                     # Sustained-arming gate: a single armed poll is not enough —
                     # the setup must still be armed lead_persist seconds after it
@@ -663,6 +707,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--lead-persist", type=float, default=5.0,
                     help="lead rule: the FULL setup must hold this many seconds before entering "
                          "(matches the 5s-sampled validation; audited: momentary grazes lose). 0 = off")
+    ap.add_argument("--regime-frac", type=float, default=0.0,
+                    help="Volatility regime gate: require the MEDIAN |open->close| of the trailing "
+                         "--regime-lookback completed rounds to reach this FRACTION of the (auto-scaled) "
+                         "--lead-min-move before any entry; blocked rounds skip as flat_regime. 0 = off. "
+                         "E.g. 0.5 on BTC (~$10 decisive move) demands a ~$5 median trailing round move")
+    ap.add_argument("--regime-lookback", type=int, default=12,
+                    help="How many trailing completed rounds the regime gate measures (median)")
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
     ap.add_argument("--max-entry-price", type=float, default=0.97,
                     help="Never buy above this ask — near $1.00 you risk the whole stake to win pennies")
@@ -743,6 +794,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         lead_max_price=args.lead_max_price, lead_min_move=args.lead_min_move,
         lead_min_conf=args.lead_min_conf, lead_persist=args.lead_persist,
         asset=asset.upper(), window=args.window,
+        regime_min_move=args.regime_frac * args.lead_min_move,
+        regime_lookback=args.regime_lookback,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")
@@ -761,6 +814,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "lead_hi": args.lead_hi, "lead_lo": args.lead_lo,
         "lead_max_price": args.lead_max_price, "lead_min_move": args.lead_min_move,
         "lead_min_conf": args.lead_min_conf, "lead_persist": args.lead_persist,
+        "regime_frac": args.regime_frac, "regime_lookback": args.regime_lookback,
+        "regime_min_move": round(args.regime_frac * args.lead_min_move, 6),
         "sizing": args.sizing, "stake_usd": args.stake_usd,
         "bankroll": args.bankroll, "price_source": args.entry_price_source,
         "provider": args.provider,

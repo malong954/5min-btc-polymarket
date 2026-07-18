@@ -74,6 +74,7 @@ def build_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "side": e.get("side"), "actual": e.get("actual"),
             "win": 1 if e.get("result") == "win" else 0,
             "entry_price": e.get("entry_price"),
+            "reason": e.get("reason"),   # shadow settles: why the round was skipped
             "divergence": (feats.get("divergence") if feats else None),
             "features": feats,
         })
@@ -189,6 +190,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             print("      -> skipped rounds won as much or MORE than entered ones: the")
             print("         threshold may be too strict (leaving good trades on the table).")
+        # Per-reason breakdown: each gate's blocked rounds, graded. A gate whose
+        # blocked rounds would have won ~coin-flip at ~0.6+ asks is saving money
+        # even at a 50%+ would-be winrate; one blocking 80%-winners is costing.
+        by_reason: dict[str, list] = {}
+        for r in recs:
+            if not r["entered"]:
+                by_reason.setdefault(str(r.get("reason") or "unknown"), []).append(r)
+        if len(by_reason) > 1 or "flat_regime" in by_reason:
+            print(f"      {'skip reason':<20}{'n':<6}{'would-be winrate'}")
+            for reason, rows in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
+                wr, n = _winrate(rows)
+                print(f"      {reason:<20}{n:<6}{wr:.1%}")
     else:
         print("      no shadow-settled skips yet.")
 
