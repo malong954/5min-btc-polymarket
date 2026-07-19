@@ -19,6 +19,9 @@
 #                 RULE=threshold|edge|lead EDGE_MARGIN=0.03 LEAD_MIN_CONF=0.40
 #                 LEAD_HI=240 LEAD_LO=180   lead-rule window (seconds left when
 #                                        it opens/closes; 15m traders get x3)
+#                 LEAD_MAX_PRICE=0.72    lead rule: only enter while the ask is
+#                                        at/below this (raise to ~0.90 for the
+#                                        late-confirmed variant)
 #                 REGIME=0.5             volatility regime gate: median trailing
 #                                        round |move| must reach this fraction of
 #                                        the asset's decisive-move threshold or
@@ -59,6 +62,7 @@ MAX_PRICE="${MAX_PRICE:-${SAVED_MAX_PRICE:-0.97}}"   # never buy above this ask
 LEAD_MIN_CONF="${LEAD_MIN_CONF:-${SAVED_LEAD_MIN_CONF:-0.0}}"  # lead+confidence combo floor (0 = off)
 LEAD_HI="${LEAD_HI:-${SAVED_LEAD_HI:-240}}"   # lead window opens at this many seconds left
 LEAD_LO="${LEAD_LO:-${SAVED_LEAD_LO:-180}}"   # ...and closes at this many seconds left
+LEAD_MAX_PRICE="${LEAD_MAX_PRICE:-${SAVED_LEAD_MAX_PRICE:-0.72}}"  # lead rule ask cap
 REGIME="${REGIME:-${SAVED_REGIME:-0}}"        # regime gate fraction (0 = off)
 # Per-market confidence floors override the global LEAD_MIN_CONF for that market
 # (each market calibrates + gets adversely selected differently). Any unset one
@@ -145,7 +149,7 @@ case "${1:-start}" in
 
   status)
     echo "conf floors:  BTC ${CONF_BTC}  ETH ${CONF_ETH}  SOL ${CONF_SOL}  XRP ${CONF_XRP}  (rule=$RULE)"
-    echo "lead window:  ${LEAD_HI}-${LEAD_LO}s left  (15m traders: x3)"
+    echo "lead window:  ${LEAD_HI}-${LEAD_LO}s left  (15m traders: x3)   ask cap: ${LEAD_MAX_PRICE}"
     echo "regime gate:  ${REGIME}  (fraction of decisive move; 0 = off)"
     btrader_up  && echo "trader (BTC):   RUNNING" || echo "trader (BTC):   not running"
     brec_up     && echo "recorder (BTC): RUNNING" || echo "recorder (BTC): not running"
@@ -317,6 +321,7 @@ mkdir -p out
   echo "SAVED_LEAD_MIN_CONF=$LEAD_MIN_CONF"
   echo "SAVED_LEAD_HI=$LEAD_HI"
   echo "SAVED_LEAD_LO=$LEAD_LO"
+  echo "SAVED_LEAD_MAX_PRICE=$LEAD_MAX_PRICE"
   echo "SAVED_REGIME=$REGIME"
   echo "SAVED_CONF_BTC=$CONF_BTC"
   echo "SAVED_CONF_ETH=$CONF_ETH"
@@ -345,7 +350,7 @@ else
   [ -f "$TLOG" ] && mv "$TLOG" "out/live-prev.jsonl" && echo "archived prior session -> out/live-prev.jsonl"
   nohup "$PY" scripts/btc_live_paper.py --asset btc \
     --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
-    --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
+    --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$LEAD_MAX_PRICE" \
     --lead-min-conf "$CONF_BTC" --lead-hi "$LEAD_HI" --lead-lo "$LEAD_LO" --regime-frac "$REGIME" \
     --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
@@ -377,7 +382,7 @@ for A in $ASSETS; do
     AF="$(conf_for "$A")"
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" \
       --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
-      --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
+      --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$LEAD_MAX_PRICE" \
       --lead-min-conf "$AF" --lead-hi "$LEAD_HI" --lead-lo "$LEAD_LO" --regime-frac "$REGIME" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
@@ -402,7 +407,7 @@ for A in $M15; do
     AF="$(conf_for "$A")"
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" --window 15m \
       --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
-      --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" \
+      --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$LEAD_MAX_PRICE" \
       --lead-min-conf "$AF" --lead-hi "$LEAD_HI15" --lead-lo "$LEAD_LO15" --regime-frac "$REGIME" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
