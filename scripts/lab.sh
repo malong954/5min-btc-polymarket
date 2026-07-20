@@ -12,6 +12,9 @@
 #   scripts/lab.sh analyze-all  the decision tables over EVERY archived segment
 #                               pooled with the current one (full-history truth
 #                               table, combo, split-halves, crossing, calibration)
+#   scripts/lab.sh sync         push the lab's logs (gzipped) into the repo so
+#                               the analysis side can run reports on the data
+#                               directly instead of via pasted terminal output
 #   scripts/lab.sh dash         reopen the trader dashboard
 #   scripts/lab.sh recdash      reopen the recorder (price-ladder) dashboard
 #   scripts/lab.sh history      full entered/skipped/win/loss timeline
@@ -420,8 +423,33 @@ case "${1:-start}" in
     echo; echo "######################## END ##########################"
     exit 0 ;;
 
+  sync)
+    # Ship the lab's logs into the repo (gzipped, data/lab/) and push, so the
+    # analysis side (a Claude session or any other machine) can run the reports
+    # directly on the data instead of working from pasted terminal output.
+    # Logs are paper-trading JSONL — market prices + simulated trades, no
+    # credentials (.env is gitignored and never touched here).
+    TS="$(date -u +%Y%m%dT%H%M%SZ)"
+    mkdir -p data/lab
+    n=0
+    for f in out/*.jsonl; do
+      [ -f "$f" ] || continue
+      case "$(basename "$f")" in _*) continue ;; esac   # skip pooled temp files
+      gzip -c "$f" > "data/lab/$(basename "$f").gz" && n=$((n + 1))
+    done
+    [ -f out/lab.conf ] && cp out/lab.conf data/lab/lab.conf
+    if [ "$n" = "0" ]; then echo "no logs to sync"; exit 0; fi
+    git add data/lab
+    if git commit -m "lab data sync $TS ($n logs)"; then
+      git push && echo "synced $n logs -> data/lab on branch $(git rev-parse --abbrev-ref HEAD)" \
+        || { echo "commit made but push failed — retry with: git push"; exit 1; }
+    else
+      echo "nothing new to sync (logs unchanged since last sync)"
+    fi
+    exit 0 ;;
+
   start) ;;
-  *) echo "usage: scripts/lab.sh [start|newrun|analyze|analyze-all|dash|recdash|history|status|stop]"; exit 1 ;;
+  *) echo "usage: scripts/lab.sh [start|newrun|analyze|analyze-all|sync|dash|recdash|history|status|stop]"; exit 1 ;;
 esac
 
 mkdir -p out
