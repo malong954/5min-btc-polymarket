@@ -333,6 +333,19 @@ case "${1:-start}" in
         echo "---- $AU 5m market: exit policies ----"
         "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --exit --min-size 100 --min-conf "$(conf_for "$A")" --lead-hi "$(lead_hi_for "$A")" --lead-lo "$(lead_lo_for "$A")" --lead-max-price "$(lead_cap_for "$A")" || true
         echo
+        # The question a conf-threshold trader lives or dies on: by the time
+        # confidence crosses, has the ask already priced the move? EV = winrate
+        # at the crossing MINUS the price then.
+        echo "---- $AU 5m market: confidence crossing (does conf beat the ask?) ----"
+        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --crossing || true
+        echo
+        # The trader's ACTUAL entries under its per-asset rule, graded.
+        ATLOG="out/live-$A.jsonl"
+        if [ -f "$ATLOG" ]; then
+          echo "---- $AU 5m market: trader timeline (rule=$(rule_for "$A")) ----"
+          "$PY" scripts/btc_timeline_analyze.py --log "$ATLOG"            || true
+          echo
+        fi
       done
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --fade              || true
       echo
