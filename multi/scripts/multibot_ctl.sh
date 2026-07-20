@@ -85,6 +85,11 @@ Usage:
   multibot_ctl.sh golive stop
   multibot_ctl.sh archive                move reports+logs to a timestamped
                   archive: dashboards/reports restart from a clean epoch
+  multibot_ctl.sh limitless probe        map the Limitless.exchange API (run
+                  this FIRST and paste the output back)
+  multibot_ctl.sh limitless start|stop|status|summary|logs
+                  paper arb monitor on Limitless BTC markets with fill-echo
+                  (does crossed-book arb survive on a younger venue?)
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -366,6 +371,75 @@ PYEOF
   fi
 }
 
+LTL_PIDFILE="$RUNTIME_DIR/limitless.pid"
+
+ltl_running() {
+  [[ -f "$LTL_PIDFILE" ]] && ps -p "$(cat "$LTL_PIDFILE" 2>/dev/null)" >/dev/null 2>&1
+}
+
+cmd_limitless() {
+  local sub="${1:-probe}"
+  shift || true
+  local log="$RUNTIME_DIR/limitless.log"
+  case "$sub" in
+    probe)
+      check_deps
+      "$PY" "$SCRIPT_DIR/limitless_probe.py" "$@"
+      ;;
+    start)
+      check_deps
+      if ltl_running; then
+        echo "limitless monitor already_running pid=$(cat "$LTL_PIDFILE")"
+        return 0
+      fi
+      mkdir -p "$RUNTIME_DIR"
+      nohup "$PY" "$SCRIPT_DIR/limitless_arb.py" --runtime-dir "$RUNTIME_DIR" "$@" \
+        >>"$log" 2>&1 &
+      echo $! >"$LTL_PIDFILE"
+      sleep 1
+      if ltl_running; then
+        echo "limitless arb monitor started pid=$(cat "$LTL_PIDFILE")"
+        echo "  log:     $log"
+        echo "  summary: multi/scripts/multibot_ctl.sh limitless summary"
+      else
+        echo "limitless monitor failed_to_start (check $log)"
+        exit 1
+      fi
+      ;;
+    stop)
+      if ltl_running; then
+        kill "$(cat "$LTL_PIDFILE")" || true
+        sleep 1
+        if ltl_running; then kill -9 "$(cat "$LTL_PIDFILE")" || true; fi
+        rm -f "$LTL_PIDFILE"
+        echo "limitless monitor stopped"
+      else
+        rm -f "$LTL_PIDFILE"
+        echo "limitless monitor already_stopped"
+      fi
+      ;;
+    status)
+      if ltl_running; then
+        echo "limitless monitor running pid=$(cat "$LTL_PIDFILE")"
+      else
+        echo "limitless monitor stopped"
+      fi
+      ;;
+    summary)
+      check_deps
+      "$PY" "$SCRIPT_DIR/limitless_arb.py" --runtime-dir "$RUNTIME_DIR" --summary
+      ;;
+    logs)
+      tail -n "${1:-50}" "$log"
+      ;;
+    *)
+      echo "Unknown limitless subcommand: $sub"
+      usage
+      exit 2
+      ;;
+  esac
+}
+
 DASH_PIDFILE="$RUNTIME_DIR/dashboard.pid"
 
 dash_running() {
@@ -435,6 +509,7 @@ main() {
     streams) check_deps; "$PY" "$SCRIPT_DIR/streams_probe.py" "$@" ;;
     golive) cmd_golive "$@" ;;
     archive) cmd_archive ;;
+    limitless) cmd_limitless "$@" ;;
     *) usage; exit 2 ;;
   esac
 }
