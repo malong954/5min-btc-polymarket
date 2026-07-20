@@ -254,9 +254,9 @@ case "${1:-start}" in
       echo "---- THE TRUTH TABLE: official Polymarket resolutions only ----"
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --official-only --min-size 100 || true
       echo
-      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --combo --min-size 100 || true
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --combo --min-size 100 --lead-hi "$(lead_hi_for btc)" --lead-lo "$(lead_lo_for btc)" --lead-max-price "$(lead_cap_for btc)" || true
       echo
-      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-session --min-size 100 || true
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --by-session --min-size 100 --lead-hi "$(lead_hi_for btc)" --lead-lo "$(lead_lo_for btc)" --lead-max-price "$(lead_cap_for btc)" || true
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --calibration || true
       echo
@@ -272,11 +272,11 @@ case "${1:-start}" in
       echo
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --label-check       || true
       echo
-      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --disagreements --min-size 100 || true
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --disagreements --min-size 100 --lead-hi "$(lead_hi_for btc)" --lead-lo "$(lead_lo_for btc)" --lead-max-price "$(lead_cap_for btc)" || true
       echo
-      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --exit --min-size 100 --min-conf "$CONF_BTC" || true
+      "$PY" scripts/btc_entry_timing.py --log "$RLOG" --exit --min-size 100 --min-conf "$CONF_BTC" --lead-hi "$(lead_hi_for btc)" --lead-lo "$(lead_lo_for btc)" --lead-max-price "$(lead_cap_for btc)" || true
       echo
-      "$PY" scripts/btc_executor_check.py --log "$RLOG" --trader-log "$TLOG" --floor "$CONF_BTC" --min-size 100 || true
+      "$PY" scripts/btc_executor_check.py --log "$RLOG" --trader-log "$TLOG" --floor "$CONF_BTC" --min-size 100 --lead-hi "$(lead_hi_for btc)" --lead-lo "$(lead_lo_for btc)" --lead-max-price "$(lead_cap_for btc)" || true
       echo
       for v in vel_15s vel_30s; do
         "$PY" scripts/btc_entry_timing.py --log "$RLOG" --side "$v"       || true
@@ -292,19 +292,19 @@ case "${1:-start}" in
         "$PY" scripts/btc_overround.py --log "$ARLOG"                     || true
         echo
         echo "---- $AU 5m market: lead + confidence combo (move auto-scaled) ----"
-        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --combo --min-size 100 || true
+        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --combo --min-size 100 --lead-hi "$(lead_hi_for "$A")" --lead-lo "$(lead_lo_for "$A")" --lead-max-price "$(lead_cap_for "$A")" || true
         echo
         echo "---- $AU 5m market: sessions ----"
-        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --by-session --min-size 100 || true
+        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --by-session --min-size 100 --lead-hi "$(lead_hi_for "$A")" --lead-lo "$(lead_lo_for "$A")" --lead-max-price "$(lead_cap_for "$A")" || true
         echo
         echo "---- $AU 5m market: confidence calibration ----"
         "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --calibration || true
         echo
         echo "---- $AU 5m market: disagreement anatomy ----"
-        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --disagreements --min-size 100 || true
+        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --disagreements --min-size 100 --lead-hi "$(lead_hi_for "$A")" --lead-lo "$(lead_lo_for "$A")" --lead-max-price "$(lead_cap_for "$A")" || true
         echo
         echo "---- $AU 5m market: exit policies ----"
-        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --exit --min-size 100 --min-conf "$(conf_for "$A")" || true
+        "$PY" scripts/btc_entry_timing.py --log "$ARLOG" --exit --min-size 100 --min-conf "$(conf_for "$A")" --lead-hi "$(lead_hi_for "$A")" --lead-lo "$(lead_lo_for "$A")" --lead-max-price "$(lead_cap_for "$A")" || true
         echo
       done
       "$PY" scripts/btc_entry_timing.py --log "$RLOG" --fade              || true

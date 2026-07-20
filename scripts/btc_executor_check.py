@@ -80,8 +80,10 @@ def executor_check(rec_events: list[dict[str, Any]], trader_events: list[dict[st
 
 
 def _print(res: dict[str, Any]) -> None:
+    import btc_entry_timing as _bet
     print("=" * 74)
-    print(f"EXECUTOR vs TABLE  (floor {res['floor']:g}, |move| >= {res['min_move']:g}, "
+    print(f"EXECUTOR vs TABLE  (lead {_bet.LEAD_WIN_LO:g}-{_bet.LEAD_WIN_HI:g}s ask <= "
+          f"{_bet.LEAD_MAX_PRICE:g}, floor {res['floor']:g}, |move| >= {res['min_move']:g}, "
           f"size >= {res['min_size']:g}; official labels)")
     print("=" * 74)
     print(f"  trader entries graded: {res['n_trader_graded']}   "
@@ -113,8 +115,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--floor", type=float, default=0.40)
     ap.add_argument("--min-size", type=float, default=0.0)
     ap.add_argument("--min-move", type=float, default=None)
+    ap.add_argument("--lead-hi", type=float, default=None,
+                    help="Lead window opens (seconds left) — set to the TRADER'S actual window, "
+                         "or BOTH is empty by construction when configs diverge")
+    ap.add_argument("--lead-lo", type=float, default=None, help="Lead window closes (seconds left)")
+    ap.add_argument("--lead-max-price", type=float, default=None, help="Lead ask cap (trader's actual)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+
+    # The table rule lives in btc_entry_timing's module globals; rebind them so
+    # the table picks mirror the rule the trader actually ran.
+    import btc_entry_timing as _bet
+    if args.lead_hi is not None:
+        _bet.LEAD_WIN_HI = float(args.lead_hi)
+    if args.lead_lo is not None:
+        _bet.LEAD_WIN_LO = float(args.lead_lo)
+    if args.lead_max_price is not None:
+        _bet.LEAD_MAX_PRICE = float(args.lead_max_price)
 
     res = executor_check(load(args.log), load(args.trader_log), floor=args.floor,
                          min_size=args.min_size, min_move=args.min_move)

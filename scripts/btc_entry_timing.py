@@ -430,6 +430,16 @@ COMBO_FLOORS = (0.0, 0.3, 0.4, 0.5, 0.7, 0.8, 0.9)
 # same setup means the same thing on ETH/SOL/XRP: 0.016% of the asset's price.
 MOVE_FRAC = 1.6e-4
 
+# The lead-rule definition the combo/session/exit/disagreement/executor
+# analyses grade. Defaults match the ORIGINAL rule; overridable via
+# --lead-hi/--lead-lo/--lead-max-price so the tables grade the rule the
+# trader is ACTUALLY running (per-asset windows/caps in lab.sh) — otherwise
+# executor-vs-table compares fills against a stale definition and BOTH is
+# empty by construction.
+LEAD_WIN_HI = 240.0
+LEAD_WIN_LO = 150.0
+LEAD_MAX_PRICE = 0.72
+
 
 def auto_min_move(events: list[dict[str, Any]]) -> float:
     """Auto-scale the lead rule's dollar move threshold from the data itself:
@@ -441,8 +451,9 @@ def auto_min_move(events: list[dict[str, Any]]) -> float:
     return round(spots[len(spots) // 2] * MOVE_FRAC, 6)
 
 
-def _first_lead_pick(samps: list[dict[str, Any]], win_hi: float = 240.0, win_lo: float = 150.0,
-                     max_price: float = 0.72, min_move_signal: float = 10.0,
+def _first_lead_pick(samps: list[dict[str, Any]], win_hi: Optional[float] = None,
+                     win_lo: Optional[float] = None,
+                     max_price: Optional[float] = None, min_move_signal: float = 10.0,
                      min_size: float = 0.0, floor: float = 0.0,
                      min_price: float = 0.0) -> Optional[tuple]:
     """First sample in the round satisfying the lead setup (leading side inside
@@ -455,6 +466,12 @@ def _first_lead_pick(samps: list[dict[str, Any]], win_hi: float = 240.0, win_lo:
     other side as the winner) — which is exactly the case where our round-open
     reference is wrong or we are being adversely selected. Requiring the leading
     side to cost at least min_price trusts the book over our move sign."""
+    if win_hi is None:
+        win_hi = LEAD_WIN_HI
+    if win_lo is None:
+        win_lo = LEAD_WIN_LO
+    if max_price is None:
+        max_price = LEAD_MAX_PRICE
     for s in sorted(samps, key=lambda q: -(q.get("sec_left") or 0)):
         sl = s.get("sec_left") or 0
         if not (win_lo <= sl <= win_hi):
@@ -480,8 +497,8 @@ def _first_lead_pick(samps: list[dict[str, Any]], win_hi: float = 240.0, win_lo:
 
 def combo_analysis(events: list[dict[str, Any]],
                    conf_floors: tuple = COMBO_FLOORS,
-                   win_hi: float = 240.0, win_lo: float = 150.0,
-                   max_price: float = 0.72, min_move_signal: float = 10.0,
+                   win_hi: Optional[float] = None, win_lo: Optional[float] = None,
+                   max_price: Optional[float] = None, min_move_signal: float = 10.0,
                    min_size: float = 0.0, fee_rate: float = 0.0,
                    official_only: bool = True, min_price: float = 0.0) -> list[dict[str, Any]]:
     """LEAD + CONFIDENCE combo: the lead setup (leading side, window, cheap ask,
@@ -521,7 +538,8 @@ def combo_analysis(events: list[dict[str, Any]],
 
 def _print_combo(rows: list[dict[str, Any]]) -> None:
     print("=" * 74)
-    print("LEAD + CONFIDENCE COMBO  (lead setup AND conf >= floor; OFFICIAL labels)")
+    print(f"LEAD + CONFIDENCE COMBO  (lead setup {LEAD_WIN_LO:g}-{LEAD_WIN_HI:g}s ask <= "
+          f"{LEAD_MAX_PRICE:g} AND conf >= floor; OFFICIAL labels)")
     print("=" * 74)
     traded = [r for r in rows if r.get("n")]
     if not traded:
@@ -930,8 +948,8 @@ def _print_session(rows: list[dict[str, Any]], min_move_signal: float,
         mv = f"{r['avg_abs_move']:.4g}" if r.get("avg_abs_move") is not None else "-"
         print(f"  {r['bucket']:<20}{r['rounds']:<8}{r['up_pct']:<8.1%}{mv}")
     print("-" * 74)
-    print(f"  LEAD SETUP by session (150-240s left, ask <= 0.72, |move| >= {min_move_signal:g}, "
-          f"conf >= {lead_min_conf:g})")
+    print(f"  LEAD SETUP by session ({LEAD_WIN_LO:g}-{LEAD_WIN_HI:g}s left, ask <= {LEAD_MAX_PRICE:g}, "
+          f"|move| >= {min_move_signal:g}, conf >= {lead_min_conf:g})")
     print(f"  {'bucket':<20}{'n':<6}{'winrate':<10}{'avg price':<11}{'NET EV'}")
     for r in rows:
         if not r.get("lead_n"):
@@ -1166,6 +1184,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="With --combo/--by-session: the 'decisive move' threshold in dollars. "
                          "Default: auto-scaled to 0.016%% of the log's median spot (= BTC's $10 "
                          "rule), so the same setup works on ETH/SOL/XRP without hand-tuning.")
+    ap.add_argument("--lead-hi", type=float, default=None,
+                    help="Lead-rule window opens at this many seconds left (default 240) — set to "
+                         "the TRADER'S actual window so combo/session/exit/executor tables grade "
+                         "the rule being run")
+    ap.add_argument("--lead-lo", type=float, default=None,
+                    help="Lead-rule window closes at this many seconds left (default 150)")
+    ap.add_argument("--lead-max-price", type=float, default=None,
+                    help="Lead-rule ask cap (default 0.72) — set to the trader's actual cap")
     ap.add_argument("--combo-min-price", type=float, default=0.0,
                     help="With --combo: require the LEADING side's ask >= this (book-agreement "
                          "guard). If our 'leading' side is priced below this the market disagrees "
@@ -1208,6 +1234,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "Read the REAL rate from the CLOB market data, don't hardcode. Makers pay 0.")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+
+    # Rebind the lead-rule definition BEFORE any analysis runs — every consumer
+    # of _first_lead_pick (combo, session, exit, disagreements, and the executor
+    # check via import) resolves these globals when its args are left default.
+    global LEAD_WIN_HI, LEAD_WIN_LO, LEAD_MAX_PRICE
+    if args.lead_hi is not None:
+        LEAD_WIN_HI = float(args.lead_hi)
+    if args.lead_lo is not None:
+        LEAD_WIN_LO = float(args.lead_lo)
+    if args.lead_max_price is not None:
+        LEAD_MAX_PRICE = float(args.lead_max_price)
 
     events = load(args.log)
     if args.combo_min_move is None:
