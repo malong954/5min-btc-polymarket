@@ -154,6 +154,20 @@ def load_json(path: Path) -> dict | None:
         return None
 
 
+def tail_lines(path: Path, max_bytes: int = 65536) -> list[str]:
+    """Last complete lines of a growing jsonl file without reading it all."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            data = f.read().decode("utf-8", "replace")
+    except Exception:
+        return []
+    lines = data.splitlines()
+    return lines[1:] if size > max_bytes else lines
+
+
 def scan_reports(runtime: Path) -> list[dict]:
     rdir = runtime / "reports"
     if not rdir.exists():
@@ -368,6 +382,61 @@ def build_payload(runtime: Path, mode: str, rng: str) -> dict:
         "recent": arb_slots[-80:],
     }
 
+    # Limitless cross-venue monitor (its own paper contour: runtime/limitless/,
+    # deliberately independent of the mode/range filters)
+    ltl_state = load_json(runtime / "limitless" / "state.json") or {}
+    limitless = None
+    if ltl_state:
+        ltl_pid = None
+        try:
+            ltl_pid = int((runtime / "limitless.pid").read_text().strip())
+        except Exception:
+            pass
+        cep = int(ltl_state.get("cross_echo_pass") or 0)
+        cef = int(ltl_state.get("cross_echo_fail") or 0)
+        can = int(ltl_state.get("cross_adverse_n") or 0)
+        recent = []
+        for ln in tail_lines(runtime / "limitless" / "clips.jsonl"):
+            try:
+                c = json.loads(ln)
+            except Exception:
+                continue
+            if c.get("kind") != "cross":
+                continue
+            slug = str(c.get("slug") or "")
+            tf = ("5m" if "-5-min-" in slug else
+                  "15m" if "-15-min-" in slug else
+                  "1h" if "-hourly-" in slug or "-1-hour-" in slug else "?")
+            cts = parse_ts(c.get("ts"))
+            echo = c.get("echo") or {}
+            recent.append({
+                "t": round(cts * 1000) if cts else None,
+                "tf": tf,
+                "direction": c.get("direction"),
+                "combined": c.get("combined"),
+                "locked": c.get("locked_pnl_usdc"),
+                "persisted": echo.get("persisted"),
+                "adverse": echo.get("adverse_move"),
+            })
+        limitless = {
+            "running": bool(ltl_pid and pid_alive(ltl_pid)),
+            "started_at": ltl_state.get("started_at"),
+            "updated_at": ltl_state.get("updated_at"),
+            "slots_matched": int(ltl_state.get("cross_slots_matched") or 0),
+            "paired_ticks": int(ltl_state.get("cross_ticks") or 0),
+            "best_combined": ltl_state.get("best_cross_combined"),
+            "opportunity_ticks": int(ltl_state.get("cross_opportunity_ticks") or 0),
+            "clips": int(ltl_state.get("cross_clips") or 0),
+            "cost_sum": round(float(ltl_state.get("cross_cost_sum") or 0), 2),
+            "locked_sum": round(float(ltl_state.get("cross_locked_sum") or 0), 4),
+            "echo_pass": cep,
+            "echo_fail": cef,
+            "echo_rate": round(cep / (cep + cef), 3) if (cep + cef) else None,
+            "avg_adverse": (round(float(ltl_state.get("cross_adverse_sum") or 0) / can, 4)
+                            if can else None),
+            "recent": recent[-40:][::-1],
+        }
+
     return {
         "generated_at": dt.datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "mode": mode,
@@ -388,6 +457,7 @@ def build_payload(runtime: Path, mode: str, rng: str) -> dict:
         "pairs_all": pairs_all,
         "series": series,
         "arb": arb,
+        "limitless": limitless,
         "trades": trades[-40:][::-1],
     }
 
@@ -557,6 +627,13 @@ button.theme{margin-left:8px;font:inherit;font-size:12px;border:1px solid var(--
     </div>
   </div>
 
+  <div class="card" id="ltlCard" style="display:none">
+    <h2>Cross-venue arb — Polymarket &times; Limitless (same slot, same Chainlink oracle)</h2>
+    <div class="status" id="ltlStatus" style="padding:0 0 10px"></div>
+    <div class="grid kpis" id="ltlKpis" style="margin-bottom:12px"></div>
+    <div id="ltlClips"></div>
+  </div>
+
   <div class="grid row3">
     <div class="card">
       <h2>Timeframe comparison</h2>
@@ -711,6 +788,7 @@ function render(d){
   renderLine(d);
   renderBars(d);
   renderArb(d);
+  renderLtl(d);
   renderGroups(d);
   renderWorkers(d);
   renderTrades(d);
@@ -1041,6 +1119,66 @@ function renderArb(d){
     svg.appendChild(dot);
   });
   holder.appendChild(svg);
+}
+
+function renderLtl(d){
+  const L = d.limitless;
+  const card = $("ltlCard");
+  if (!L){ card.style.display = "none"; return; }
+  card.style.display = "";
+
+  const st = $("ltlStatus"); st.replaceChildren();
+  const dot = el("span", {class:"dot"});
+  dot.style.background = L.running ? css("--status-good") : css("--status-critical");
+  st.appendChild(dot);
+  st.appendChild(el("span", {class:"nm"}, "monitor"));
+  st.appendChild(el("span", {}, L.running ? "running" : "stopped"));
+  st.appendChild(el("span", {class:"meta"},
+    (L.updated_at ? "updated " + fmtTime(Date.parse(L.updated_at)) : "no data yet")
+    + " · paper · independent of the mode/range filters"));
+
+  const box = $("ltlKpis"); box.replaceChildren();
+  const thr = 0.99;
+  const bc = L.best_combined;
+  box.appendChild(tile("Best cross combined",
+    bc != null ? "$" + Number(bc).toFixed(3) : "–",
+    (bc != null && bc <= thr) ? "pos-t" : "",
+    "clip threshold $" + thr.toFixed(2) + " · " + (L.slots_matched||0) + " slots paired"));
+  box.appendChild(tile("Opportunities", String(L.opportunity_ticks||0),
+    "", "ticks ≤ threshold · " + (L.paired_ticks||0) + " paired ticks checked"));
+  box.appendChild(tile("Paper clips", String(L.clips||0),
+    "", "cycled $" + (L.cost_sum||0).toFixed(2) + " · locked " + fmtUsd(L.locked_sum||0)));
+  const checked = (L.echo_pass||0) + (L.echo_fail||0);
+  const er = L.echo_rate;
+  const advTxt = L.avg_adverse != null
+    ? " · adverse " + (L.avg_adverse >= 0 ? "+" : "") + (L.avg_adverse*100).toFixed(2) + "¢"
+    : "";
+  box.appendChild(tile("Fill-echo persistence", checked ? fmtPct(er) : "–",
+    checked ? (er >= 0.5 ? "pos-t" : "neg-t") : "",
+    checked ? L.echo_pass + "/" + checked + " held ≥1.5s" + advTxt + " · PM-internal was 0%"
+            : "no clips yet — needs the venues to disagree"));
+
+  const cbox = $("ltlClips"); cbox.replaceChildren();
+  const rows = L.recent || [];
+  if (!rows.length){
+    cbox.appendChild(el("div", {class:"empty"},
+      "No cross-venue clips yet — waiting for PM ask + LTL ask on opposite sides to sum ≤ $0.99."));
+    return;
+  }
+  const dirTxt = dr => dr === "pm_down+ltl_up" ? "PM DOWN + LTL UP"
+                     : dr === "pm_up+ltl_down" ? "PM UP + LTL DOWN" : (dr || "–");
+  cbox.appendChild(mkTable(
+    ["time","tf","direction","combined","locked","echo","adverse"],
+    rows.map(c => [
+      el("td", {}, c.t ? fmtTime(c.t) : "–"),
+      el("td", {}, c.tf || "?"),
+      el("td", {}, dirTxt(c.direction)),
+      el("td", {}, c.combined != null ? "$" + Number(c.combined).toFixed(3) : "–"),
+      pnlCell(c.locked ?? 0),
+      el("td", {}, c.persisted === true ? "✓ held" : c.persisted === false ? "✗ gone" : "–"),
+      el("td", {}, c.adverse != null
+        ? (c.adverse >= 0 ? "+" : "") + (c.adverse*100).toFixed(2) + "¢" : "–"),
+    ])));
 }
 
 /* ---------- tables & status ---------- */
