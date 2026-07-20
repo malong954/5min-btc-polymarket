@@ -88,8 +88,8 @@ Usage:
   multibot_ctl.sh limitless probe        map the Limitless.exchange API (run
                   this FIRST and paste the output back)
   multibot_ctl.sh limitless start|stop|status|summary|logs
-                  paper arb monitor on Limitless BTC markets with fill-echo
-                  (does crossed-book arb survive on a younger venue?)
+                  paper arb monitor with fill-echo: Limitless books + CROSS-
+                  VENUE vs Polymarket (same slots, same Chainlink oracle)
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import time
 from typing import Any, Optional
 
@@ -25,8 +26,9 @@ UA = {"User-Agent": "btc-multi-arb-monitor/0.1 (research; contact via github)"}
 ATTEMPTS: list[dict] = []
 
 LIST_VARIANTS: list[tuple[str, Optional[dict]]] = [
-    ("/markets/active", {"page": 1, "limit": 200}),
+    # probed 2026-07-20: page+limit -> 400, bare /markets/active -> 200 (25 rows)
     ("/markets/active", None),
+    ("/markets/active", {"limit": 100}),
     ("/markets", {"page": 1, "limit": 200}),
     ("/markets", {"limit": 200}),
     ("/markets", None),
@@ -230,15 +232,20 @@ def normalize_book(j: Any) -> Optional[dict]:
             break
     raw_keys = sorted(j.keys()) if isinstance(j, dict) else []
 
+    def pack(y: Optional[dict], n: Optional[dict]) -> dict:
+        return {"two_sided": bool(y and n), "raw_keys": raw_keys,
+                "yes_bid": (y or {}).get("bid"), "yes_ask": (y or {}).get("ask"),
+                "yes_bid_size": (y or {}).get("bid_size", 0.0),
+                "yes_ask_size": (y or {}).get("ask_size", 0.0),
+                "no_bid": (n or {}).get("bid"), "no_ask": (n or {}).get("ask"),
+                "no_bid_size": (n or {}).get("bid_size", 0.0),
+                "no_ask_size": (n or {}).get("ask_size", 0.0)}
+
     # shape 1: explicit yes/no sub-books
     for yk, nk in (("yes", "no"), ("YES", "NO"), ("up", "down")):
         y, n = _book_side(j.get(yk)), _book_side(j.get(nk))
         if y or n:
-            return {"two_sided": bool(y and n), "raw_keys": raw_keys,
-                    "yes_bid": (y or {}).get("bid"), "yes_ask": (y or {}).get("ask"),
-                    "yes_ask_size": (y or {}).get("ask_size", 0.0),
-                    "no_bid": (n or {}).get("bid"), "no_ask": (n or {}).get("ask"),
-                    "no_ask_size": (n or {}).get("ask_size", 0.0)}
+            return pack(y, n)
 
     # shape 2: token list with outcome labels
     toks = j.get("tokens")
@@ -254,19 +261,13 @@ def normalize_book(j: Any) -> Optional[dict]:
             elif label.startswith(("no", "down")):
                 n = side
         if y or n:
-            return {"two_sided": bool(y and n), "raw_keys": raw_keys,
-                    "yes_bid": (y or {}).get("bid"), "yes_ask": (y or {}).get("ask"),
-                    "yes_ask_size": (y or {}).get("ask_size", 0.0),
-                    "no_bid": (n or {}).get("bid"), "no_ask": (n or {}).get("ask"),
-                    "no_ask_size": (n or {}).get("ask_size", 0.0)}
+            return pack(y, n)
 
-    # shape 3: one shared {bids, asks} book (YES-denominated)
+    # shape 3: one shared {bids, asks} book (YES-denominated) — what the live
+    # API serves (probed 2026-07-20: keys incl. tokenId/midpoint/minSize)
     one = _book_side(j)
     if one:
-        return {"two_sided": False, "raw_keys": raw_keys,
-                "yes_bid": one["bid"], "yes_ask": one["ask"],
-                "yes_ask_size": one["ask_size"],
-                "no_bid": None, "no_ask": None, "no_ask_size": 0.0}
+        return pack(one, None)
     return None
 
 
@@ -302,6 +303,27 @@ def amm_prices(m: dict) -> Optional[tuple[float, float]]:
         if a is not None and b is not None:
             return (a, b)
     return None
+
+
+# Limitless Up/Down slugs carry the slot START as a unix suffix, the same
+# convention as Polymarket's btc-updown-{tf}-{start} slugs (probed 2026-07-20:
+# btc-up-or-down-5-min-1784587800 / -15-min-… / -hourly-…). Both venues
+# resolve on the same Chainlink BTC/USD stream, so a (tf, slot_start) match
+# means the two markets are the SAME contract.
+_SLOT_RE = re.compile(r"up-or-down-([a-z0-9-]+?)-(\d{9,11})$")
+_TF_MAP = {"5-min": ("5m", 300), "15-min": ("15m", 900),
+           "hourly": ("1h", 3600), "1-hour": ("1h", 3600),
+           "4-hour": ("4h", 14400), "daily": ("1d", 86400)}
+
+
+def slot_of_slug(slug: Optional[str]) -> Optional[dict]:
+    m = _SLOT_RE.search(str(slug or ""))
+    if not m:
+        return None
+    tf = _TF_MAP.get(m.group(1))
+    if not tf:
+        return None
+    return {"tf": tf[0], "duration_sec": tf[1], "slot_start": int(m.group(2))}
 
 
 def short_dated_btc(markets: list[dict], horizon_sec: float = 4 * 3600) -> list[dict]:
