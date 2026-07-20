@@ -9,6 +9,9 @@
 #                               entry timing, indicator side, confidence bands,
 #                               sub-minute velocities, sessions, overround (E2),
 #                               divergence fade (E3), timeline correlations
+#   scripts/lab.sh analyze-all  the decision tables over EVERY archived segment
+#                               pooled with the current one (full-history truth
+#                               table, combo, split-halves, crossing, calibration)
 #   scripts/lab.sh dash         reopen the trader dashboard
 #   scripts/lab.sh recdash      reopen the recorder (price-ladder) dashboard
 #   scripts/lab.sh history      full entered/skipped/win/loss timeline
@@ -373,8 +376,52 @@ case "${1:-start}" in
     echo; echo "######################## END ##########################"
     exit 0 ;;
 
+  analyze-all)
+    # Pool EVERY archived segment (each newrun timestamps its logs) with the
+    # live one and run the decision tables on the FULL history — so "what did
+    # all our testing say" is answered by one dataset, not by memory of
+    # segment-by-segment reports. Entry-time/crossing/calibration measure the
+    # market+model independent of trader config, so pooling across differently
+    # configured segments is legitimate for them; the combo table is graded at
+    # the CURRENT per-asset lead definition (printed in its header).
+    echo; echo "########## ALL-SEGMENT TABLES (every archived newrun + current) ##########"
+    ALLB="out/_pooled-trajectory.jsonl"
+    cat out/trajectory-[0-9]*.jsonl out/trajectory.jsonl > "$ALLB" 2>/dev/null || true
+    if [ -s "$ALLB" ]; then
+      SEGS="$(ls out/trajectory-[0-9]*.jsonl 2>/dev/null | wc -l | tr -d ' ')"
+      echo; echo "======== BTC: pooled recorder history ($((SEGS + 1)) segments) ========"
+      echo "---- truth table (official labels, full history) ----"
+      "$PY" scripts/btc_entry_timing.py --log "$ALLB" --official-only --min-size 100 || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$ALLB" --combo --min-size 100 --lead-hi "$(lead_hi_for btc)" --lead-lo "$(lead_lo_for btc)" --lead-max-price "$(lead_cap_for btc)" || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$ALLB" --combo --split-halves --min-size 100 --lead-hi "$(lead_hi_for btc)" --lead-lo "$(lead_lo_for btc)" --lead-max-price "$(lead_cap_for btc)" || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$ALLB" --crossing || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$ALLB" --calibration || true
+    else
+      echo "(no BTC recorder history found)"
+    fi
+    for A in eth sol xrp; do
+      ALLA="out/_pooled-trajectory-$A.jsonl"
+      cat out/trajectory-"$A"-[0-9]*.jsonl "out/trajectory-$A.jsonl" > "$ALLA" 2>/dev/null || true
+      [ -s "$ALLA" ] || continue
+      AU="$(echo "$A" | tr 'a-z' 'A-Z')"
+      echo; echo "======== $AU: pooled recorder history ========"
+      "$PY" scripts/btc_entry_timing.py --log "$ALLA" --official-only --min-size 100 || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$ALLA" --combo --min-size 100 --lead-hi "$(lead_hi_for "$A")" --lead-lo "$(lead_lo_for "$A")" --lead-max-price "$(lead_cap_for "$A")" || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$ALLA" --crossing || true
+      echo
+      "$PY" scripts/btc_entry_timing.py --log "$ALLA" --calibration || true
+    done
+    echo; echo "######################## END ##########################"
+    exit 0 ;;
+
   start) ;;
-  *) echo "usage: scripts/lab.sh [start|newrun|analyze|dash|recdash|history|status|stop]"; exit 1 ;;
+  *) echo "usage: scripts/lab.sh [start|newrun|analyze|analyze-all|dash|recdash|history|status|stop]"; exit 1 ;;
 esac
 
 mkdir -p out
