@@ -35,6 +35,13 @@
 #                                        the dashboard; lead windows scale x3)
 #                 CONF_BTC/CONF_ETH/CONF_SOL/CONF_XRP   per-market conf floor
 #                                        (overrides LEAD_MIN_CONF for that market)
+#                 RULE_<A>/THRESH_<A>       per-market entry RULE + threshold
+#                                        (A = BTC/ETH/SOL/XRP), falling back to
+#                                        the global RULE/THRESHOLD. The per-asset
+#                                        playbook: BTC on the lead rule, SOL/XRP
+#                                        on the conf-threshold rule their
+#                                        calibration supports:
+#                                          RULE_SOL=threshold THRESH_SOL=0.55
 #                 LEAD_HI_<A>/LEAD_LO_<A>/LEAD_CAP_<A>  per-market lead window +
 #                                        ask cap (A = BTC/ETH/SOL/XRP), each
 #                                        falling back to the global LEAD_*. Use
@@ -80,6 +87,20 @@ CONF_BTC="${CONF_BTC:-${SAVED_CONF_BTC:-$LEAD_MIN_CONF}}"
 CONF_ETH="${CONF_ETH:-${SAVED_CONF_ETH:-$LEAD_MIN_CONF}}"
 CONF_SOL="${CONF_SOL:-${SAVED_CONF_SOL:-$LEAD_MIN_CONF}}"
 CONF_XRP="${CONF_XRP:-${SAVED_CONF_XRP:-$LEAD_MIN_CONF}}"
+# Per-market entry RULE + threshold: each asset runs the signal that validated
+# for it (BTC: lead+conf; SOL/XRP: the move-based lead never fires at their tick
+# size — conf-threshold is the signal their calibration supports every segment).
+RULE_BTC="${RULE_BTC:-${SAVED_RULE_BTC:-$RULE}}"
+RULE_ETH="${RULE_ETH:-${SAVED_RULE_ETH:-$RULE}}"
+RULE_SOL="${RULE_SOL:-${SAVED_RULE_SOL:-$RULE}}"
+RULE_XRP="${RULE_XRP:-${SAVED_RULE_XRP:-$RULE}}"
+THRESH_BTC="${THRESH_BTC:-${SAVED_THRESH_BTC:-$THRESHOLD}}"
+THRESH_ETH="${THRESH_ETH:-${SAVED_THRESH_ETH:-$THRESHOLD}}"
+THRESH_SOL="${THRESH_SOL:-${SAVED_THRESH_SOL:-$THRESHOLD}}"
+THRESH_XRP="${THRESH_XRP:-${SAVED_THRESH_XRP:-$THRESHOLD}}"
+for RV in "$RULE_BTC" "$RULE_ETH" "$RULE_SOL" "$RULE_XRP"; do
+  case "$RV" in threshold|edge|lead) ;; *) echo "invalid per-asset rule: $RV (allowed: threshold edge lead)"; exit 1 ;; esac
+done
 # Per-market lead WINDOW + ASK CAP overrides. Measured motivation: BTC's edge
 # is late-and-expensive (150-180s @ ~0.70, hold to resolution) while SOL/XRP had
 # their edge earlier-and-cheaper under the prior rule. One rule can't fit all
@@ -120,6 +141,8 @@ done
 
 # Per-market rule params for an asset (btc/eth/sol/xrp), default global.
 conf_for()    { case "$1" in btc) echo "$CONF_BTC";; eth) echo "$CONF_ETH";; sol) echo "$CONF_SOL";; xrp) echo "$CONF_XRP";; *) echo "$LEAD_MIN_CONF";; esac; }
+rule_for()    { case "$1" in btc) echo "$RULE_BTC";; eth) echo "$RULE_ETH";; sol) echo "$RULE_SOL";; xrp) echo "$RULE_XRP";; *) echo "$RULE";; esac; }
+thresh_for()  { case "$1" in btc) echo "$THRESH_BTC";; eth) echo "$THRESH_ETH";; sol) echo "$THRESH_SOL";; xrp) echo "$THRESH_XRP";; *) echo "$THRESHOLD";; esac; }
 lead_hi_for() { case "$1" in btc) echo "$LEAD_HI_BTC";; eth) echo "$LEAD_HI_ETH";; sol) echo "$LEAD_HI_SOL";; xrp) echo "$LEAD_HI_XRP";; *) echo "$LEAD_HI";; esac; }
 lead_lo_for() { case "$1" in btc) echo "$LEAD_LO_BTC";; eth) echo "$LEAD_LO_ETH";; sol) echo "$LEAD_LO_SOL";; xrp) echo "$LEAD_LO_XRP";; *) echo "$LEAD_LO";; esac; }
 lead_cap_for(){ case "$1" in btc) echo "$LEAD_CAP_BTC";; eth) echo "$LEAD_CAP_ETH";; sol) echo "$LEAD_CAP_SOL";; xrp) echo "$LEAD_CAP_XRP";; *) echo "$LEAD_MAX_PRICE";; esac; }
@@ -174,6 +197,10 @@ case "${1:-start}" in
     for A in btc eth sol xrp; do
       AU="$(echo "$A" | tr 'a-z' 'A-Z')"
       AHI="$(lead_hi_for "$A")"; ALO="$(lead_lo_for "$A")"; ACAP="$(lead_cap_for "$A")"
+      ARULE="$(rule_for "$A")"; ATHR="$(thresh_for "$A")"
+      if [ "$ARULE" != "$RULE" ] || [ "$ATHR" != "$THRESHOLD" ]; then
+        echo "  $AU override: rule=${ARULE} thr=${ATHR}"
+      fi
       if [ "$AHI" != "$LEAD_HI" ] || [ "$ALO" != "$LEAD_LO" ] || [ "$ACAP" != "$LEAD_MAX_PRICE" ]; then
         echo "  $AU override: ${ALO}-${AHI}s left, ask <= ${ACAP}"
       fi
@@ -356,7 +383,7 @@ mkdir -p out
   echo "SAVED_CONF_SOL=$CONF_SOL"
   echo "SAVED_CONF_XRP=$CONF_XRP"
   for A in BTC ETH SOL XRP; do
-    for K in LEAD_HI LEAD_LO LEAD_CAP; do
+    for K in LEAD_HI LEAD_LO LEAD_CAP RULE THRESH; do
       eval "echo \"SAVED_${K}_${A}=\$${K}_${A}\""
     done
   done
@@ -382,20 +409,21 @@ else
   # Fresh trader session = fresh account (prior log archived).
   [ -f "$TLOG" ] && mv "$TLOG" "out/live-prev.jsonl" && echo "archived prior session -> out/live-prev.jsonl"
   BHI="$(lead_hi_for btc)"; BLO="$(lead_lo_for btc)"; BCAP="$(lead_cap_for btc)"
+  BRULE="$(rule_for btc)"; BTHR="$(thresh_for btc)"
   nohup "$PY" scripts/btc_live_paper.py --asset btc \
-    --provider "$PROVIDER" --poll 2 --entry-threshold "$THRESHOLD" \
-    --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$BCAP" \
+    --provider "$PROVIDER" --poll 2 --entry-threshold "$BTHR" \
+    --entry-rule "$BRULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$BCAP" \
     --lead-min-conf "$CONF_BTC" --lead-hi "$BHI" --lead-lo "$BLO" --regime-frac "$REGIME" \
     --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
     >> out/nohup.log 2>&1 &
-  if [ "$RULE" = "edge" ]; then
+  if [ "$BRULE" = "edge" ]; then
     echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
-  elif [ "$RULE" = "lead" ]; then
+  elif [ "$BRULE" = "lead" ]; then
     echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, ${BLO}-${BHI}s left, ask <= ${BCAP}, decisive move, conf >= ${CONF_BTC})"
   else
-    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${THRESHOLD})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${BTHR})"
   fi
 fi
 
@@ -414,15 +442,20 @@ for A in $ASSETS; do
   else
     [ -f "out/live-$A.jsonl" ] && mv "out/live-$A.jsonl" "out/live-$A-prev.jsonl" && echo "archived prior $AU session -> out/live-$A-prev.jsonl"
     AF="$(conf_for "$A")"; AHI="$(lead_hi_for "$A")"; ALO="$(lead_lo_for "$A")"; ACAP="$(lead_cap_for "$A")"
+    ARULE="$(rule_for "$A")"; ATHR="$(thresh_for "$A")"
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" \
-      --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
-      --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
+      --provider binance --poll 3 --entry-threshold "$ATHR" \
+      --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI" --lead-lo "$ALO" --regime-frac "$REGIME" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
       >> "out/nohup-$A.log" 2>&1 &
-    echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, conf >= ${AF}, lead ${ALO}-${AHI}s ask <= ${ACAP} (move auto-scales to $AU)"
+    if [ "$ARULE" = "threshold" ]; then
+      echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, RULE=threshold (conf >= ${ATHR})"
+    else
+      echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, RULE=${ARULE}, conf >= ${AF}, lead ${ALO}-${AHI}s ask <= ${ACAP} (move auto-scales to $AU)"
+    fi
   fi
 done
 
@@ -437,11 +470,12 @@ for A in $M15; do
   else
     [ -f "out/live-$A-15m.jsonl" ] && mv "out/live-$A-15m.jsonl" "out/live-$A-15m-prev.jsonl" && echo "archived prior $AU 15m session -> out/live-$A-15m-prev.jsonl"
     AF="$(conf_for "$A")"; ACAP="$(lead_cap_for "$A")"
+    ARULE="$(rule_for "$A")"; ATHR="$(thresh_for "$A")"
     AHI15="$(awk "BEGIN{print $(lead_hi_for "$A")*3}")"
     ALO15="$(awk "BEGIN{print $(lead_lo_for "$A")*3}")"
     nohup "$PY" scripts/btc_live_paper.py --asset "$A" --window 15m \
-      --provider binance --poll 3 --entry-threshold "$THRESHOLD" \
-      --entry-rule "$RULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
+      --provider binance --poll 3 --entry-threshold "$ATHR" \
+      --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI15" --lead-lo "$ALO15" --regime-frac "$REGIME" \
       --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \

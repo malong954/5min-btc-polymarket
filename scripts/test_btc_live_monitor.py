@@ -192,6 +192,34 @@ def test_15m_stream_is_a_separate_market():
     check("15m shadow does not grade the 5m skip", "actual" not in skip_row)
 
 
+def test_mixed_per_asset_rules_render_per_market():
+    """BTC on the lead rule + SOL/XRP on conf-threshold in one panel: the rules
+    line must tag each market instead of showing whichever config came last."""
+    st = new_state()
+    fold_event(st, {"type": "config", "asset": "BTC", "window": "5m",
+                    "entry_rule": "lead", "lead_max_price": 0.90, "bankroll": 100.0})
+    fold_event(st, {"type": "config", "asset": "SOL", "window": "5m",
+                    "entry_rule": "threshold", "entry_threshold": 0.55, "bankroll": 100.0})
+    fold_event(st, {"type": "heartbeat", "asset": "BTC", "window": "5m",
+                    "price": 64000.0, "seconds_left": 100, "round": 300})
+    fold_event(st, {"type": "heartbeat", "asset": "SOL", "window": "5m",
+                    "price": 76.0, "seconds_left": 100, "round": 300})
+    out = render(st, 0.85, Painter(color=False))
+    check("mixed rules tag BTC", "BTC lead" in out)
+    check("mixed rules tag SOL with its threshold", "SOL conf>=0.55" in out)
+    # Uniform rules keep the original single-rule line.
+    st2 = new_state()
+    fold_event(st2, {"type": "config", "asset": "BTC", "entry_rule": "lead",
+                     "lead_max_price": 0.72, "bankroll": 100.0})
+    fold_event(st2, {"type": "config", "asset": "SOL", "entry_rule": "lead", "bankroll": 100.0})
+    fold_event(st2, {"type": "heartbeat", "asset": "BTC", "price": 64000.0,
+                     "seconds_left": 100, "round": 300})
+    fold_event(st2, {"type": "heartbeat", "asset": "SOL", "price": 76.0,
+                     "seconds_left": 100, "round": 300})
+    out2 = render(st2, 0.85, Painter(color=False))
+    check("uniform rules keep the lead-rule line", "lead rule:" in out2)
+
+
 def test_missing_file_is_safe():
     evs, off = read_new_events("/nonexistent/path/live.jsonl", 0)
     check("missing file returns empty", evs == [] and off == 0)
@@ -206,6 +234,7 @@ def main():
     test_incremental_read_and_truncation()
     test_skip_rows_graded_by_shadow_settle()
     test_15m_stream_is_a_separate_market()
+    test_mixed_per_asset_rules_render_per_market()
     test_missing_file_is_safe()
     print("\nAll live monitor tests passed.")
 

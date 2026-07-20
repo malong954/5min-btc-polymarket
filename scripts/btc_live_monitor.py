@@ -206,6 +206,12 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
             state["balance"] = state["bankroll"] + state["pnl_usd"]
             state["peak_bal"] = max(state["peak_bal"], state["balance"])
         state["entry_rule"] = ev.get("entry_rule", state.get("entry_rule"))
+        # Per-market rule map: with per-asset rules (BTC on lead, SOL/XRP on
+        # threshold) a single global rule line would just show whichever
+        # trader's config event arrived last.
+        if ev.get("entry_rule"):
+            state.setdefault("mkt_rules", {})[a] = {
+                "rule": ev["entry_rule"], "thr": ev.get("entry_threshold")}
         if ev.get("entry_threshold") is not None:
             state["entry_threshold"] = ev["entry_threshold"]
         if ev.get("edge_margin") is not None:
@@ -477,7 +483,21 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
             countdown = f"{next(iter(sls.values())):.0f}s left"
         else:
             countdown = "—"
-        if rule == "edge":
+        mkt_rules = state.get("mkt_rules") or {}
+        distinct = {v["rule"] for v in mkt_rules.values()}
+        if len(distinct) > 1:
+            # Mixed per-asset rules: one compact tag per market.
+            parts = []
+            for a in names:
+                v = mkt_rules.get(a)
+                if not v:
+                    continue
+                if v["rule"] == "threshold" and v.get("thr") is not None:
+                    parts.append(f"{a} conf>={v['thr']:g}")
+                else:
+                    parts.append(f"{a} {v['rule']}")
+            status = p.c("rules: " + " · ".join(parts) + " · hold to resolution", CYAN)
+        elif rule == "edge":
             status = p.c(f"edge rule: enters when conf >= ask + {margin:.2f}", CYAN)
         elif rule == "lead":
             status = p.c(lead_desc, CYAN)
