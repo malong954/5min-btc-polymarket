@@ -128,6 +128,13 @@ ETH="${ETH:-${SAVED_ETH:-0}}"    # legacy switch; folded into ASSETS below
 ASSETS="${ASSETS-${SAVED_ASSETS:-}}"   # extra markets: any of "eth sol xrp"
 M15="${M15-${SAVED_M15:-}}"      # assets to ALSO trade on the 15m window
 STAKE="${STAKE:-${SAVED_STAKE:-10}}"
+# Sizing model: flat = same $STAKE every trade (measurement default). kelly /
+# confidence scale the stake with the edge — the fix for "high winrate, thin
+# percentage, full cap risk": the flat model ignores that a conf-0.9 setup
+# justifies more size than a conf-0.5 graze (Kelly f* = (q-p)/(1-p)).
+SIZING="${SIZING:-${SAVED_SIZING:-flat}}"
+STAKE_PCT="${STAKE_PCT:-${SAVED_STAKE_PCT:-0.10}}"
+case "$SIZING" in flat|percent|confidence|kelly) ;; *) echo "invalid SIZING: $SIZING (allowed: flat percent confidence kelly)"; exit 1 ;; esac
 BANKROLL="${BANKROLL:-${SAVED_BANKROLL:-100}}"
 
 # ETH=1 is the old spelling of ASSETS="eth" — honor it, without duplicating.
@@ -478,6 +485,8 @@ mkdir -p out
   echo "SAVED_ASSETS=\"$ASSETS\""
   echo "SAVED_M15=\"$M15\""
   echo "SAVED_STAKE=$STAKE"
+  echo "SAVED_SIZING=$SIZING"
+  echo "SAVED_STAKE_PCT=$STAKE_PCT"
   echo "SAVED_BANKROLL=$BANKROLL"
 } > "$CONF"
 
@@ -502,7 +511,7 @@ else
     --provider "$PROVIDER" --poll 2 --entry-threshold "$BTHR" \
     --entry-rule "$BRULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$BCAP" \
     --lead-min-conf "$CONF_BTC" --lead-hi "$BHI" --lead-lo "$BLO" --regime-frac "$REGIME" \
-    --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
+    --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
     >> out/nohup.log 2>&1 &
@@ -535,7 +544,7 @@ for A in $ASSETS; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI" --lead-lo "$ALO" --regime-frac "$REGIME" \
-      --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
+      --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
       >> "out/nohup-$A.log" 2>&1 &
@@ -565,7 +574,7 @@ for A in $M15; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI15" --lead-lo "$ALO15" --regime-frac "$REGIME" \
-      --entry-price-source polymarket --sizing flat --stake-usd "$STAKE" \
+      --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A-15m.jsonl" --quiet \
       >> "out/nohup-$A-15m.log" 2>&1 &
