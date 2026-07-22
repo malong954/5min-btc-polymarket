@@ -48,7 +48,13 @@ from typing import Any, Callable, Optional
 import requests
 
 REST = "https://api.limitless.exchange"
-WINDOW_SLOT = {"5m": 300, "15m": 900}
+WINDOW_SLOT = {"5m": 300, "15m": 900, "1h": 3600}
+# Confirmed live 2026-07-22: slugs are `{asset}-up-or-down-{segment}-{bucket}`
+# where bucket is the ROUND-START unix ts (same alignment as Polymarket) and
+# segment is the cadence name below. Markets also carry strikePrice (the round's
+# open reference), ticker, deadline (round end), and winningOutcomeIndex on
+# resolution.
+WINDOW_SEG = {"5m": "5-min", "15m": "15-min", "1h": "hourly"}
 
 # One keep-alive session (same latency argument as btc_polymarket.py).
 _SESSION = requests.Session()
@@ -66,11 +72,10 @@ def bucket_window(ts: int, window: str = "15m") -> int:
 
 
 def current_slug(now_ts: float, asset: str = "btc", window: str = "15m") -> str:
-    """Best-guess slug of the asset's live up-down market, mirroring the
-    Polymarket convention (`{asset}-updown-{window}-{bucket}`). Limitless slugs
-    are reverse-engineered, so prefer resolve_active_slug() (which matches
-    against the live /markets/active/slugs list) over trusting this directly."""
-    return f"{asset.lower()}-updown-{window}-{bucket_window(int(now_ts), window)}"
+    """Slug of the asset's live up-down market for the current round
+    (confirmed live: `btc-up-or-down-15-min-<round start ts>`)."""
+    return (f"{asset.lower()}-up-or-down-{WINDOW_SEG[window]}-"
+            f"{bucket_window(int(now_ts), window)}")
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -144,12 +149,23 @@ def prices_from_orderbook(raw: dict[str, Any]) -> dict[str, Optional[float]]:
     }
 
 
+def _slug_str(entry: Any) -> Optional[str]:
+    """The active-slugs list returns DICTS ({slug, strikePrice, ticker,
+    deadline}); older assumptions had plain strings. Accept both."""
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        s = entry.get("slug")
+        return str(s) if s else None
+    return None
+
+
 def resolve_active_slug(now_ts: float, asset: str = "btc", window: str = "15m",
                         getter: Callable[..., Any] = _get_json) -> Optional[str]:
     """Find the asset's CURRENT up-down slug from the live active-slugs list,
-    instead of trusting the constructed one. Matches `{asset}-updown-{window}`
-    and picks the slug whose trailing bucket timestamp is the current slot (or,
-    failing an exact bucket match, the newest such slug)."""
+    instead of trusting the constructed one. Matches the confirmed convention
+    `{asset}-up-or-down-{segment}-{bucket}` and picks the slug whose bucket is
+    the current slot (or, failing an exact match, the newest such slug)."""
     try:
         slugs = getter(f"{REST}/markets/active/slugs")
     except Exception:
@@ -158,11 +174,14 @@ def resolve_active_slug(now_ts: float, asset: str = "btc", window: str = "15m",
         slugs = slugs.get("slugs") or slugs.get("data") or []
     if not isinstance(slugs, list):
         return None
-    pat = re.compile(rf"^{re.escape(asset.lower())}-updown-{re.escape(window)}-(\d+)$")
+    seg = WINDOW_SEG[window]
+    pat = re.compile(rf"^{re.escape(asset.lower())}-up-or-down-{re.escape(seg)}-(\d+)$")
     cur = bucket_window(int(now_ts), window)
     matches: list[tuple[int, str]] = []
-    for s in slugs:
-        s = str(s)
+    for entry in slugs:
+        s = _slug_str(entry)
+        if not s:
+            continue
         m = pat.match(s)
         if m:
             matches.append((int(m.group(1)), s))
@@ -263,7 +282,21 @@ def resolved_outcome(slug: str, getter: Callable[..., Any] = _get_json,
     except Exception:
         m = None
     if isinstance(m, dict):
-        # A resolved binary market reports its winning side one of several ways.
+        # Confirmed field: winningOutcomeIndex (int) + tokens[]; map the index
+        # through the token's label when possible, else assume index 0 = YES/UP
+        # (Limitless's YES-book convention for up-down markets).
+        wi = m.get("winningOutcomeIndex")
+        if isinstance(wi, int) and wi in (0, 1):
+            tokens = m.get("tokens")
+            if isinstance(tokens, list) and len(tokens) > wi and isinstance(tokens[wi], dict):
+                label = str(tokens[wi].get("title") or tokens[wi].get("name")
+                            or tokens[wi].get("symbol") or tokens[wi].get("outcome") or "").lower()
+                if "up" in label or "yes" in label:
+                    return "UP"
+                if "down" in label or "no" in label:
+                    return "DOWN"
+            return "UP" if wi == 0 else "DOWN"
+        # Other spellings a resolved binary market might use.
         for key in ("winningOutcome", "resolvedOutcome", "outcome", "result"):
             v = m.get(key)
             if isinstance(v, str) and v.strip().lower() in ("up", "yes"):
@@ -349,32 +382,42 @@ def _discover(asset: str, window: str) -> int:
     except Exception as e:
         print(f"# /markets/active failed: {e}")
 
-    # 3) If anything matched, probe the first asset-hit's orderbook + candles.
-    probe = None
+    # 3) Probe the requested asset+window market: detail, orderbook, candles.
+    probe = resolve_active_slug(time.time(), a, window) or current_slug(time.time(), a, window)
+    print(f"# probing {a} {window} market: {probe}")
     try:
-        if isinstance(slugs, list):
-            for s in slugs:
-                if a in str(s).lower():
-                    probe = str(s)
-                    break
-    except Exception:
-        pass
-    if probe:
-        print(f"# probing orderbook of first {a} hit: {probe}")
+        m = _get_json(f"{REST}/markets/{probe}")
+        if isinstance(m, dict):
+            brief = {k: m.get(k) for k in ("slug", "title", "status", "expired",
+                                           "winningOutcomeIndex", "expirationTimestamp",
+                                           "tradeType", "venue", "marketType") if k in m}
+            print(f"#   detail: {json.dumps(brief)[:400]}")
+            for k in ("tokens", "prices", "tradePrices", "priceOracleMetadata", "metadata"):
+                if k in m:
+                    print(f"#   {k}: {json.dumps(m[k])[:400]}")
+    except Exception as e:
+        print(f"#   market detail failed: {e}")
+    try:
+        raw = _get_json(f"{REST}/markets/{probe}/orderbook")
+        print(f"#   orderbook keys: {list(raw.keys()) if isinstance(raw, dict) else type(raw)}")
+        print(json.dumps(raw, indent=2)[:1500])
+        print("#   parsed:", json.dumps(prices_from_orderbook(raw) if isinstance(raw, dict) else None))
+    except Exception as e:
+        print(f"#   orderbook failed: {e}")
+    for interval in (window, "5m", "1m"):
         try:
-            raw = _get_json(f"{REST}/markets/{probe}/orderbook")
-            print(f"#   orderbook keys: {list(raw.keys()) if isinstance(raw, dict) else type(raw)}")
-            print(json.dumps(raw, indent=2)[:1200])
-            print("#   parsed:", json.dumps(prices_from_orderbook(raw) if isinstance(raw, dict) else None))
+            cs = oracle_candles(probe, interval=interval)
         except Exception as e:
-            print(f"#   orderbook failed: {e}")
-        try:
-            cs = oracle_candles(probe, interval="5m")
-            print(f"#   oracle candles: {len(cs)}; first: {json.dumps(cs[0])[:300] if cs else '-'}")
-        except Exception as e:
-            print(f"#   oracle-candles failed: {e}")
-    else:
-        print(f"# no '{a}' slug found in the active list — see dumps above for the real naming")
+            print(f"#   oracle-candles interval={interval} failed: {e}")
+            continue
+        print(f"#   oracle candles interval={interval}: {len(cs)}; "
+              f"first: {json.dumps(cs[0])[:300] if cs else '-'}")
+        if cs:
+            m2 = re.search(r"-(\d+)$", probe)
+            if m2:
+                print("#   candle-settle label:",
+                      settle_from_candles(cs, int(m2.group(1)), window))
+            break
     return 0
 
 

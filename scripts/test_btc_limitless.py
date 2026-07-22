@@ -19,10 +19,12 @@ def check(desc, cond):
 
 def test_slug_and_bucket():
     ts = 1_700_000_123
-    check("15m slug uses the 900s bucket",
-          current_slug(ts, "btc", "15m") == f"btc-updown-15m-{ts - (ts % 900)}")
+    check("15m slug uses the confirmed convention + 900s bucket",
+          current_slug(ts, "btc", "15m") == f"btc-up-or-down-15-min-{ts - (ts % 900)}")
     check("5m slug uses the 300s bucket",
-          current_slug(ts, "eth", "5m") == f"eth-updown-5m-{ts - (ts % 300)}")
+          current_slug(ts, "eth", "5m") == f"eth-up-or-down-5-min-{ts - (ts % 300)}")
+    check("hourly slug supported",
+          current_slug(ts, "btc", "1h") == f"btc-up-or-down-hourly-{ts - (ts % 3600)}")
     check("bucket floors to the slot", bucket_window(950, "15m") == 900)
 
 
@@ -55,19 +57,23 @@ def test_orderbook_shape_tolerance():
 def test_resolve_active_slug_picks_current_bucket():
     now = 1_700_000_123
     cur = bucket_window(int(now), "15m")
-    slugs = [f"btc-updown-15m-{cur - 900}", f"btc-updown-15m-{cur}",
-             f"eth-updown-15m-{cur}", "btc-updown-15m-not-a-number"]
+    # Live shape: list of DICTS with slug/strikePrice/ticker/deadline.
+    slugs = [{"slug": f"btc-up-or-down-15-min-{cur - 900}", "ticker": "BTC"},
+             {"slug": f"btc-up-or-down-15-min-{cur}", "ticker": "BTC"},
+             {"slug": f"eth-up-or-down-15-min-{cur}", "ticker": "ETH"},
+             {"slug": "btc-up-or-down-15-min-not-a-number"},
+             "btc-up-or-down-hourly-1784682000"]
 
     def getter(url, params=None, timeout=8.0):
         check("active-slugs endpoint hit", url.endswith("/markets/active/slugs"))
         return slugs
 
     s = resolve_active_slug(now, "btc", "15m", getter)
-    check("resolves the CURRENT-bucket btc slug", s == f"btc-updown-15m-{cur}")
+    check("resolves the CURRENT-bucket btc slug", s == f"btc-up-or-down-15-min-{cur}")
     # Wrapped in {"slugs": [...]} it should still work.
     s2 = resolve_active_slug(now, "btc", "15m",
                              lambda u, params=None, timeout=8.0: {"slugs": slugs})
-    check("tolerates a {slugs:[...]} envelope", s2 == f"btc-updown-15m-{cur}")
+    check("tolerates a {slugs:[...]} envelope", s2 == f"btc-up-or-down-15-min-{cur}")
     # No match -> None (not a crash, not a wrong-asset slug).
     s3 = resolve_active_slug(now, "sol", "15m", getter)
     check("no matching asset -> None", s3 is None)
@@ -76,11 +82,11 @@ def test_resolve_active_slug_picks_current_bucket():
 def test_current_prices_uses_resolved_slug():
     now = 1_700_000_123
     cur = bucket_window(int(now), "15m")
-    live = f"btc-updown-15m-{cur}"
+    live = f"btc-up-or-down-15-min-{cur}"
 
     def getter(url, params=None, timeout=8.0):
         if url.endswith("/markets/active/slugs"):
-            return [live]
+            return [{"slug": live, "ticker": "BTC"}]
         if url.endswith(f"/markets/{live}/orderbook"):
             return {"bids": [{"price": 0.70, "size": 100}],
                     "asks": [{"price": 0.72, "size": 100}]}
@@ -110,15 +116,26 @@ def test_settle_from_candles():
 
 
 def test_resolved_outcome_prefers_market_field():
+    def getter_wi(url, params=None, timeout=8.0):
+        return {"winningOutcomeIndex": 1,
+                "tokens": [{"title": "Up"}, {"title": "Down"}]}
+    check("winningOutcomeIndex maps through token labels",
+          resolved_outcome("btc-up-or-down-15-min-1700000100", getter_wi) == "DOWN")
+
+    def getter_wi_bare(url, params=None, timeout=8.0):
+        return {"winningOutcomeIndex": 0}
+    check("bare winningOutcomeIndex 0 -> UP (YES-book convention)",
+          resolved_outcome("btc-up-or-down-15-min-1700000100", getter_wi_bare) == "UP")
+
     def getter(url, params=None, timeout=8.0):
         return {"winningOutcome": "Down"}
     check("resolved_outcome reads the winning-side field",
-          resolved_outcome("btc-updown-15m-1700000100", getter) == "DOWN")
+          resolved_outcome("btc-up-or-down-15-min-1700000100", getter) == "DOWN")
 
     def getter_prices(url, params=None, timeout=8.0):
         return {"outcomePrices": ["1.0", "0.0"]}
     check("decisive outcomePrices -> UP",
-          resolved_outcome("btc-updown-15m-1700000100", getter_prices) == "UP")
+          resolved_outcome("btc-up-or-down-15-min-1700000100", getter_prices) == "UP")
 
     def getter_unresolved(url, params=None, timeout=8.0):
         if url.endswith("/oracle-candles"):
@@ -126,7 +143,7 @@ def test_resolved_outcome_prefers_market_field():
             return [{"t": rs, "o": 100, "c": 130}]
         return {"status": "open"}   # not yet resolved -> fall through to candles
     check("unresolved market falls back to candle-settle",
-          resolved_outcome("btc-updown-15m-1700000100", getter_unresolved) == "UP")
+          resolved_outcome("btc-up-or-down-15-min-1700000100", getter_unresolved) == "UP")
 
 
 def main():
