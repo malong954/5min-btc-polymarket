@@ -99,6 +99,30 @@ def test_current_prices_uses_resolved_slug():
     check("current_prices maps DOWN ask (1 - YES bid)", abs(p["DOWN"] - 0.30) < 1e-9)
 
 
+def test_live_confirmed_orderbook_shape():
+    """The EXACT shape returned live 2026-07-22 (btc-up-or-down-15-min):
+    dict levels with side tags, micro-unit sizes (10^6 = 1 share)."""
+    raw = {"bids": [{"price": 0.65, "size": 10000000, "side": "BUY"},
+                    {"price": 0.61, "size": 20000000, "side": "BUY"}],
+           "asks": [{"price": 0.72, "size": 10000000, "side": "SELL"},
+                    {"price": 0.84, "size": 5000000, "side": "SELL"}],
+           "tokenId": "305143...", "midpoint": 0.685, "maxSpread": "0.035"}
+    px = prices_from_orderbook(raw)
+    check("live shape: UP ask 0.72", abs(px["UP"] - 0.72) < 1e-9)
+    check("live shape: UP bid 0.65", abs(px["UP_bid"] - 0.65) < 1e-9)
+    check("live shape: DOWN ask = 1 - 0.65", abs(px["DOWN"] - 0.35) < 1e-9)
+    check("micro-unit sizes normalized to shares (10M -> 10)",
+          abs(px["UP_size"] - 10.0) < 1e-9 and abs(px["UP_bid_size"] - 10.0) < 1e-9)
+
+
+def test_tokens_dict_outcome():
+    """Confirmed live: tokens is {'yes': id, 'no': id}; index 0 = yes = UP."""
+    def getter(url, params=None, timeout=8.0):
+        return {"winningOutcomeIndex": 1, "tokens": {"yes": "111", "no": "222"}}
+    check("tokens-dict: index 1 -> DOWN",
+          resolved_outcome("btc-up-or-down-15-min-1700000100", getter) == "DOWN")
+
+
 def test_settle_from_candles():
     rs = 1_700_000_100  # a 15m bucket start
     # Three 5m candles inside the round: open 100 -> close 130 => UP.
@@ -152,6 +176,8 @@ def main():
     test_orderbook_shape_tolerance()
     test_resolve_active_slug_picks_current_bucket()
     test_current_prices_uses_resolved_slug()
+    test_live_confirmed_orderbook_shape()
+    test_tokens_dict_outcome()
     test_settle_from_candles()
     test_resolved_outcome_prefers_market_field()
     print("\nAll Limitless feed tests passed.")

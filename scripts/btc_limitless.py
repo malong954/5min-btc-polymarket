@@ -114,6 +114,19 @@ def _best(levels: Any, side: str) -> tuple[Optional[float], Optional[float]]:
     return best_p, best_sz
 
 
+# Confirmed live: order sizes are micro-units (10^6 = 1 share; minSize
+# 200000000 = 200). Sizes at/above this cutoff are treated as micro-units and
+# normalized to shares, so test fixtures and other venues' share-counts pass
+# through unchanged.
+_MICRO_CUTOFF = 1e5
+
+
+def _norm_size(sz: Optional[float]) -> Optional[float]:
+    if sz is None:
+        return None
+    return sz / 1e6 if sz >= _MICRO_CUTOFF else sz
+
+
 def _yes_book(raw: dict[str, Any]) -> tuple[Any, Any]:
     """Pull (bids, asks) arrays out of an orderbook payload, tolerant of the
     likely key spellings (bids/asks, buy/sell, yesBids/yesAsks)."""
@@ -140,6 +153,8 @@ def prices_from_orderbook(raw: dict[str, Any]) -> dict[str, Optional[float]]:
     bids, asks = _yes_book(raw)
     y_ask, y_ask_sz = _best(asks, "ask")
     y_bid, y_bid_sz = _best(bids, "bid")
+    y_ask_sz = _norm_size(y_ask_sz)
+    y_bid_sz = _norm_size(y_bid_sz)
     comp = lambda p: (round(1.0 - p, 6) if p is not None else None)
     return {
         "UP": y_ask, "UP_size": y_ask_sz,
@@ -218,11 +233,13 @@ def oracle_candles(slug: str, interval: str = "5m", frm: Optional[int] = None,
     market resolves on. This is the settle reference our Binance-spot labels
     keep disagreeing with; grading a round off these candles removes the
     'reference error' class entirely."""
-    params: dict[str, Any] = {"interval": interval}
-    if frm is not None:
-        params["from"] = int(frm)
-    if to is not None:
-        params["to"] = int(to)
+    # Live probe with interval-only returned 0 candles — the endpoint appears
+    # to require an explicit range. Default to the trailing 2 hours.
+    if to is None:
+        to = int(time.time())
+    if frm is None:
+        frm = int(to) - 7200
+    params: dict[str, Any] = {"interval": interval, "from": int(frm), "to": int(to)}
     try:
         raw = getter(f"{REST}/markets/{slug}/oracle-candles", params)
     except Exception:
@@ -288,6 +305,10 @@ def resolved_outcome(slug: str, getter: Callable[..., Any] = _get_json,
         wi = m.get("winningOutcomeIndex")
         if isinstance(wi, int) and wi in (0, 1):
             tokens = m.get("tokens")
+            # Confirmed live shape: tokens is a dict {"yes": <id>, "no": <id>};
+            # index 0 = yes = UP, 1 = no = DOWN.
+            if isinstance(tokens, dict) and "yes" in tokens:
+                return "UP" if wi == 0 else "DOWN"
             if isinstance(tokens, list) and len(tokens) > wi and isinstance(tokens[wi], dict):
                 label = str(tokens[wi].get("title") or tokens[wi].get("name")
                             or tokens[wi].get("symbol") or tokens[wi].get("outcome") or "").lower()
