@@ -287,27 +287,94 @@ def resolved_outcome(slug: str, getter: Callable[..., Any] = _get_json,
 
 
 def _discover(asset: str, window: str) -> int:
-    """Live discovery: hit the real API, print the raw shapes, and report
-    whether the constructed slug matched a live market. Run once on a normal
-    network to confirm field names before wiring this into the recorder."""
-    now = time.time()
-    built = current_slug(now, asset, window)
-    print(f"# built slug (guess): {built}")
-    active = resolve_active_slug(now, asset, window)
-    print(f"# resolved active slug: {active}")
-    slug = active or built
+    """Live reconnaissance: dump what the API ACTUALLY returns so the slug
+    convention and JSON shapes can be learned from one run on a normal network.
+    (First probe showed Limitless does NOT use the Polymarket-style
+    `btc-updown-15m-<ts>` slugs — this prints the real naming.)"""
+    a = asset.lower()
+
+    # 1) The active-slugs list: shape + everything that looks like our asset.
     try:
-        raw = _get_json(f"{REST}/markets/{slug}/orderbook")
-        print(f"# orderbook raw keys: {list(raw.keys()) if isinstance(raw, dict) else type(raw)}")
-        print(json.dumps(raw, indent=2)[:1200])
-        print("# parsed prices:", json.dumps(current_prices(now, asset=asset, window=window, slug=slug)))
+        slugs = _get_json(f"{REST}/markets/active/slugs")
+        print(f"# /markets/active/slugs -> type={type(slugs).__name__}", end="")
+        if isinstance(slugs, dict):
+            print(f" keys={list(slugs.keys())[:8]}")
+            for k in ("slugs", "data", "markets", "items"):
+                if isinstance(slugs.get(k), list):
+                    slugs = slugs[k]
+                    break
+        else:
+            print()
+        if isinstance(slugs, list):
+            print(f"#   {len(slugs)} entries; first 10:")
+            for s in slugs[:10]:
+                print(f"#     {json.dumps(s) if not isinstance(s, str) else s}")
+            strs = [str(s) for s in slugs]
+            hits = [s for s in strs if a in s.lower()][:20]
+            print(f"#   entries containing '{a}' ({len(hits)} shown):")
+            for s in hits:
+                print(f"#     {s}")
+            w15 = [s for s in strs if "15" in s][:10]
+            print(f"#   entries containing '15' (first 10):")
+            for s in w15:
+                print(f"#     {s}")
     except Exception as e:
-        print(f"# orderbook fetch failed: {e}")
-    m2 = re.search(r"-(\d+)$", slug)
-    if m2:
-        cs = oracle_candles(slug, interval=window)
-        print(f"# oracle candles returned: {len(cs)}; first: {json.dumps(cs[0]) if cs else '-'}")
-        print("# candle-settle label:", settle_from_candles(cs, int(m2.group(1)), window))
+        print(f"# /markets/active/slugs failed: {e}")
+
+    # 2) A metadata page: real market objects with their field names.
+    try:
+        page = _get_json(f"{REST}/markets/active", {"page": 1, "limit": 25})
+        items = page
+        if isinstance(page, dict):
+            print(f"# /markets/active keys: {list(page.keys())[:10]}")
+            for k in ("markets", "data", "items", "results"):
+                if isinstance(page.get(k), list):
+                    items = page[k]
+                    break
+        if isinstance(items, list) and items:
+            m0 = items[0]
+            if isinstance(m0, dict):
+                print(f"# market object keys: {list(m0.keys())}")
+            crypto = [m for m in items if isinstance(m, dict)
+                      and a in json.dumps(m).lower()][:5]
+            print(f"#   {a}-related markets on page 1 ({len(crypto)}):")
+            for m in crypto:
+                brief = {k: m.get(k) for k in ("slug", "title", "name", "ticker",
+                                               "deadline", "expirationDate", "endDate",
+                                               "duration", "marketType", "category")
+                         if k in m}
+                print(f"#     {json.dumps(brief)[:300]}")
+        else:
+            print(f"# /markets/active page unparsed: {json.dumps(page)[:400]}")
+    except Exception as e:
+        print(f"# /markets/active failed: {e}")
+
+    # 3) If anything matched, probe the first asset-hit's orderbook + candles.
+    probe = None
+    try:
+        if isinstance(slugs, list):
+            for s in slugs:
+                if a in str(s).lower():
+                    probe = str(s)
+                    break
+    except Exception:
+        pass
+    if probe:
+        print(f"# probing orderbook of first {a} hit: {probe}")
+        try:
+            raw = _get_json(f"{REST}/markets/{probe}/orderbook")
+            print(f"#   orderbook keys: {list(raw.keys()) if isinstance(raw, dict) else type(raw)}")
+            print(json.dumps(raw, indent=2)[:1200])
+            print("#   parsed:", json.dumps(prices_from_orderbook(raw) if isinstance(raw, dict) else None))
+        except Exception as e:
+            print(f"#   orderbook failed: {e}")
+        try:
+            cs = oracle_candles(probe, interval="5m")
+            print(f"#   oracle candles: {len(cs)}; first: {json.dumps(cs[0])[:300] if cs else '-'}")
+        except Exception as e:
+            print(f"#   oracle-candles failed: {e}")
+    else:
+        print(f"# no '{a}' slug found in the active list — see dumps above for the real naming")
     return 0
 
 
