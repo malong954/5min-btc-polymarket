@@ -55,7 +55,16 @@
 #                                        e.g. BTC late+expensive, SOL/XRP
 #                                        early+cheap:  LEAD_HI_SOL=240 LEAD_LO_SOL=150
 #                                        LEAD_CAP_SOL=0.72  LEAD_HI_BTC=120 ...
+#                 DIV_MODE_<A>=off|boost|veto  divergence handling (deep study):
+#                                        boost = stake x DIV_BOOST_MULT on rounds
+#                                        WITH a divergence (BTC candidate); veto =
+#                                        refuse those rounds (SOL/XRP candidate)
+#                 DIV_BOOST_MULT=2.0     stake multiplier for DIV_MODE boost
+#                 QUIET_VOL_MAX=0.77     RULE quiet: max vol_factor that counts
+#                                        as a calm round (pooled bottom tercile)
 #   RULE=edge enters when confidence >= live ask + EDGE_MARGIN (price = hurdle).
+#   RULE=quiet (alts) enters the predicted side on CALM rounds only: vol_factor
+#   <= QUIET_VOL_MAX, no divergence, ask <= MAX_PRICE; exempt from REGIME gate.
 #   Legacy ETH=1 still works (same as adding eth to ASSETS).
 #
 set -euo pipefail
@@ -84,6 +93,22 @@ LEAD_HI="${LEAD_HI:-${SAVED_LEAD_HI:-240}}"   # lead window opens at this many s
 LEAD_LO="${LEAD_LO:-${SAVED_LEAD_LO:-180}}"   # ...and closes at this many seconds left
 LEAD_MAX_PRICE="${LEAD_MAX_PRICE:-${SAVED_LEAD_MAX_PRICE:-0.72}}"  # lead rule ask cap
 REGIME="${REGIME:-${SAVED_REGIME:-0}}"        # regime gate fraction (0 = off)
+# Divergence mode per market (deep study 2026-07-23, official labels, both
+# halves): BTC = boost candidate (stake x DIV_BOOST_MULT on divergence rounds:
+# crossing EV +8.9% with vs +2.9% without); SOL/XRP = veto candidates
+# (divergence-present rounds lose their edge on the alts). off = ignore.
+DIV_MODE="${DIV_MODE:-${SAVED_DIV_MODE:-off}}"
+DIV_MODE_BTC="${DIV_MODE_BTC:-${SAVED_DIV_MODE_BTC:-$DIV_MODE}}"
+DIV_MODE_ETH="${DIV_MODE_ETH:-${SAVED_DIV_MODE_ETH:-$DIV_MODE}}"
+DIV_MODE_SOL="${DIV_MODE_SOL:-${SAVED_DIV_MODE_SOL:-$DIV_MODE}}"
+DIV_MODE_XRP="${DIV_MODE_XRP:-${SAVED_DIV_MODE_XRP:-$DIV_MODE}}"
+DIV_BOOST_MULT="${DIV_BOOST_MULT:-${SAVED_DIV_BOOST_MULT:-2.0}}"
+# RULE quiet (alts): vol_factor at/below this = a calm round the quiet rule
+# may trade (0.77 = pooled bottom tercile, where SOL +4.0% / XRP +5.8% lived).
+QUIET_VOL_MAX="${QUIET_VOL_MAX:-${SAVED_QUIET_VOL_MAX:-0.77}}"
+for DV in "$DIV_MODE_BTC" "$DIV_MODE_ETH" "$DIV_MODE_SOL" "$DIV_MODE_XRP"; do
+  case "$DV" in off|boost|veto) ;; *) echo "invalid DIV_MODE: $DV (allowed: off boost veto)"; exit 1 ;; esac
+done
 # Per-market confidence floors override the global LEAD_MIN_CONF for that market
 # (each market calibrates + gets adversely selected differently). Any unset one
 # falls back to LEAD_MIN_CONF. NOTE: choosing these FROM the combo tables makes
@@ -105,7 +130,7 @@ THRESH_ETH="${THRESH_ETH:-${SAVED_THRESH_ETH:-$THRESHOLD}}"
 THRESH_SOL="${THRESH_SOL:-${SAVED_THRESH_SOL:-$THRESHOLD}}"
 THRESH_XRP="${THRESH_XRP:-${SAVED_THRESH_XRP:-$THRESHOLD}}"
 for RV in "$RULE_BTC" "$RULE_ETH" "$RULE_SOL" "$RULE_XRP"; do
-  case "$RV" in threshold|edge|lead) ;; *) echo "invalid per-asset rule: $RV (allowed: threshold edge lead)"; exit 1 ;; esac
+  case "$RV" in threshold|edge|lead|quiet) ;; *) echo "invalid per-asset rule: $RV (allowed: threshold edge lead quiet)"; exit 1 ;; esac
 done
 # Per-market lead WINDOW + ASK CAP overrides. Measured motivation: BTC's edge
 # is late-and-expensive (150-180s @ ~0.70, hold to resolution) while SOL/XRP had
@@ -159,6 +184,7 @@ thresh_for()  { case "$1" in btc) echo "$THRESH_BTC";; eth) echo "$THRESH_ETH";;
 lead_hi_for() { case "$1" in btc) echo "$LEAD_HI_BTC";; eth) echo "$LEAD_HI_ETH";; sol) echo "$LEAD_HI_SOL";; xrp) echo "$LEAD_HI_XRP";; *) echo "$LEAD_HI";; esac; }
 lead_lo_for() { case "$1" in btc) echo "$LEAD_LO_BTC";; eth) echo "$LEAD_LO_ETH";; sol) echo "$LEAD_LO_SOL";; xrp) echo "$LEAD_LO_XRP";; *) echo "$LEAD_LO";; esac; }
 lead_cap_for(){ case "$1" in btc) echo "$LEAD_CAP_BTC";; eth) echo "$LEAD_CAP_ETH";; sol) echo "$LEAD_CAP_SOL";; xrp) echo "$LEAD_CAP_XRP";; *) echo "$LEAD_MAX_PRICE";; esac; }
+div_mode_for(){ case "$1" in btc) echo "$DIV_MODE_BTC";; eth) echo "$DIV_MODE_ETH";; sol) echo "$DIV_MODE_SOL";; xrp) echo "$DIV_MODE_XRP";; *) echo "$DIV_MODE";; esac; }
 
 trader_up()   { pgrep -f "btc_live_paper.py" >/dev/null 2>&1; }
 recorder_up() { pgrep -f "btc_record.py"     >/dev/null 2>&1; }
@@ -478,10 +504,13 @@ mkdir -p out
   echo "SAVED_CONF_SOL=$CONF_SOL"
   echo "SAVED_CONF_XRP=$CONF_XRP"
   for A in BTC ETH SOL XRP; do
-    for K in LEAD_HI LEAD_LO LEAD_CAP RULE THRESH; do
+    for K in LEAD_HI LEAD_LO LEAD_CAP RULE THRESH DIV_MODE; do
       eval "echo \"SAVED_${K}_${A}=\$${K}_${A}\""
     done
   done
+  echo "SAVED_DIV_MODE=$DIV_MODE"
+  echo "SAVED_DIV_BOOST_MULT=$DIV_BOOST_MULT"
+  echo "SAVED_QUIET_VOL_MAX=$QUIET_VOL_MAX"
   echo "SAVED_ASSETS=\"$ASSETS\""
   echo "SAVED_M15=\"$M15\""
   echo "SAVED_STAKE=$STAKE"
@@ -511,16 +540,21 @@ else
     --provider "$PROVIDER" --poll 2 --entry-threshold "$BTHR" \
     --entry-rule "$BRULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$BCAP" \
     --lead-min-conf "$CONF_BTC" --lead-hi "$BHI" --lead-lo "$BLO" --regime-frac "$REGIME" \
+    --div-mode "$(div_mode_for btc)" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" \
     --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
     >> out/nohup.log 2>&1 &
+  BDM="$(div_mode_for btc)"
+  BDMS=""; [ "$BDM" = "boost" ] && BDMS=", div boost x${DIV_BOOST_MULT}"; [ "$BDM" = "veto" ] && BDMS=", div veto"
   if [ "$BRULE" = "edge" ]; then
-    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=edge (conf >= ask + ${EDGE_MARGIN})${BDMS}"
   elif [ "$BRULE" = "lead" ]; then
-    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, ${BLO}-${BHI}s left, ask <= ${BCAP}, decisive move, conf >= ${CONF_BTC})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=lead (leading side, ${BLO}-${BHI}s left, ask <= ${BCAP}, decisive move, conf >= ${CONF_BTC})${BDMS}"
+  elif [ "$BRULE" = "quiet" ]; then
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=quiet (vol_factor <= ${QUIET_VOL_MAX}, no divergence, ask <= ${MAX_PRICE})${BDMS}"
   else
-    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${BTHR})"
+    echo "started BTC paper trader (pid $!)  flat \$${STAKE}/trade, real pricing, RULE=threshold (conf >= ${BTHR})${BDMS}"
   fi
 fi
 
@@ -544,14 +578,19 @@ for A in $ASSETS; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI" --lead-lo "$ALO" --regime-frac "$REGIME" \
+      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" \
       --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
       >> "out/nohup-$A.log" 2>&1 &
+    ADM="$(div_mode_for "$A")"
+    ADMS=""; [ "$ADM" = "boost" ] && ADMS=", div boost x${DIV_BOOST_MULT}"; [ "$ADM" = "veto" ] && ADMS=", div veto"
     if [ "$ARULE" = "threshold" ]; then
-      echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, RULE=threshold (conf >= ${ATHR})"
+      echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, RULE=threshold (conf >= ${ATHR})${ADMS}"
+    elif [ "$ARULE" = "quiet" ]; then
+      echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, RULE=quiet (vol_factor <= ${QUIET_VOL_MAX}, no divergence, ask <= ${MAX_PRICE})${ADMS}"
     else
-      echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, RULE=${ARULE}, conf >= ${AF}, lead ${ALO}-${AHI}s ask <= ${ACAP} (move auto-scales to $AU)"
+      echo "started $AU paper trader (pid $!)  own \$${BANKROLL} account, RULE=${ARULE}, conf >= ${AF}, lead ${ALO}-${AHI}s ask <= ${ACAP} (move auto-scales to $AU)${ADMS}"
     fi
   fi
 done
@@ -574,11 +613,18 @@ for A in $M15; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI15" --lead-lo "$ALO15" --regime-frac "$REGIME" \
+      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" \
       --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A-15m.jsonl" --quiet \
       >> "out/nohup-$A-15m.log" 2>&1 &
-    echo "started $AU 15m paper trader (pid $!)  own \$${BANKROLL} account, conf >= ${AF}, lead ${ALO15}-${AHI15}s ask <= ${ACAP} (x3 for 900s rounds)"
+    ADM="$(div_mode_for "$A")"
+    ADMS=""; [ "$ADM" = "boost" ] && ADMS=", div boost x${DIV_BOOST_MULT}"; [ "$ADM" = "veto" ] && ADMS=", div veto"
+    if [ "$ARULE" = "quiet" ]; then
+      echo "started $AU 15m paper trader (pid $!)  own \$${BANKROLL} account, RULE=quiet (vol_factor <= ${QUIET_VOL_MAX}, no divergence, ask <= ${MAX_PRICE})${ADMS}"
+    else
+      echo "started $AU 15m paper trader (pid $!)  own \$${BANKROLL} account, conf >= ${AF}, lead ${ALO15}-${AHI15}s ask <= ${ACAP} (x3 for 900s rounds)${ADMS}"
+    fi
   fi
 done
 

@@ -211,7 +211,9 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         # trader's config event arrived last.
         if ev.get("entry_rule"):
             state.setdefault("mkt_rules", {})[a] = {
-                "rule": ev["entry_rule"], "thr": ev.get("entry_threshold")}
+                "rule": ev["entry_rule"], "thr": ev.get("entry_threshold"),
+                "div": ev.get("div_mode"), "div_mult": ev.get("div_boost_mult"),
+                "qmax": ev.get("quiet_vol_max")}
         if ev.get("entry_threshold") is not None:
             state["entry_threshold"] = ev["entry_threshold"]
         if ev.get("edge_margin") is not None:
@@ -235,6 +237,8 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         # panel shows the shared FRACTION, not whichever trader configured last.
         if ev.get("regime_frac") is not None:
             state["regime_frac"] = ev["regime_frac"]
+        if ev.get("quiet_vol_max") is not None:
+            state["quiet_vol_max"] = ev["quiet_vol_max"]
         return state
     if t == "heartbeat":
         state["last_hb"] = ev
@@ -492,15 +496,29 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
                 v = mkt_rules.get(a)
                 if not v:
                     continue
+                # Divergence-mode suffix: xN = stake boost on divergence rounds,
+                # -div = divergence rounds vetoed.
+                dtag = ""
+                if v.get("div") == "boost":
+                    dtag = f" divx{v.get('div_mult') or 2:g}"
+                elif v.get("div") == "veto":
+                    dtag = " -div"
                 if v["rule"] == "threshold" and v.get("thr") is not None:
-                    parts.append(f"{a} conf>={v['thr']:g}")
+                    parts.append(f"{a} conf>={v['thr']:g}{dtag}")
+                elif v["rule"] == "quiet":
+                    q = v.get("qmax")
+                    parts.append(f"{a} quiet" + (f"<={q:g}" if q is not None else "") + dtag)
                 else:
-                    parts.append(f"{a} {v['rule']}")
+                    parts.append(f"{a} {v['rule']}{dtag}")
             status = p.c("rules: " + " · ".join(parts) + " · hold to resolution", CYAN)
         elif rule == "edge":
             status = p.c(f"edge rule: enters when conf >= ask + {margin:.2f}", CYAN)
         elif rule == "lead":
             status = p.c(lead_desc, CYAN)
+        elif rule == "quiet":
+            qmax = state.get("quiet_vol_max")
+            status = p.c("quiet rule: calm rounds only"
+                         + (f" (vol_factor <= {qmax:g}, no divergence)" if qmax is not None else ""), CYAN)
         else:
             status = p.c(f"enters at conf >= {thr:.2f}", CYAN)
         lines.append(f"  round close in {p.c(countdown, YELLOW)}   {status}")
@@ -531,6 +549,10 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
                 status = p.c(f"edge rule: enters when conf >= ask + {margin:.2f}", CYAN)
             elif rule == "lead":
                 status = p.c(lead_desc, CYAN)
+            elif rule == "quiet":
+                qmax = state.get("quiet_vol_max")
+                status = p.c("quiet rule: calm rounds only"
+                             + (f" (vol_factor <= {qmax:g}, no divergence)" if qmax is not None else ""), CYAN)
             else:
                 armed = conf >= thr
                 status = p.c(f"ARMED >= {thr:.2f}", GREEN, BOLD) if armed else p.c(f"waiting (need >= {thr:.2f})", YELLOW)

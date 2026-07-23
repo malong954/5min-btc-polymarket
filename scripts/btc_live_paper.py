@@ -134,7 +134,25 @@ class LivePaperEngine:
         window: str = "5m",
         regime_min_move: float = 0.0,
         regime_lookback: int = 12,
+        div_mode: str = "off",
+        div_boost_mult: float = 2.0,
+        quiet_vol_max: float = 0.77,
     ):
+        # Divergence mode (deep study 2026-07-23, official labels, split-half):
+        #   boost -> same entries, stake x div_boost_mult on rounds WITH a
+        #            divergence (BTC crossing EV +8.9% with vs +2.9% without);
+        #   veto  -> refuse entries on rounds WITH a divergence (XRP crossing
+        #            +4.2% without vs -4.3% with; SOL similar) — skip reason
+        #            'divergence_veto', still shadow-settled;
+        #   off   -> ignore divergence (measurement default).
+        self.div_mode = div_mode
+        self.div_boost_mult = div_boost_mult
+        # entry_rule 'quiet' (deep study, alts): the alt edge concentrates in
+        # LOW-volatility rounds — the book stays uncertain (cheap favorites)
+        # while the indicator still resolves the round. vol_factor at/below
+        # this cap + no divergence + tradeable ask = enter the predicted side
+        # (pooled BOTH-halves: SOL +4.0%, XRP +5.8% at avg ~0.64 asks).
+        self.quiet_vol_max = quiet_vol_max
         # Volatility regime gate: only trade when the market itself is moving.
         # Requires the MEDIAN |open->close| of the trailing regime_lookback
         # completed rounds to reach regime_min_move dollars (0 = off). Measured
@@ -279,6 +297,11 @@ class LivePaperEngine:
         big = self.big_mult > 1.0 and confidence >= self.big_conf
         if big:
             stake = min(stake * self.big_mult, avail)
+        # Divergence boost: same entries, more size where the edge doubled
+        # (measured on rounds WITH a divergence vs without — see div_mode).
+        boosted = self.div_mode == "boost" and bool(feat.get("divergence"))
+        if boosted:
+            stake = min(stake * self.div_boost_mult, avail)
         stake = round(stake, 2)
         if stake <= 0:
             return None   # fully reserved/insolvent -> cannot open
@@ -295,6 +318,7 @@ class LivePaperEngine:
             "confidence": round(confidence, 4),
             "seconds_left": round(sec_left, 1) if sec_left is not None else None,
             "stake_usd": stake, "sizing": self.sizing, "big_bet": big,
+            "div_boost": boosted,   # divergence-present stake multiplier applied
             "balance": round(self.balance, 2),
             "avail": round(avail, 2),   # balance net of still-open stakes
             "price_retries": retries,
@@ -471,8 +495,16 @@ class LivePaperEngine:
                     reason = "no_direction"
                 elif w.get("flat_regime"):
                     reason = "flat_regime"    # setup armed, but the market is flat
+                elif w.get("div_veto"):
+                    reason = "divergence_veto"  # armed, but a divergence blocked it
                 elif w.get("capped"):
                     reason = "price_capped"   # armed, but the ask stayed near $1
+                elif self.entry_rule == "quiet":
+                    # Loudness is the binding gate; divergence only matters once
+                    # the round is calm.
+                    reason = ("loud_market" if w.get("loud")
+                              else "divergence_present" if w.get("diverged")
+                              else "no_quiet_setup")
                 elif self.entry_rule == "edge":
                     # Edge rule: confidence never exceeded the ask + margin —
                     # the book was already priced at/above our conviction.
@@ -544,17 +576,38 @@ class LivePaperEngine:
                              and abs(mv) >= self.lead_min_move
                              and ask <= self.lead_max_price
                              and sig.confidence >= self.lead_min_conf)
+                elif self.entry_rule == "quiet":
+                    # Quiet-market rule: enter the predicted side only while the
+                    # market is CALM (vol_factor at/below the cap) and clean (no
+                    # divergence). Loud rounds are the book-wins-the-race regime
+                    # where the ask prices the move before we act; divergence on
+                    # the alts marks indicator confusion, not confirmation.
+                    vf = sig.features.get("vol_factor")
+                    quiet_ok = isinstance(vf, (int, float)) and vf <= self.quiet_vol_max
+                    self.watch["loud"] = not quiet_ok
+                    self.watch["diverged"] = bool(feat.get("divergence"))
+                    # (No ask_ok here: the max_entry_price check below prices the
+                    # gate, and pending-retry handles a momentarily missing book.)
+                    armed = (bool(sig.direction) and quiet_ok
+                             and not feat.get("divergence"))
                 else:
                     armed = bool(sig.direction) and sig.confidence >= self.entry_threshold
+                if armed and self.div_mode == "veto" and feat.get("divergence"):
+                    # Divergence veto: this market's edge lives in divergence-FREE
+                    # rounds; refuse the entry and let the shadow book grade it.
+                    self.watch["div_veto"] = True
+                    armed = False
                 if armed and ask_ok and ask > self.max_entry_price:
                     # Armed but the contract is priced near $1 — risking the whole
                     # stake to win pennies. Keep watching; asks can dip back.
                     self.watch["capped"] = True
                     armed = False
-                if armed and self.regime_min_move > 0:
+                if armed and self.regime_min_move > 0 and self.entry_rule != "quiet":
                     # Regime gate: the setup fired, but is the market actually
                     # moving? Median trailing round move below the floor -> a
                     # coin-flip regime where the leading side mean-reverts.
+                    # (The quiet rule is EXEMPT — it deliberately trades the calm
+                    # rounds this gate exists to block; gating it would erase it.)
                     rm = self._regime_move(model, cur)
                     self.watch["regime_move"] = round(rm, 6) if rm is not None else None
                     if rm is None or rm < self.regime_min_move:
@@ -693,9 +746,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--poll", type=float, default=2.0, help="Seconds between polls (live spot price ticks at this cadence)")
     ap.add_argument("--klines-every", type=float, default=15.0, help="Seconds between the heavier 1m-kline/indicator refreshes")
     ap.add_argument("--entry-threshold", type=float, default=0.60, help="Min confidence to open a paper position (entry-rule threshold)")
-    ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge", "lead"],
+    ap.add_argument("--entry-rule", default="threshold", choices=["threshold", "edge", "lead", "quiet"],
                     help="threshold: conf >= --entry-threshold | edge: conf >= live ask + --edge-margin | "
-                         "lead: buy the leading side in the sweet-spot window when the ask is cheap (the measured candidate)")
+                         "lead: buy the leading side in the sweet-spot window when the ask is cheap (the measured candidate) | "
+                         "quiet: predicted side when vol_factor <= --quiet-vol-max and no divergence (the alt deep-study candidate)")
     ap.add_argument("--lead-hi", type=float, default=None, help="lead rule: window opens at this many seconds left (default 240; x3 for --window 15m)")
     ap.add_argument("--lead-lo", type=float, default=None, help="lead rule: window closes at this many seconds left (default 180; x3 for --window 15m)")
     ap.add_argument("--lead-max-price", type=float, default=0.72, help="lead rule: only enter while the ask is at/below this")
@@ -714,6 +768,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "E.g. 0.5 on BTC (~$10 decisive move) demands a ~$5 median trailing round move")
     ap.add_argument("--regime-lookback", type=int, default=12,
                     help="How many trailing completed rounds the regime gate measures (median)")
+    ap.add_argument("--div-mode", default="off", choices=["off", "boost", "veto"],
+                    help="Divergence handling (deep-study candidates): boost = stake x --div-boost-mult "
+                         "on rounds WITH a divergence (BTC: +8.9%% with vs +2.9%% without) | veto = refuse "
+                         "entries on divergence rounds (XRP/SOL: divergence-present rounds lose their edge) | off")
+    ap.add_argument("--div-boost-mult", type=float, default=2.0,
+                    help="Stake multiplier for --div-mode boost on divergence-present rounds")
+    ap.add_argument("--quiet-vol-max", type=float, default=0.77,
+                    help="entry-rule quiet: max vol_factor that still counts as a calm round "
+                         "(0.77 = pooled bottom tercile; the alt edge lives below it)")
     ap.add_argument("--edge-margin", type=float, default=0.03, help="Required conf minus ask in --entry-rule edge")
     ap.add_argument("--max-entry-price", type=float, default=0.97,
                     help="Never buy above this ask — near $1.00 you risk the whole stake to win pennies")
@@ -796,6 +859,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         asset=asset.upper(), window=args.window,
         regime_min_move=args.regime_frac * args.lead_min_move,
         regime_lookback=args.regime_lookback,
+        div_mode=args.div_mode, div_boost_mult=args.div_boost_mult,
+        quiet_vol_max=args.quiet_vol_max,
     )
     price_desc = ("polymarket (real CLOB ask per trade)" if use_pm
                   else f"fixed ${args.entry_price:.2f} (assumption)")
@@ -816,6 +881,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "lead_min_conf": args.lead_min_conf, "lead_persist": args.lead_persist,
         "regime_frac": args.regime_frac, "regime_lookback": args.regime_lookback,
         "regime_min_move": round(args.regime_frac * args.lead_min_move, 6),
+        "div_mode": args.div_mode, "div_boost_mult": args.div_boost_mult,
+        "quiet_vol_max": args.quiet_vol_max,
         "sizing": args.sizing, "stake_usd": args.stake_usd,
         "bankroll": args.bankroll, "price_source": args.entry_price_source,
         "provider": args.provider,

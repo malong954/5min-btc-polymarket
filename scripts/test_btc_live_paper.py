@@ -398,6 +398,67 @@ def test_regime_gate_blocks_flat_markets():
           any(e["type"] == "entry" for e in ev2))
 
 
+def test_quiet_rule_gates_on_calm_and_divergence():
+    """entry_rule 'quiet': a generous vol cap trades, an impossible one skips
+    every round as loud_market — and the regime gate must NOT block it (quiet
+    deliberately trades the calm rounds the gate exists to skip)."""
+    bars = synth_bars(6000, autocorr=0.5, seed=31)
+    calm = LivePaperEngine(entry_rule="quiet", quiet_vol_max=1e9, entry_price=0.85,
+                           regime_min_move=1e9)  # gate would block everything...
+    ev_calm = drive(calm, bars)
+    check("quiet rule enters on calm rounds (regime gate exempt)",
+          any(e["type"] == "entry" for e in ev_calm))
+    check("quiet rule never skips flat_regime",
+          not any(e["type"] == "skip" and e.get("reason") == "flat_regime" for e in ev_calm))
+    loud = LivePaperEngine(entry_rule="quiet", quiet_vol_max=-1.0, entry_price=0.85)
+    ev_loud = drive(loud, bars)
+    check("impossible vol cap blocks every entry",
+          not any(e["type"] == "entry" for e in ev_loud))
+    sided = [e for e in ev_loud if e["type"] == "skip" and e.get("side")]
+    check("blocked rounds skip as loud_market",
+          sided and all(e["reason"] == "loud_market" for e in sided))
+    check("loud skips still shadow-grade",
+          any(e["type"] == "shadow_settle" for e in ev_loud))
+
+
+def test_divergence_veto_and_boost():
+    """div_mode veto refuses divergence rounds (skip reason divergence_veto);
+    div_mode boost multiplies the stake on those same rounds. Divergence is
+    injected by patching feature_snapshot — the model's own synthetic-series
+    divergences are too rare to assert on."""
+    import btc_live_paper as blp
+    orig = blp.feature_snapshot
+    blp.feature_snapshot = lambda sig: {**orig(sig), "divergence": "regular_bullish"}
+    try:
+        bars = synth_bars(6000, autocorr=0.5, seed=31)
+        veto = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, div_mode="veto")
+        ev_veto = drive(veto, bars)
+        check("veto blocks every (all-divergence) entry",
+              not any(e["type"] == "entry" for e in ev_veto))
+        sided = [e for e in ev_veto if e["type"] == "skip" and e.get("side")]
+        check("vetoed rounds skip as divergence_veto",
+              sided and all(e["reason"] == "divergence_veto" for e in sided))
+        boost = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, div_mode="boost",
+                                div_boost_mult=2.0, stake_usd=10.0, bankroll=1000.0)
+        ev_boost = drive(boost, bars)
+        entries = [e for e in ev_boost if e["type"] == "entry"]
+        check("boost still enters", bool(entries))
+        check("every entry flags div_boost", all(e.get("div_boost") for e in entries))
+        # x2 whenever the account can afford it; a drawn-down balance clamps to
+        # avail instead (never risk money that is not there).
+        check("boosted entries stake x2 (clamped to avail)",
+              all(abs(e["stake_usd"] - min(20.0, e["avail"])) < 1e-9 for e in entries))
+    finally:
+        blp.feature_snapshot = orig
+    plain = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, div_mode="boost",
+                            div_boost_mult=2.0, stake_usd=10.0, bankroll=1000.0)
+    ev_plain = drive(plain, bars)
+    undiv = [e for e in ev_plain if e["type"] == "entry" and not (e.get("features") or {}).get("divergence")]
+    check("no-divergence rounds stake the base amount (clamped to avail)",
+          undiv and all(abs(e["stake_usd"] - min(10.0, e["avail"])) < 1e-9
+                        and not e.get("div_boost") for e in undiv))
+
+
 def main():
     test_stream_produces_full_lifecycle()
     test_no_double_entry_per_round()
@@ -416,6 +477,8 @@ def main():
     test_format_event_smoke()
     test_15m_window_rounds_and_tagging()
     test_regime_gate_blocks_flat_markets()
+    test_quiet_rule_gates_on_calm_and_divergence()
+    test_divergence_veto_and_boost()
     print("\nAll live paper-trading tests passed.")
 
 
