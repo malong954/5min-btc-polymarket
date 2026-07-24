@@ -55,6 +55,39 @@ our confidence arrives. Confidence is a filter, not a standalone taker edge.
 
 ---
 
+## SIZING — settled empirically (2026-07-25), do not re-argue
+
+Replayed over **1,273 real REGIME=3-gated BTC trades** (official labels, the
+live rule: lead 180–240s, ask ≤0.85). Starting bankroll $100:
+
+| bet size | taker (pay ask) | maker (buy at bid) |
+|---|---|---|
+| 2% of balance | $129 (DD 44%) | $280 (DD 18%) |
+| 3% of balance | **$130 (DD 59%)** | — |
+| 5% | $105 (DD 80%) | $824 (DD 41%) |
+| 10% | **$16 (DD 97%)** | $1,400 (DD 71%) |
+| 15%+ | ruin | — |
+| flat $10 | **ruin** (matches the live blowup) | — |
+
+- **Taker edge: win 65.9% @ 0.647 = +1.2¢/share → full Kelly = 3.5%.**
+  Growth peaks at full Kelly and goes NEGATIVE past 2× Kelly. 10% is ~3× Kelly,
+  which is why it loses 85% *despite a positive edge*. Bigger ≠ better past 3.5%.
+- **Use `SIZING=percent STAKE_PCT=0.03`.** Percent-of-balance also auto-scales
+  (up as the account grows, down in a drawdown) and cannot bust the way flat did.
+- **Never flat-stake real money.** Flat $10 on $100 ruins on this edge — it did,
+  live, on 2026-07-24.
+- **The way to bet bigger is a bigger edge, not a bigger fraction.** Maker entry
+  (buy at the bid) takes edge +1.2¢ → +3.5¢ and full Kelly 3.5% → **9.8%**.
+  Caveat: that replay assumes bid fills; ~20% of rounds had no usable bid and
+  real maker fills are adversely selected, so the true maker edge is between the
+  two. Measuring the real fill rate is the Limitless prototype's job.
+- **Confidence-weighted sizing stays BLOCKED** until confidence is calibrated:
+  the conf→winrate gap runs +30 to +45 points and flips sign at the top band.
+  Kelly needs a true probability; feeding it a miscalibrated one mis-sizes
+  exactly where it hurts (see: the div boost ×2 blowup).
+
+---
+
 ## OPEN — unresolved, still gathering
 
 - **BTC 5m going LIVE (real money).** Paper edge is validated; live execution
