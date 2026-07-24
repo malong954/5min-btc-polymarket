@@ -50,6 +50,8 @@ our confidence arrives. Confidence is a filter, not a standalone taker edge.
 | **Session gating** | Mostly noise at pooled n. Only BTC-US leading-side is marginally +; the dramatic per-segment session splits (e.g. "US −22%") were n≈16 mirages |
 | **ETH** | No edge under any rule. Excluded from `ASSETS` |
 | **Quiet rule with continuous re-arming** | Busted SOL to $0: entered 66 rounds vs the 22 the validated one-shot rule selects, paying ~5c more for rounds that turned quiet *after* the book converged. FIXED to one-shot (commit 3fa6ba6) — the decision is frozen at the first evaluable poll |
+| **Divergence boost ×2 on BTC live** | Busted BTC 5m $100→$0 (2026-07-24). div_signal correlation was **+0.000** that segment — the 2× fired on rounds where divergence had zero predictive value, pure variance amplification, turning a normal drawdown into ruin. The boost's pooled support (+8.9% vs +2.9%) is real but too small-n to justify 2× sizing live. Run divergence as a filter at most, never as a stake multiplier |
+| **Session gating (Asia/Euro-only, US-ban)** | Tempting after a bad US print, but it's a one-segment mirage. 2026-07-24: US −24.6% but n=13; Europe −10.4% at n=71 did the real damage; Asia −1.9% still negative. And the sign FLIPS between segments — pooled data had US marginally *positive*. Cutting US would not have saved the account. Do not gate on session |
 
 ---
 
@@ -77,9 +79,15 @@ our confidence arrives. Confidence is a filter, not a standalone taker edge.
 
 ## The current per-asset call (2026-07-24)
 
-- **BTC 5m** — the one validated, mechanism-understood, positive-EV book.
-  Rule: lead 180–240s, ask ≤0.90, `MAX_PRICE=0.85`, `REGIME=3`, divergence boost.
-  **Trade this. Candidate for going live.**
+- **BTC 5m** — the pooled edge (+2.4% BOTH+ over 2 weeks) is REAL but TINY, and
+  it is high-variance: +$41.50 one segment (2026-07-24 AM), then **$100→$0** the
+  next (2026-07-24 PM). Both are within variance for a 2–3¢/share edge. The
+  blowup was risk-management, not a session: the ×2 divergence boost amplified a
+  losing draw into ruin, and $10–20 stakes on $100 (10–20% of bankroll) make
+  ruin reachable in one bad segment. Rule stays lead 180–240s, ask ≤0.90,
+  `MAX_PRICE=0.85`, `REGIME=3` — but **boost OFF and stakes ≤2% of bankroll**
+  before it trades again. The thin taker edge argues for the maker/Limitless
+  path, not bigger taker bets.
 - **BTC 15m** — losing live (−$47, 64.7% below breakeven across two segments).
   The registry's "15m has higher alpha" hypothesis is not confirming. **Stop trading.**
 - **SOL** — quiet rule live-marginal despite backtest. **Stop trading, keep recording.**
