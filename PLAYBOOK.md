@@ -57,23 +57,28 @@ our confidence arrives. Confidence is a filter, not a standalone taker edge.
 
 ## SIZING — settled empirically (2026-07-25), do not re-argue
 
-Replayed over **1,273 real REGIME=3-gated BTC trades** (official labels, the
-live rule: lead 180–240s, ask ≤0.85). Starting bankroll $100:
+Replayed over **1,434 real REGIME=3-gated BTC trades** (official labels, the
+live rule: lead 180–240s, ask ≤0.85, full history incl. the 07-24 blowup).
+Starting bankroll $100:
 
 | bet size | taker (pay ask) | maker (buy at bid) |
 |---|---|---|
-| 2% of balance | $129 (DD 44%) | $280 (DD 18%) |
-| 3% of balance | **$130 (DD 59%)** | — |
-| 5% | $105 (DD 80%) | $824 (DD 41%) |
-| 10% | **$16 (DD 97%)** | $1,400 (DD 71%) |
+| 1–2% of balance | **$109 (DD 24–44%)** | $250 (DD 24%) |
+| 3% | $99 (DD 59%) | — |
+| 5% | $64 (DD 80%) | **$574 (DD 53%)** |
+| 10% | **$4.52 (DD 97%)** | $526 (DD 82%) |
 | 15%+ | ruin | — |
 | flat $10 | **ruin** (matches the live blowup) | — |
 
-- **Taker edge: win 65.9% @ 0.647 = +1.2¢/share → full Kelly = 3.5%.**
-  Growth peaks at full Kelly and goes NEGATIVE past 2× Kelly. 10% is ~3× Kelly,
-  which is why it loses 85% *despite a positive edge*. Bigger ≠ better past 3.5%.
-- **Use `SIZING=percent STAKE_PCT=0.03`.** Percent-of-balance also auto-scales
+- **Taker edge: win 65.5% @ 0.647 = +0.8¢/share → full Kelly = 2.2%.**
+  Growth peaks at full Kelly and goes NEGATIVE past 2× Kelly. 10% is ~4.5× Kelly,
+  which is why it loses 95% *despite a positive edge*. Bigger ≠ better past ~2%.
+- **Use `SIZING=percent STAKE_PCT=0.02`.** Percent-of-balance also auto-scales
   (up as the account grows, down in a drawdown) and cannot bust the way flat did.
+- **The taker edge is now marginal**: +0.8¢/share turns $100 into $109 over 1,434
+  trades (~2 weeks). It shrank from +1.2¢ once the blowup segment was included —
+  i.e. it is within noise of zero. Do not scale the taker up; the case for the
+  maker venue is now the main story, not a nice-to-have.
 - **Never flat-stake real money.** Flat $10 on $100 ruins on this edge — it did,
   live, on 2026-07-24.
 - **The way to bet bigger is a bigger edge, not a bigger fraction.** Maker entry
