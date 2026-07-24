@@ -421,6 +421,59 @@ def test_quiet_rule_gates_on_calm_and_divergence():
           any(e["type"] == "shadow_settle" for e in ev_loud))
 
 
+def test_quiet_rule_is_one_shot():
+    """The quiet decision is taken at the FIRST evaluable poll only. A round
+    that is dirty at the snapshot but clean afterwards must NOT enter (no
+    re-arming: live re-arming was measured to triple trades and pay ~5c more);
+    a round clean at the snapshot but dirty afterwards must still enter.
+    Divergence flips per-poll via a patched feature_snapshot keyed on the
+    current round (the test clock stamps it before every step)."""
+    import btc_live_paper as blp
+    orig = blp.feature_snapshot
+    bars = synth_bars(6000, autocorr=0.5, seed=31)
+    first_seen: set = set()
+    cur_round = {"r": None}
+
+    def make_stub(div_on_first: bool):
+        def stub(sig):
+            f = dict(orig(sig))
+            r = cur_round["r"]
+            first = r not in first_seen
+            first_seen.add(r)
+            f["divergence"] = "regular_bearish" if first == div_on_first else None
+            return f
+        return stub
+
+    def drive_stamped(engine, all_bars, poll=60):
+        start, end = all_bars[0].ts, all_bars[-1].ts + 60
+        events, now = [], start + 40 * 60
+        while now <= end:
+            cur_round["r"] = bucket_5m(int(now))
+            events.extend(engine.step(now, visible_bars(all_bars, now)))
+            now += poll
+        return events
+
+    try:
+        first_seen.clear()
+        blp.feature_snapshot = make_stub(div_on_first=True)
+        eng = LivePaperEngine(entry_rule="quiet", quiet_vol_max=1e9, entry_price=0.85)
+        ev = drive_stamped(eng, bars)
+        check("dirty snapshot -> clean later: never enters",
+              not any(e["type"] == "entry" for e in ev))
+        sided = [e for e in ev if e["type"] == "skip" and e.get("side")]
+        check("those rounds skip as divergence_present",
+              sided and all(e["reason"] == "divergence_present" for e in sided))
+
+        first_seen.clear()
+        blp.feature_snapshot = make_stub(div_on_first=False)
+        eng2 = LivePaperEngine(entry_rule="quiet", quiet_vol_max=1e9, entry_price=0.85)
+        ev2 = drive_stamped(eng2, bars)
+        check("clean snapshot -> dirty later: still enters (one-shot decision)",
+              any(e["type"] == "entry" for e in ev2))
+    finally:
+        blp.feature_snapshot = orig
+
+
 def test_divergence_veto_and_boost():
     """div_mode veto refuses divergence rounds (skip reason divergence_veto);
     div_mode boost multiplies the stake on those same rounds. Divergence is
@@ -478,6 +531,7 @@ def main():
     test_15m_window_rounds_and_tagging()
     test_regime_gate_blocks_flat_markets()
     test_quiet_rule_gates_on_calm_and_divergence()
+    test_quiet_rule_is_one_shot()
     test_divergence_veto_and_boost()
     print("\nAll live paper-trading tests passed.")
 

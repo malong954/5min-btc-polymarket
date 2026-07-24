@@ -577,19 +577,32 @@ class LivePaperEngine:
                              and ask <= self.lead_max_price
                              and sig.confidence >= self.lead_min_conf)
                 elif self.entry_rule == "quiet":
-                    # Quiet-market rule: enter the predicted side only while the
+                    # Quiet-market rule: enter the predicted side only when the
                     # market is CALM (vol_factor at/below the cap) and clean (no
                     # divergence). Loud rounds are the book-wins-the-race regime
                     # where the ask prices the move before we act; divergence on
                     # the alts marks indicator confusion, not confirmation.
-                    vf = sig.features.get("vol_factor")
-                    quiet_ok = isinstance(vf, (int, float)) and vf <= self.quiet_vol_max
-                    self.watch["loud"] = not quiet_ok
-                    self.watch["diverged"] = bool(feat.get("divergence"))
-                    # (No ask_ok here: the max_entry_price check below prices the
-                    # gate, and pending-retry handles a momentarily missing book.)
-                    armed = (bool(sig.direction) and quiet_ok
-                             and not feat.get("divergence"))
+                    # ONE-SHOT: the decision is taken at the FIRST evaluable poll
+                    # only — the validated rule is a single snapshot per round.
+                    # Re-arming all window long was measured live to triple the
+                    # trade count and pay ~5c more for the same winrate (rounds
+                    # that BECOME quiet later are bought after the book converged).
+                    if "quiet_armed" not in self.watch:
+                        vf = sig.features.get("vol_factor")
+                        quiet_ok = isinstance(vf, (int, float)) and vf <= self.quiet_vol_max
+                        self.watch["loud"] = not quiet_ok
+                        self.watch["diverged"] = bool(feat.get("divergence"))
+                        ok = bool(sig.direction) and quiet_ok and not feat.get("divergence")
+                        # Price the snapshot too: an ask over the cap at decision
+                        # time is a refusal, not a wait-for-a-dip (a later cheaper
+                        # ask means the market moved against the prediction).
+                        if ok and ask_ok and ask > self.max_entry_price:
+                            self.watch["capped"] = True
+                            ok = False
+                        # (ask may be None on the snapshot poll — fixed-price mode
+                        # or a momentary book gap; pending-retry prices it later.)
+                        self.watch["quiet_armed"] = ok
+                    armed = self.watch["quiet_armed"]
                 else:
                     armed = bool(sig.direction) and sig.confidence >= self.entry_threshold
                 if armed and self.div_mode == "veto" and feat.get("divergence"):
