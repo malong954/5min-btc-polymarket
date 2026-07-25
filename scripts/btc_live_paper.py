@@ -49,6 +49,16 @@ def _rnd(v: Any, nd: int) -> Optional[float]:
     return round(v, nd) if isinstance(v, (int, float)) else None
 
 
+SESSION_NAMES = ("asia", "europe", "us")
+
+
+def _session_of(ts: float) -> str:
+    """Trading session by UTC hour: asia 00-08, europe 08-16, us 16-24.
+    (Matches the buckets every analyzer in this repo reports.)"""
+    h = time.gmtime(int(ts)).tm_hour
+    return "asia" if h < 8 else ("europe" if h < 16 else "us")
+
+
 def feature_snapshot(sig: Any) -> dict[str, Any]:
     """Compact, analysis-ready dump of the indicator readings behind a signal —
     logged on every prediction/entry/skip so the timeline can be correlated with
@@ -134,6 +144,7 @@ class LivePaperEngine:
         window: str = "5m",
         regime_min_move: float = 0.0,
         regime_lookback: int = 12,
+        sessions: Optional[set] = None,
         div_mode: str = "off",
         div_boost_mult: float = 2.0,
         quiet_vol_max: float = 0.77,
@@ -163,6 +174,15 @@ class LivePaperEngine:
         # cost/benefit stays measurable.
         self.regime_min_move = regime_min_move
         self.regime_lookback = regime_lookback
+        # Session gate (measured 2026-07-25 on 972 live trades across BTC 5m +
+        # 15m). US hours are where a CHEAP leading side stops meaning "the book
+        # is slow" and starts meaning "the book is informed": cheap (<0.70)
+        # entries win 71.1% in Asia but 51.5% in US — a coin flip — and US alone
+        # accounts for -$95 of BTC 5m's -$65 lifetime P&L. Europe is the only
+        # session positive in BOTH halves of history on BOTH books. None = trade
+        # every session (measurement default); otherwise a set of
+        # {"asia","europe","us"} by UTC hour: asia 00-08, europe 08-16, us 16-24.
+        self.sessions = sessions
         # Market interval: 5m (300s rounds) or 15m (900s rounds). Stamped on
         # every event so the dashboard can separate e.g. BTC 5m from BTC 15m.
         self.window = window
@@ -495,6 +515,8 @@ class LivePaperEngine:
                     reason = "no_direction"
                 elif w.get("flat_regime"):
                     reason = "flat_regime"    # setup armed, but the market is flat
+                elif w.get("off_session"):
+                    reason = "off_session"    # armed, but outside the traded sessions
                 elif w.get("div_veto"):
                     reason = "divergence_veto"  # armed, but a divergence blocked it
                 elif w.get("capped"):
@@ -605,6 +627,11 @@ class LivePaperEngine:
                     armed = self.watch["quiet_armed"]
                 else:
                     armed = bool(sig.direction) and sig.confidence >= self.entry_threshold
+                if armed and self.sessions is not None and _session_of(now) not in self.sessions:
+                    # Session gate: this market's edge does not survive the
+                    # informed-flow session(s) we excluded.
+                    self.watch["off_session"] = True
+                    armed = False
                 if armed and self.div_mode == "veto" and feat.get("divergence"):
                     # Divergence veto: this market's edge lives in divergence-FREE
                     # rounds; refuse the entry and let the shadow book grade it.
@@ -781,6 +808,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "E.g. 0.5 on BTC (~$10 decisive move) demands a ~$5 median trailing round move")
     ap.add_argument("--regime-lookback", type=int, default=12,
                     help="How many trailing completed rounds the regime gate measures (median)")
+    ap.add_argument("--sessions", default=None,
+                    help="Comma-separated sessions to trade (asia,europe,us; UTC hours 00-08/08-16/"
+                         "16-24). Default: all. Measured on 972 live trades — cheap (<0.70) leading "
+                         "sides win 71%% in asia but 51%% in us (informed flow), and us alone is "
+                         "-$95 of BTC 5m's lifetime P&L. Blocked rounds skip as off_session")
     ap.add_argument("--div-mode", default="off", choices=["off", "boost", "veto"],
                     help="Divergence handling (deep-study candidates): boost = stake x --div-boost-mult "
                          "on rounds WITH a divergence (BTC: +8.9%% with vs +2.9%% without) | veto = refuse "
@@ -850,6 +882,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"# lead min move auto-scaled to {args.lead_min_move:g} "
               f"(0.016% of {symbol} spot)", file=sys.stderr)
 
+    sessions = None
+    if args.sessions:
+        sessions = {s.strip().lower() for s in args.sessions.split(",") if s.strip()}
+        bad = sessions - set(SESSION_NAMES)
+        if bad:
+            print(f"unknown session(s): {','.join(sorted(bad))} "
+                  f"(allowed: {','.join(SESSION_NAMES)})", file=sys.stderr)
+            return 2
+        print(f"# session gate: trading only {','.join(sorted(sessions))} "
+              f"(UTC asia 00-08 / europe 08-16 / us 16-24)", file=sys.stderr)
+
     logf: Optional[TextIO] = None
     if args.log:
         d = os.path.dirname(args.log)
@@ -872,6 +915,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         asset=asset.upper(), window=args.window,
         regime_min_move=args.regime_frac * args.lead_min_move,
         regime_lookback=args.regime_lookback,
+        sessions=sessions,
         div_mode=args.div_mode, div_boost_mult=args.div_boost_mult,
         quiet_vol_max=args.quiet_vol_max,
     )
@@ -896,6 +940,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "regime_min_move": round(args.regime_frac * args.lead_min_move, 6),
         "div_mode": args.div_mode, "div_boost_mult": args.div_boost_mult,
         "quiet_vol_max": args.quiet_vol_max,
+        "sessions": sorted(sessions) if sessions else None,
         "sizing": args.sizing, "stake_usd": args.stake_usd,
         "bankroll": args.bankroll, "price_source": args.entry_price_source,
         "provider": args.provider,

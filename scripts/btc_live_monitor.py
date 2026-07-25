@@ -239,6 +239,8 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
             state["regime_frac"] = ev["regime_frac"]
         if ev.get("quiet_vol_max") is not None:
             state["quiet_vol_max"] = ev["quiet_vol_max"]
+        if ev.get("sessions"):
+            state["sessions"] = ev["sessions"]
         return state
     if t == "heartbeat":
         state["last_hb"] = ev
@@ -510,7 +512,9 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
                     parts.append(f"{a} quiet" + (f"<={q:g}" if q is not None else "") + dtag)
                 else:
                     parts.append(f"{a} {v['rule']}{dtag}")
-            status = p.c("rules: " + " · ".join(parts) + " · hold to resolution", CYAN)
+            sess = state.get("sessions")
+            sess_s = (" · " + "/".join(sess) + " only") if sess else ""
+            status = p.c("rules: " + " · ".join(parts) + " · hold to resolution" + sess_s, CYAN)
         elif rule == "edge":
             status = p.c(f"edge rule: enters when conf >= ask + {margin:.2f}", CYAN)
         elif rule == "lead":

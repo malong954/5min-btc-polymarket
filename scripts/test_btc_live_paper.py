@@ -474,6 +474,39 @@ def test_quiet_rule_is_one_shot():
         blp.feature_snapshot = orig
 
 
+def test_session_gate():
+    """Only the listed UTC sessions may trade; others skip as off_session but
+    are still predicted and shadow-graded. Measured motivation: cheap leading
+    sides win 71% in asia vs 51% in us (informed flow)."""
+    from btc_live_paper import _session_of
+    import calendar
+    check("00:00 UTC is asia", _session_of(calendar.timegm((2026, 7, 25, 3, 0, 0, 0, 0, 0))) == "asia")
+    check("10:00 UTC is europe", _session_of(calendar.timegm((2026, 7, 25, 10, 0, 0, 0, 0, 0))) == "europe")
+    check("20:00 UTC is us", _session_of(calendar.timegm((2026, 7, 25, 20, 0, 0, 0, 0, 0))) == "us")
+
+    bars = synth_bars(6000, autocorr=0.5, seed=31)
+    # The synthetic clock spans whichever sessions it spans; gate to the set the
+    # run actually touches vs its complement and assert the two are exclusive.
+    touched = {_session_of(b.ts) for b in bars}
+    allow = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, sessions=touched)
+    ev_allow = drive(allow, bars)
+    check("gate open for the sessions in range -> trades",
+          any(e["type"] == "entry" for e in ev_allow))
+    blocked = LivePaperEngine(entry_threshold=0.0, entry_price=0.85,
+                              sessions={"__none__"})
+    ev_block = drive(blocked, bars)
+    check("gate closed -> no entries at all",
+          not any(e["type"] == "entry" for e in ev_block))
+    sided = [e for e in ev_block if e["type"] == "skip" and e.get("side")]
+    check("blocked rounds skip as off_session",
+          sided and all(e["reason"] == "off_session" for e in sided))
+    check("off_session rounds still shadow-grade",
+          any(e["type"] == "shadow_settle" for e in ev_block))
+    check("sessions=None (default) trades everything",
+          any(e["type"] == "entry" for e in
+              drive(LivePaperEngine(entry_threshold=0.0, entry_price=0.85), bars)))
+
+
 def test_divergence_veto_and_boost():
     """div_mode veto refuses divergence rounds (skip reason divergence_veto);
     div_mode boost multiplies the stake on those same rounds. Divergence is
@@ -532,6 +565,7 @@ def main():
     test_regime_gate_blocks_flat_markets()
     test_quiet_rule_gates_on_calm_and_divergence()
     test_quiet_rule_is_one_shot()
+    test_session_gate()
     test_divergence_veto_and_boost()
     print("\nAll live paper-trading tests passed.")
 

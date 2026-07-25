@@ -62,6 +62,12 @@
 #                 DIV_BOOST_MULT=2.0     stake multiplier for DIV_MODE boost
 #                 QUIET_VOL_MAX=0.77     RULE quiet: max vol_factor that counts
 #                                        as a calm round (pooled bottom tercile)
+#                 SESSIONS="asia europe" only trade these UTC sessions (asia
+#                                        00-08, europe 08-16, us 16-24); empty =
+#                                        all. Measured: cheap leading sides win
+#                                        71% in asia vs 51% in us (informed
+#                                        flow); us alone is -$95 of BTC 5m's
+#                                        lifetime P&L. Skips as off_session
 #   RULE=edge enters when confidence >= live ask + EDGE_MARGIN (price = hurdle).
 #   RULE=quiet (alts) enters the predicted side on CALM rounds only: vol_factor
 #   <= QUIET_VOL_MAX, no divergence, ask <= MAX_PRICE; exempt from REGIME gate.
@@ -106,6 +112,19 @@ DIV_BOOST_MULT="${DIV_BOOST_MULT:-${SAVED_DIV_BOOST_MULT:-2.0}}"
 # RULE quiet (alts): vol_factor at/below this = a calm round the quiet rule
 # may trade (0.77 = pooled bottom tercile, where SOL +4.0% / XRP +5.8% lived).
 QUIET_VOL_MAX="${QUIET_VOL_MAX:-${SAVED_QUIET_VOL_MAX:-0.77}}"
+# Session gate (measured 2026-07-25 on 972 live trades, BTC 5m + 15m): a CHEAP
+# leading side means "the book is slow" in asia/europe but "the book is
+# informed" in us hours — cheap (<0.70) entries win 71% in asia vs 51% in us,
+# and us alone is -$95 of BTC 5m's -$65 lifetime P&L. Empty = trade all
+# sessions. e.g. SESSIONS="asia europe" (UTC 00-08 / 08-16 / 16-24).
+SESSIONS="${SESSIONS-${SAVED_SESSIONS:-}}"
+SESSIONS="$(echo "$SESSIONS" | tr 'A-Z' 'a-z')"
+for S in $SESSIONS; do
+  case "$S" in asia|europe|us) ;; *) echo "unknown session in SESSIONS: $S (allowed: asia europe us)"; exit 1 ;; esac
+done
+# trader takes a comma-separated list; empty stays empty (= all sessions)
+SESS_CSV="$(echo "$SESSIONS" | tr -s ' ' ',' | sed 's/^,//; s/,$//')"
+sess_args(){ [ -n "$SESS_CSV" ] && printf '%s' "--sessions $SESS_CSV"; }
 for DV in "$DIV_MODE_BTC" "$DIV_MODE_ETH" "$DIV_MODE_SOL" "$DIV_MODE_XRP"; do
   case "$DV" in off|boost|veto) ;; *) echo "invalid DIV_MODE: $DV (allowed: off boost veto)"; exit 1 ;; esac
 done
@@ -511,6 +530,7 @@ mkdir -p out
   echo "SAVED_DIV_MODE=$DIV_MODE"
   echo "SAVED_DIV_BOOST_MULT=$DIV_BOOST_MULT"
   echo "SAVED_QUIET_VOL_MAX=$QUIET_VOL_MAX"
+  echo "SAVED_SESSIONS=\"$SESSIONS\""
   echo "SAVED_ASSETS=\"$ASSETS\""
   echo "SAVED_M15=\"$M15\""
   echo "SAVED_STAKE=$STAKE"
@@ -540,7 +560,7 @@ else
     --provider "$PROVIDER" --poll 2 --entry-threshold "$BTHR" \
     --entry-rule "$BRULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$BCAP" \
     --lead-min-conf "$CONF_BTC" --lead-hi "$BHI" --lead-lo "$BLO" --regime-frac "$REGIME" \
-    --div-mode "$(div_mode_for btc)" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" \
+    --div-mode "$(div_mode_for btc)" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) \
     --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
@@ -578,7 +598,7 @@ for A in $ASSETS; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI" --lead-lo "$ALO" --regime-frac "$REGIME" \
-      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" \
+      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) \
       --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
@@ -613,7 +633,7 @@ for A in $M15; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI15" --lead-lo "$ALO15" --regime-frac "$REGIME" \
-      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" \
+      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) \
       --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A-15m.jsonl" --quiet \
