@@ -1,0 +1,167 @@
+version: 1
+name: multi_timeframe_updown_parallel
+# Separate parallel-testing bot. Does NOT replace the og 5m bot — it runs
+# alongside it in its own contour (multi/runtime, multibot_ctl.sh).
+#
+# All baselines below are seeded from the og 5m bot's gathered live data
+# (conservative profile: threshold 0.70, stake $5, SL 25%). Only the timing
+# scales per timeframe — that is the one thing that changes drastically
+# between these markets.
+
+# paper = simulate fills against live CLOB books (default, safe, no auth).
+# live  = real orders via the external pm_live_trade_runner.py engine.
+mode_default: paper
+
+# BTC-only by default; uncomment to also test other Up/Down series.
+assets:
+  - btc
+  # - eth
+  # - sol
+  # - xrp
+
+# Cross-worker caps shared by ALL parallel workers (fcntl-locked state file).
+# These are what make "multiple simultaneous positions" safe.
+# The top-level values apply to LIVE mode. The `paper` block overrides them
+# in paper mode: tight caps are right for money but wrong for experiments —
+# a $10 shared cap once froze ALL nine paper arms until UTC midnight after
+# one arm's two bad trades, silently costing a day of A/B data.
+portfolio:
+  max_concurrent_positions: 3
+  max_total_exposure_usd: 15
+  daily_max_loss_usd: 10
+  paper:
+    max_concurrent_positions: 9
+    max_total_exposure_usd: 60
+    daily_max_loss_usd: 300
+
+worker:
+  restart_on_exit: true
+  restart_backoff_sec: 20
+  # periodic settle sweep: re-grades spot-settled outcomes against the
+  # official resolution (measured ~22% label-flip rate) and backfills any
+  # unresolved holds. 0 disables.
+  settle_sweep_min: 30
+
+# Per-timeframe strategy + timing. Anything omitted falls back to defaults
+# baked into multi_worker.py (same values as shown here).
+#
+# entry_window_sec_left  : entry only allowed once <= this many sec remain
+#                          (og 5m: ~120s left = "2 minutes before close")
+# min_entry_seconds_left : never open with less than this remaining
+# exit_before_sec        : forced time-exit this many sec before market end
+# slug_templates         : override market slug discovery patterns if
+#                          probe_markets.py shows a timeframe unresolvable
+# Strategy variants (A/B/C tested in parallel on the same timeframe):
+#   favorite : og momentum-into-close — buy the strong side at ask >= threshold,
+#              stop-loss + exit before close.
+#   underdog : reversal fade, reverse-engineered from wallet
+#              0x45230b...29e2 (+$15.4k/2.5d, median buy 0.19 at ~90s left,
+#              0 sells, holds to resolution). Buys the CHEAP side late, only
+#              when spot has moved LESS than underdog_max_abs_move_usd from
+#              the slot open (Binance, Kraken fallback), holds through
+#              resolution — max loss is the stake, winners pay 1/price.
+#   impulse  : latency-style favorite sniping, reverse-engineered from the
+#              latency-bot cohort (avg entry 0.58-0.84, win 82-100%, pure
+#              5m/15m specialists). When spot moves >= impulse_min_move_usd
+#              within impulse_lookback_sec, buy the impulse direction while
+#              its ask is still in [impulse_min_price, impulse_max_price]
+#              (the stale-repricing band). Watches the whole slot, holds to
+#              resolution. NOTE: those bots are LATENCY-limited winners; at
+#              our 3-5s polling the paper test measures how much of the edge
+#              survives being slow.
+#
+# Palette note: the dashboard has 8 series colors. 5 favorites + 2 underdog
+# + 1 impulse = 8. If you enable more variants, colors start repeating.
+timeframes:
+  5m:
+    # VERDICT 2026-07-17: favorite retired after 298 trades at -$0.18/trade
+    # (60% wr vs 82% breakeven, fill✓ 57%) — matches the cohort's verdict on
+    # the crowded 5m favorite trade. The og live bot should not size this.
+    enabled: false
+    # VERDICT 2026-07-16: underdog disabled after 90 settled trades at 7-83
+    # (edge -4.5pts vs breakeven, label-corrected). The mechanical
+    # extreme-skew fade does not replicate the whale's edge — their selection
+    # signal is something we don't observe. Re-enable by adding 'underdog'
+    # back if a real selection signal lands.
+    strategies: [favorite]
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 120
+    min_entry_seconds_left: 60
+    exit_before_sec: 20
+    poll_sec: 3
+    # Retuned from the top-100 cohort scan + the whale's actual fills:
+    # they fade only EXTREME skew (favorite >= ~0.85, cheap side <= ~0.18).
+    # Our first loose config (max 0.30, no skew gate) faded weak 0.70
+    # favorites and lost — that trade has no edge.
+    underdog_max_price: 0.18
+    underdog_min_price: 0.05
+    underdog_min_opposite_ask: 0.85
+    underdog_max_abs_move_usd: 80
+    underdog_exit_mode: resolution
+
+  15m:
+    # Closest step up from 5m — the first candidate to take live.
+    # impulse runs here (not 5m) deliberately: the rank-1 latency wallet
+    # (0x865935, alpha 0.349) works 15m, where the book reprices slowly
+    # enough that a seconds-slow copy still gets a good price.
+    enabled: true
+    # underdog dropped 2026-07-16 (see 5m verdict; 15m was 2-21)
+    strategies: [favorite, impulse, arb]
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 300
+    min_entry_seconds_left: 120
+    exit_before_sec: 30
+    poll_sec: 5
+    # arb: buy BOTH sides when asks sum <= this; PnL locked at fill,
+    # settles to exactly $1/pair at resolution. Paper-only for now.
+    # arb_best_combined in each report shows how close we got each slot.
+    arb_max_combined: 0.99
+    underdog_max_price: 0.20
+    underdog_min_price: 0.05
+    underdog_min_opposite_ask: 0.82
+    underdog_max_abs_move_usd: 150
+    underdog_exit_mode: resolution
+    # Retuned toward the cohort's only net-positive group ("mixed" — early
+    # mid-window entries around even odds, alpha +0.09): catch the FIRST
+    # impulse at 0.45-0.75, never chase a book that already repriced to 0.8+.
+    impulse_lookback_sec: 20
+    impulse_min_move_usd: 60
+    impulse_min_price: 0.45
+    impulse_max_price: 0.75
+    impulse_exit_mode: resolution
+    # to try impulse on 5m too, add 'impulse' to 5m strategies (watch the
+    # palette note above) with impulse_lookback_sec: 10-15, min_move: 60
+
+  1h:
+    enabled: true
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 900
+    min_entry_seconds_left: 300
+    exit_before_sec: 60
+    poll_sec: 15
+
+  4h:
+    enabled: true
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 2700
+    min_entry_seconds_left: 900
+    exit_before_sec: 120
+    poll_sec: 30
+
+  1d:
+    enabled: true
+    threshold: 0.70
+    stake_usd: 5
+    stop_loss_pct: 0.25
+    entry_window_sec_left: 10800
+    min_entry_seconds_left: 3600
+    exit_before_sec: 300
+    poll_sec: 60

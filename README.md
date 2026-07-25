@@ -21,6 +21,9 @@ This is a momentum-following approach, not a reversal strategy.
 - `config/` — profiles and risk parameters
 - `scripts/` — runners/wrappers/hot commands
 - `examples/` — practical command examples
+- `multi/` — **separate** multi-timeframe parallel testing bot (5m/15m/1h/4h/1d,
+  paper + live modes, shared portfolio caps). Runs alongside this bot without
+  touching it. See [multi/README.md](multi/README.md).
 
 ## Deploy / Run
 ### Prerequisites
