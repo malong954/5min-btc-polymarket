@@ -90,6 +90,11 @@ Usage:
   multibot_ctl.sh limitless start|stop|status|summary|logs
                   paper arb monitor with fill-echo: Limitless books + CROSS-
                   VENUE vs Polymarket (same slots, same Chainlink oracle)
+  multibot_ctl.sh launchd install|uninstall|status
+                  supervise orchestrator+dashboard+limitless with a macOS
+                  LaunchAgent per service: auto-restarts on crash AND after
+                  login/reboot. Stops any manually-started copies first.
+                  ALWAYS paper mode — live is never auto-supervised.
 
 Notes:
 - Separate contour from the og 5m bot: runtime lives in multi/runtime.
@@ -491,6 +496,170 @@ cmd_dashboard() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# launchd supervision (macOS): one LaunchAgent per service, KeepAlive=true so
+# the OS relaunches it on crash, RunAtLoad=true so it comes back after a
+# reboot/logout too — the two failure modes that killed the manual nohup
+# processes before. Each plist calls back into THIS script's `run-fg`
+# subcommand (not the python files directly) so it inherits the same PY/
+# config/runtime-dir resolution and the multi/.env sourcing guard already at
+# the top of this file, with one path per service instead of three.
+#
+# ALWAYS paper mode, hardcoded in run-fg — not read from multi_profiles.yaml's
+# mode_default. A launchd job restarts unattended after a crash; if the
+# config's mode_default were ever flipped to live for a test and forgotten,
+# an unattended auto-restart placing real orders with nobody watching is
+# exactly the failure this project has been careful to avoid. `golive` (run
+# by hand, one arm at a time) is the only path to real money — deliberately
+# not wired into launchd.
+# ---------------------------------------------------------------------------
+
+cmd_run_fg() {
+  local svc="${1:-}"
+  case "$svc" in
+    orchestrator)
+      check_deps
+      exec "$PY" "$SCRIPT_DIR/orchestrator.py" \
+        --mode paper --config "$CONFIG_DEFAULT" --repo "$REPO" --runtime-dir "$RUNTIME_DIR"
+      ;;
+    dashboard)
+      exec "$PY" "$SCRIPT_DIR/dashboard.py" \
+        --port "${BTCMULTI_DASH_PORT:-8787}" --runtime-dir "$RUNTIME_DIR"
+      ;;
+    limitless)
+      check_deps
+      exec "$PY" "$SCRIPT_DIR/limitless_arb.py" --runtime-dir "$RUNTIME_DIR"
+      ;;
+    *)
+      echo "Unknown run-fg target: $svc (orchestrator|dashboard|limitless)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+LAUNCHD_SERVICES=(orchestrator dashboard limitless)
+LAUNCHD_PREFIX="com.btcmulti"
+
+launchd_label() { echo "${LAUNCHD_PREFIX}.$1"; }
+launchd_plist_path() { echo "$HOME/Library/LaunchAgents/$(launchd_label "$1").plist"; }
+
+write_plist() {
+  local svc="$1" label plist out err extra=""
+  label="$(launchd_label "$svc")"
+  plist="$(launchd_plist_path "$svc")"
+  mkdir -p "$RUNTIME_DIR/launchd" "$(dirname "$plist")"
+  out="$RUNTIME_DIR/launchd/${svc}.out.log"
+  err="$RUNTIME_DIR/launchd/${svc}.err.log"
+  # orchestrator forwards SIGTERM to its workers and waits up to 30s for a
+  # clean settle before giving up (see cmd_stop); launchd's default
+  # ExitTimeOut (20s) would SIGKILL it mid-shutdown, so it gets more room.
+  if [[ "$svc" == "orchestrator" ]]; then
+    extra="  <key>ExitTimeOut</key>
+  <integer>40</integer>
+"
+  fi
+  cat >"$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$SCRIPT_DIR/multibot_ctl.sh</string>
+    <string>run-fg</string>
+    <string>$svc</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$MULTI_ROOT</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+$extra  <key>StandardOutPath</key>
+  <string>$out</string>
+  <key>StandardErrorPath</key>
+  <string>$err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$HOME</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+}
+
+cmd_launchd() {
+  local sub="${1:-status}"
+  local uid; uid="$(id -u)"
+  case "$sub" in
+    install)
+      echo "stopping any manually-started copies first (avoids duplicate orchestrators/ports)..."
+      cmd_stop || true
+      cmd_dashboard stop || true
+      cmd_limitless stop || true
+      echo
+      local errlog; errlog="$(mktemp)"
+      for svc in "${LAUNCHD_SERVICES[@]}"; do
+        local label plist
+        label="$(launchd_label "$svc")"
+        plist="$(launchd_plist_path "$svc")"
+        write_plist "$svc"
+        launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+        if launchctl bootstrap "gui/$uid" "$plist" 2>"$errlog"; then
+          echo "installed+started $label"
+        else
+          echo "FAILED to bootstrap $label:"
+          sed 's/^/    /' "$errlog"
+          echo "  plist: $plist"
+        fi
+      done
+      rm -f "$errlog"
+      echo
+      echo "these now auto-restart on crash AND on login/reboot (paper mode only)."
+      echo "check:      multibot_ctl.sh launchd status"
+      echo "logs:       $RUNTIME_DIR/launchd/<service>.{out,err}.log"
+      echo "dashboard:  http://127.0.0.1:${BTCMULTI_DASH_PORT:-8787}"
+      echo "remove:     multibot_ctl.sh launchd uninstall"
+      ;;
+    uninstall)
+      for svc in "${LAUNCHD_SERVICES[@]}"; do
+        local label plist
+        label="$(launchd_label "$svc")"
+        plist="$(launchd_plist_path "$svc")"
+        launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+        rm -f "$plist"
+        echo "removed $label"
+      done
+      echo "(the services stopped; nothing auto-restarts anymore — use"
+      echo " start/dashboard/limitless start to run them manually again)"
+      ;;
+    status)
+      for svc in "${LAUNCHD_SERVICES[@]}"; do
+        local label
+        label="$(launchd_label "$svc")"
+        if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+          echo "$svc: loaded ($label)"
+          launchctl print "gui/$uid/$label" 2>/dev/null \
+            | grep -E "state = |pid = " | sed 's/^/    /'
+        else
+          echo "$svc: NOT loaded ($label)"
+        fi
+      done
+      ;;
+    *)
+      echo "Usage: multibot_ctl.sh launchd install|uninstall|status"
+      exit 2
+      ;;
+  esac
+}
+
 main() {
   local cmd="${1:-}"
   [[ -z "$cmd" ]] && { usage; exit 2; }
@@ -510,6 +679,8 @@ main() {
     golive) cmd_golive "$@" ;;
     archive) cmd_archive ;;
     limitless) cmd_limitless "$@" ;;
+    launchd) cmd_launchd "$@" ;;
+    run-fg) cmd_run_fg "$@" ;;
     *) usage; exit 2 ;;
   esac
 }
