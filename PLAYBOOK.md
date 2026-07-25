@@ -52,7 +52,7 @@ our confidence arrives. Confidence is a filter, not a standalone taker edge.
 | **Quiet rule with continuous re-arming** | Busted SOL to $0: entered 66 rounds vs the 22 the validated one-shot rule selects, paying ~5c more for rounds that turned quiet *after* the book converged. FIXED to one-shot (commit 3fa6ba6) — the decision is frozen at the first evaluable poll |
 | **SOL quiet rule (even one-shot)** | **486 live trades: 69.3% @ 0.715 = −2.2¢/share, −$110.26 cumulative.** Backtest said +4.0% BOTH+ at ~0.645 entries; live entries land at 0.715 — the 7¢ backtest-to-live price gap eats the whole edge. Decisively dead; stop trading SOL |
 | **Divergence boost ×2 on BTC live** | Busted BTC 5m $100→$0 (2026-07-24). div_signal correlation was **+0.000** that segment — the 2× fired on rounds where divergence had zero predictive value, pure variance amplification, turning a normal drawdown into ruin. The boost's pooled support (+8.9% vs +2.9%) is real but too small-n to justify 2× sizing live. Run divergence as a filter at most, never as a stake multiplier |
-| **Session gating (Asia/Euro-only, US-ban)** | Tempting after a bad US print, but it's a one-segment mirage. 2026-07-24: US −24.6% but n=13; Europe −10.4% at n=71 did the real damage; Asia −1.9% still negative. And the sign FLIPS between segments — pooled data had US marginally *positive*. Cutting US would not have saved the account. Do not gate on session |
+| ~~Session gating~~ | **RETRACTED 2026-07-25 — this entry was WRONG.** It was written off single-segment numbers (n=13). The full live record (972 trades) shows session is a REAL, replicated effect — see the SESSION GATE section below. Lesson: never kill a hypothesis on one segment either |
 
 ---
 
@@ -120,6 +120,42 @@ strategy than the one being run.
 - **Limitless maker venue.** The structural escape from the taker overround +
   label noise (venue-published Chainlink settle, maker rebates flip the fee
   sign). Feed built + tested (`scripts/btc_limitless.py`), not wired to trade.
+
+---
+
+## SESSION GATE — validated, implemented (2026-07-25)
+
+Live entered trades, all segments, split by UTC session:
+
+| book | Asia 00-08 | Europe 08-16 | US 16-24 |
+|---|---|---|---|
+| BTC 5m | +0.6c, **+$56.00** | +0.7c, -$15.22 `BOTH+` | **-3.7c, -$95.08** |
+| BTC 15m | +2.6c, +$11.29 | **+4.9c, +$86.10** `BOTH+` | -0.6c, -$24.92 |
+
+BTC 5m is -$64.88 lifetime, but **US alone is -$95.08** — excluding US it is
+**+$40.78**. Europe is positive in BOTH halves of history on BOTH books
+independently: the strongest evidence standard this lab has.
+
+**Mechanism (why it is not curve-fitting):** split by price, a CHEAP leading
+side means opposite things by session —
+
+| | cheap <0.70 | mid 0.70-0.80 | expensive 0.80+ |
+|---|---|---|---|
+| Asia | **71.1% -> +$118** | 67.6% -> -$41 | 81.6% -> -$21 |
+| Europe | 62.4% -> -$1 | 71.6% -> -$46 | 90.3% -> +$32 |
+| US | **51.5% -> -$95** | 70.3% -> -$15 | 91.2% -> +$16 |
+
+A cheap leading side means the book disagrees with us. In slow asian hours the
+book is wrong and we are right (71%). In US hours the book is **informed**
+(macro releases, institutional flow) — when it prices our side cheap it is right
+and we are the sucker (51.5%, a coin flip). Same signal, opposite meaning,
+depending on who is on the other side.
+
+A tighter price cap does NOT fix US (it makes it worse: -6.1c on BTC5, -9.8c on
+BTC15) because in US hours the CHEAP trades are precisely the losers.
+
+Run it with `SESSIONS="asia europe"`. Blocked rounds skip as `off_session` and
+are still shadow-graded, so the gate's cost stays measurable.
 
 ---
 
