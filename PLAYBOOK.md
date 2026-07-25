@@ -57,28 +57,35 @@ our confidence arrives. Confidence is a filter, not a standalone taker edge.
 
 ## SIZING — settled empirically (2026-07-25), do not re-argue
 
-Replayed over **1,434 real REGIME=3-gated BTC trades** (official labels, the
-live rule: lead 180–240s, ask ≤0.85, full history incl. the 07-24 blowup).
-Starting bankroll $100:
+Replayed over **1,332 real trades of the EXACT live rule** — REGIME=3 gate +
+180–240s window + **decisive move ≥0.016% of spot** + ask ≤0.85, official
+labels, 14.6 days. Starting bankroll $100:
 
-| bet size | taker (pay ask) | maker (buy at bid) |
+| bet size | final | max drawdown |
 |---|---|---|
-| 1–2% of balance | **$109 (DD 24–44%)** | $250 (DD 24%) |
-| 3% | $99 (DD 59%) | — |
-| 5% | $64 (DD 80%) | **$574 (DD 53%)** |
-| 10% | **$4.52 (DD 97%)** | $526 (DD 82%) |
-| 15%+ | ruin | — |
-| flat $10 | **ruin** (matches the live blowup) | — |
+| 2% of balance | $225 | 28% |
+| **4% (half-Kelly)** | **$390** | **50%** |
+| 6% | $519 | 67% |
+| 8% (≈full Kelly) | $530 | 79% |
+| 10% | $411 | 88% |
+| 15% | $63 | 98% |
+| 20% | ruin | 100% |
 
-- **Taker edge: win 65.5% @ 0.647 = +0.8¢/share → full Kelly = 2.2%.**
-  Growth peaks at full Kelly and goes NEGATIVE past 2× Kelly. 10% is ~4.5× Kelly,
-  which is why it loses 95% *despite a positive edge*. Bigger ≠ better past ~2%.
-- **Use `SIZING=percent STAKE_PCT=0.02`.** Percent-of-balance also auto-scales
-  (up as the account grows, down in a drawdown) and cannot bust the way flat did.
-- **The taker edge is now marginal**: +0.8¢/share turns $100 into $109 over 1,434
-  trades (~2 weeks). It shrank from +1.2¢ once the blowup segment was included —
-  i.e. it is within noise of zero. Do not scale the taker up; the case for the
-  maker venue is now the main story, not a nice-to-have.
+- **Live-rule edge: win 70.7% @ 0.681 = +2.6¢/share → full Kelly = 8.2%.**
+- **Use `SIZING=percent STAKE_PCT=0.04`** (half-Kelly): ~73% of peak growth at
+  ~2/3 the drawdown, and robust to the edge being overestimated. Percent-of-
+  balance auto-scales up as the account grows and down in a drawdown, and cannot
+  bust the way flat staking did on 2026-07-24.
+- Growth still peaks at full Kelly and collapses past ~2× Kelly: 15% → $63,
+  20% → ruin. More size stops meaning more money above ~8%.
+
+**METHODOLOGY WARNING (cost us a wrong answer once):** an earlier version of this
+table omitted the **decisive-move** condition, admitting every leading-side round
+instead of only decisive ones. That diluted the trade set and understated the
+edge as +0.8¢/share with Kelly 2.2% — off by 3×, and it produced an
+over-conservative 2% recommendation. **Any rule replay must reproduce ALL of the
+live gates** (regime, window, decisive move, ask cap), or it measures a different
+strategy than the one being run.
 - **Never flat-stake real money.** Flat $10 on $100 ruins on this edge — it did,
   live, on 2026-07-24.
 - **The way to bet bigger is a bigger edge, not a bigger fraction.** Maker entry
