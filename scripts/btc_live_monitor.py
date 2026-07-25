@@ -109,6 +109,42 @@ def show_banner(p: "Painter", hold: float = 1.8) -> None:
     time.sleep(hold)
 
 
+# Trading sessions by UTC hour — the same buckets every analyzer reports and
+# that the trader's --sessions gate uses.
+SESSION_HOURS = {"asia": (0, 8), "europe": (8, 16), "us": (16, 24)}
+NEXT_SESSION = {"asia": "europe", "europe": "us", "us": "asia"}
+
+
+def session_now(ts: Optional[float] = None) -> tuple[str, int]:
+    """(current session name, seconds until the next session starts), UTC."""
+    t = time.gmtime(int(ts if ts is not None else time.time()))
+    h = t.tm_hour
+    name = "asia" if h < 8 else ("europe" if h < 16 else "us")
+    end_h = SESSION_HOURS[name][1]
+    return name, (end_h - h - 1) * 3600 + (59 - t.tm_min) * 60 + (60 - t.tm_sec)
+
+
+def session_banner(state: dict[str, Any], p: "Painter", ts: Optional[float] = None) -> str:
+    """Header strip showing which session is live and whether we're trading it.
+    Visual cue for the SESSIONS gate: green = trading, red = parked."""
+    name, secs = session_now(ts)
+    allowed = state.get("sessions")            # None = trade every session
+    trading = allowed is None or name in allowed
+    lo, hi = SESSION_HOURS[name]
+    h, m = secs // 3600, (secs % 3600) // 60
+    nxt = NEXT_SESSION[name]
+    mark, col, status = ("▶", GREEN, "TRADING") if trading else ("■", RED, "PARKED")
+    bar = (f"  {mark} {name.upper()} SESSION  " + f"{lo:02d}-{hi:02d} UTC")
+    tail = f"   next: {nxt.upper()} in {h}h{m:02d}m"
+    if allowed:
+        # Show the whole schedule so it's obvious which blocks are live today.
+        sched = " · ".join(
+            (p.c(s.upper(), GREEN, BOLD) if s in allowed else p.c(s.upper(), GREY))
+            for s in ("asia", "europe", "us"))
+        tail += "   " + sched
+    return p.c(bar, col, BOLD) + p.c(f"  {status}", col) + p.c(tail, GREY)
+
+
 def _fmt_uptime(seconds: float) -> str:
     s = max(0, int(seconds))
     d, s = divmod(s, 86400)
@@ -431,6 +467,7 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
     windows = sorted(state.get("windows") or {"5m"}, key=lambda x: int(x[:-1]))
     lines.append(p.c("  FLIPPOLYBOT ", BOLD, CYAN) + p.c("+".join(names) + " " + "+".join(windows), CYAN)
                  + p.c(f"  {now}", GREY) + p.c(up_s, YELLOW) + p.c(f"  build {BUILD}", GREY))
+    lines.append(session_banner(state, p))
     lines.append(p.c("  " + "─" * 56, GREY))
 
     # The entry rule, stated once (both traders run the same rule).

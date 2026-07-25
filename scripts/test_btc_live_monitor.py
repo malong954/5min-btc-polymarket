@@ -225,6 +225,40 @@ def test_missing_file_is_safe():
     check("missing file returns empty", evs == [] and off == 0)
 
 
+def test_session_banner_tracks_the_clock_and_the_gate():
+    """The header strip names the live UTC session, says whether we are TRADING
+    or PARKED under the SESSIONS gate, and counts down to the next session."""
+    import calendar
+    from btc_live_monitor import session_banner, session_now
+    p = Painter(color=False)
+    at = lambda h: calendar.timegm((2026, 7, 25, h, 17, 0, 0, 0, 0))
+
+    check("03 UTC is the asia session", session_now(at(3))[0] == "asia")
+    check("11 UTC is the europe session", session_now(at(11))[0] == "europe")
+    check("19 UTC is the us session", session_now(at(19))[0] == "us")
+    check("countdown is under one session length", 0 < session_now(at(3))[1] <= 8 * 3600)
+
+    gated = new_state(); gated["sessions"] = ["asia", "europe"]
+    eu = session_banner(gated, p, at(11))
+    check("banner names the live session", "EUROPE SESSION" in eu)
+    check("in-gate session reads TRADING", "TRADING" in eu and "PARKED" not in eu)
+    check("banner shows the next session", "next: US" in eu)
+
+    us = session_banner(gated, p, at(19))
+    check("out-of-gate session reads PARKED", "PARKED" in us)
+    check("parked banner still names the session", "US SESSION" in us)
+    check("gated banner lists the whole schedule",
+          all(x in us for x in ("ASIA", "EUROPE", "US")))
+
+    ungated = session_banner(new_state(), p, at(19))
+    check("with no gate configured every session is TRADING", "TRADING" in ungated)
+
+    # It must actually appear in the rendered panel.
+    st = new_state(); st["sessions"] = ["asia", "europe"]
+    out = render(st, 0.85, p)
+    check("session banner is rendered in the panel", "SESSION" in out)
+
+
 def main():
     test_fold_aggregation()
     test_render_colors_wins_and_losses()
@@ -235,6 +269,7 @@ def main():
     test_skip_rows_graded_by_shadow_settle()
     test_15m_stream_is_a_separate_market()
     test_mixed_per_asset_rules_render_per_market()
+    test_session_banner_tracks_the_clock_and_the_gate()
     test_missing_file_is_safe()
     print("\nAll live monitor tests passed.")
 
