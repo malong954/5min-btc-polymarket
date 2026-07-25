@@ -50,6 +50,7 @@ our confidence arrives. Confidence is a filter, not a standalone taker edge.
 | **Session gating** | Mostly noise at pooled n. Only BTC-US leading-side is marginally +; the dramatic per-segment session splits (e.g. "US −22%") were n≈16 mirages |
 | **ETH** | No edge under any rule. Excluded from `ASSETS` |
 | **Quiet rule with continuous re-arming** | Busted SOL to $0: entered 66 rounds vs the 22 the validated one-shot rule selects, paying ~5c more for rounds that turned quiet *after* the book converged. FIXED to one-shot (commit 3fa6ba6) — the decision is frozen at the first evaluable poll |
+| **SOL quiet rule (even one-shot)** | **486 live trades: 69.3% @ 0.715 = −2.2¢/share, −$110.26 cumulative.** Backtest said +4.0% BOTH+ at ~0.645 entries; live entries land at 0.715 — the 7¢ backtest-to-live price gap eats the whole edge. Decisively dead; stop trading SOL |
 | **Divergence boost ×2 on BTC live** | Busted BTC 5m $100→$0 (2026-07-24). div_signal correlation was **+0.000** that segment — the 2× fired on rounds where divergence had zero predictive value, pure variance amplification, turning a normal drawdown into ruin. The boost's pooled support (+8.9% vs +2.9%) is real but too small-n to justify 2× sizing live. Run divergence as a filter at most, never as a stake multiplier |
 | **Session gating (Asia/Euro-only, US-ban)** | Tempting after a bad US print, but it's a one-segment mirage. 2026-07-24: US −24.6% but n=13; Europe −10.4% at n=71 did the real damage; Asia −1.9% still negative. And the sign FLIPS between segments — pooled data had US marginally *positive*. Cutting US would not have saved the account. Do not gate on session |
 
@@ -122,7 +123,36 @@ strategy than the one being run.
 
 ---
 
-## The current per-asset call (2026-07-24)
+## THE VERDICT THAT MATTERS — full live record (2026-07-25, 1,991 paper trades)
+
+Judge books on the **cumulative** record and **segment consistency**, never on
+one segment. Cumulative live P&L, all segments, real fills at real asks:
+
+| book | trades | win% | avg px | EV/share | segments +EV | cum P&L |
+|---|---|---|---|---|---|---|
+| **BTC 15m** | 338 | 77.8% | 0.755 | **+2.3¢** | **13/15** | **+$76.48** |
+| BTC 5m | 633 | 72.2% | 0.730 | −0.8¢ | 11/18 | −$64.88 |
+| SOL (quiet) | 486 | 69.3% | 0.715 | −2.2¢ | — | −$110.26 |
+| XRP | 534 | 77.7% | 0.780 | −0.3¢ | — | +$7.94 |
+
+**BTC 15m is the franchise.** 13 of 15 segments positive is the only result in
+this lab that has ever replicated at that rate. It confirms the original
+registry hypothesis (the 15m cohort has higher alpha per trade and is less
+latency-crowded) that we had written off. Kelly on its edge = 0.023/(1−0.755)
+= **9.4%**, so `STAKE_PCT=0.04` (half-Kelly) fits it too.
+
+**BTC 5m is not the franchise** — despite a +$41.50 segment and a +6.4%/share
+segment, it is −0.8¢/share and −$64.88 across 633 trades and coin-flip
+consistent. Its good segments are variance, not edge.
+
+**COSTLY MISTAKE TO NEVER REPEAT (2026-07-24):** we recommended dropping BTC 15m
+and going live on BTC 5m, based on ONE segment each (BTC5 +$41.50 vs BTC15 −$47).
+The cumulative record says the exact opposite. **Never promote or kill a book on
+a single segment — always pull the cumulative + per-segment table first.**
+
+---
+
+## The current per-asset call (2026-07-24, SUPERSEDED — see verdict above)
 
 - **BTC 5m** — the pooled edge (+2.4% BOTH+ over 2 weeks) is REAL but TINY, and
   it is high-variance: +$41.50 one segment (2026-07-24 AM), then **$100→$0** the
