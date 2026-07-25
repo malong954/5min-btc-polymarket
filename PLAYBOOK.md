@@ -123,6 +123,32 @@ strategy than the one being run.
 
 ---
 
+## "WE'RE SKIPPING WINNERS" — settled, stop re-asking (2026-07-25)
+
+Every skip reason, graded at **the ask the round was actually refused at**:
+
+| book | skip reason | n | win% | avg ask | EV/share |
+|---|---|---|---|---|---|
+| BTC15 | no_lead_setup | 267 | 85.4% | 0.910 | −5.6¢ |
+| BTC15 | flat_regime | 73 | 76.7% | 0.916 | **−14.9¢** |
+| BTC15 | price_capped | 21 | 85.7% | 0.962 | −10.5¢ |
+| **BTC15** | **ENTERED** | **343** | **77.6%** | **0.754** | **+2.1¢** |
+| BTC5 | every skip reason | 2,617 | 73–92% | 0.85–0.95 | all negative |
+
+**Not one gate refuses a profitable round.** Skipped rounds win MORE often
+(85% vs 78%) and still lose money, because they are only available at 0.91–0.96
+where breakeven is 91–96%. The gates' entire job is converting "wins often at a
+terrible price" into "wins slightly less often at 0.75". The timeline report's
+"skipped rounds won as much or MORE — threshold may be too strict" line compares
+WINRATES and is therefore misleading: always re-grade skips against their asks
+before believing a gate is costing money.
+
+Corollary: **a long dry spell costs nothing.** BTC 5m sat at exactly $100 for
+three consecutive runs (2026-07-24/25) and the shadow book confirms there was no
++EV round to take in any of them.
+
+---
+
 ## THE VERDICT THAT MATTERS — full live record (2026-07-25, 1,991 paper trades)
 
 Judge books on the **cumulative** record and **segment consistency**, never on
