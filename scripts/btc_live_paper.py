@@ -145,6 +145,9 @@ class LivePaperEngine:
         regime_min_move: float = 0.0,
         regime_lookback: int = 12,
         sessions: Optional[set] = None,
+        tiers: tuple = (0.25, 0.10, 0.05),
+        skip_band: Optional[tuple] = None,
+        cooldown_loss: int = 0,
         div_mode: str = "off",
         div_boost_mult: float = 2.0,
         quiet_vol_max: float = 0.77,
@@ -183,6 +186,22 @@ class LivePaperEngine:
         # every session (measurement default); otherwise a set of
         # {"asia","europe","us"} by UTC hour: asia 00-08, europe 08-16, us 16-24.
         self.sessions = sessions
+        # Sizing tiers for --sizing tiered (fractions of balance at >=100% /
+        # 50-100% / <50% of the starting bankroll).
+        self.tiers = tiers
+        # Mid-band price skip (winners/losers study 2026-07-27): entered trades
+        # win at CHEAP prices (<0.60: we disagree with a slow book and are
+        # right) and at CONFIRMED prices (0.80-0.85: the book agrees), and lose
+        # in the 0.60-0.80 middle — the maximum-uncertainty zone where the ask
+        # already reflects our information. BTC15 ex-US: +3.9c -> +9.6c/share
+        # with the band skipped (both halves). None = off; else (lo, hi).
+        self.skip_band = skip_band
+        # After-loss cooldown (same study, BTC 5m): the next entered trade
+        # after a loser ran -4.8c/share both halves (loss-clustering: a loss
+        # marks a regime the rule is mis-reading). Skip the next N armed
+        # rounds after each settled loss. 0 = off.
+        self.cooldown_loss = cooldown_loss
+        self.cooldown_pending = 0
         # Market interval: 5m (300s rounds) or 15m (900s rounds). Stamped on
         # every event so the dashboard can separate e.g. BTC 5m from BTC 15m.
         self.window = window
@@ -313,6 +332,7 @@ class LivePaperEngine:
             self.sizing, bankroll=avail, base_stake=self.stake_usd,
             confidence=confidence, entry_price=ep, pct=self.stake_pct,
             p_est=confidence,  # live has no calibrator; confidence is a rough proxy
+            start_bankroll=self.bankroll, balance=self.balance, tiers=self.tiers,
         )
         big = self.big_mult > 1.0 and confidence >= self.big_conf
         if big:
@@ -436,6 +456,10 @@ class LivePaperEngine:
             self.stats["pnl"] += pnl
             self.stats["pnl_usd"] += pnl_usd
             self.settled.add(rs)
+            if not win and self.cooldown_loss > 0:
+                # Arm the after-loss cooldown: the next N otherwise-armed rounds
+                # are refused (loss-clustering; see constructor note).
+                self.cooldown_pending = self.cooldown_loss
             events.append(self._emit({
                 "ts": int(now), "type": "settle", "round": rs, "side": pos["side"],
                 "actual": actual, "result": "win" if win else "loss",
@@ -515,6 +539,10 @@ class LivePaperEngine:
                     reason = "no_direction"
                 elif w.get("flat_regime"):
                     reason = "flat_regime"    # setup armed, but the market is flat
+                elif w.get("cooldown"):
+                    reason = "cooldown"       # armed, but inside the after-loss pause
+                elif w.get("mid_band"):
+                    reason = "mid_band"       # armed, but the ask sat in the dead zone
                 elif w.get("off_session"):
                     reason = "off_session"    # armed, but outside the traded sessions
                 elif w.get("div_veto"):
@@ -641,6 +669,22 @@ class LivePaperEngine:
                     # Armed but the contract is priced near $1 — risking the whole
                     # stake to win pennies. Keep watching; asks can dip back.
                     self.watch["capped"] = True
+                    armed = False
+                if (armed and self.skip_band and ask_ok
+                        and self.skip_band[0] <= ask < self.skip_band[1]):
+                    # Mid-band price skip: the maximum-uncertainty zone where the
+                    # ask already prices our signal. Keep watching — the ask can
+                    # leave the band while the setup still holds.
+                    self.watch["mid_band"] = True
+                    armed = False
+                if armed and (self.cooldown_pending > 0 or self.watch.get("cooldown")):
+                    # After-loss cooldown: refuse this armed round (the flag
+                    # sticks for the WHOLE round — one pending unit is consumed
+                    # at the first armed poll, and later polls of the same round
+                    # must not re-arm), then shadow-grade the refusal.
+                    if not self.watch.get("cooldown"):
+                        self.watch["cooldown"] = True
+                        self.cooldown_pending -= 1
                     armed = False
                 if armed and self.regime_min_move > 0 and self.entry_rule != "quiet":
                     # Regime gate: the setup fired, but is the market actually
@@ -813,6 +857,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "16-24). Default: all. Measured on 972 live trades — cheap (<0.70) leading "
                          "sides win 71%% in asia but 51%% in us (informed flow), and us alone is "
                          "-$95 of BTC 5m's lifetime P&L. Blocked rounds skip as off_session")
+    ap.add_argument("--skip-band", default=None,
+                    help="Refuse entries while the ask is inside this price band, e.g. 0.60:0.80 "
+                         "(the maximum-uncertainty zone; measured on BTC15 ex-US: +3.9c -> +9.6c/share "
+                         "with the band skipped). Blocked rounds skip as mid_band. Default: off")
+    ap.add_argument("--cooldown-loss", type=int, default=0,
+                    help="After each settled LOSS, refuse the next N otherwise-armed rounds "
+                         "(loss-clustering: BTC 5m's next trade after a loser ran -4.8c/share both "
+                         "halves). Blocked rounds skip as cooldown. 0 = off")
+    ap.add_argument("--tiers", default="0.25,0.10,0.05",
+                    help="--sizing tiered fractions: at/above the starting bankroll, 50-100%% of it, "
+                         "below 50%%. Default 0.25,0.10,0.05 (aggressive above water, defensive below)")
     ap.add_argument("--div-mode", default="off", choices=["off", "boost", "veto"],
                     help="Divergence handling (deep-study candidates): boost = stake x --div-boost-mult "
                          "on rounds WITH a divergence (BTC: +8.9%% with vs +2.9%% without) | veto = refuse "
@@ -833,7 +888,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--entry-price", type=float, default=0.85, help="Assumed contract entry price (0.80-0.99)")
     ap.add_argument("--bankroll", type=float, default=100.0, help="Starting paper account balance in USD")
     ap.add_argument("--stake-usd", type=float, default=10.0, help="Base USD deployed per trade")
-    ap.add_argument("--sizing", default="flat", choices=["flat", "percent", "confidence", "kelly"],
+    ap.add_argument("--sizing", default="flat", choices=["flat", "percent", "confidence", "kelly", "tiered"],
                     help="Position sizing: flat | percent (of current balance, auto-grows) | confidence-scaled | kelly (live kelly uses confidence as an UNCALIBRATED proxy)")
     ap.add_argument("--stake-pct", type=float, default=0.10, help="Fraction of current balance to stake in --sizing percent (e.g. 0.15 = 15%%)")
     ap.add_argument("--big-conf", type=float, default=0.80, help="Confidence at/above which to size up")
@@ -893,6 +948,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"# session gate: trading only {','.join(sorted(sessions))} "
               f"(UTC asia 00-08 / europe 08-16 / us 16-24)", file=sys.stderr)
 
+    skip_band = None
+    if args.skip_band:
+        try:
+            lo, hi = (float(x) for x in args.skip_band.replace(":", ",").split(","))
+            if not (0.0 <= lo < hi <= 1.0):
+                raise ValueError
+            skip_band = (lo, hi)
+        except ValueError:
+            print(f"bad --skip-band {args.skip_band!r} (want e.g. 0.60:0.80)", file=sys.stderr)
+            return 2
+    try:
+        tiers = tuple(float(x) for x in args.tiers.split(","))
+        assert len(tiers) == 3 and all(0.0 < t <= 1.0 for t in tiers)
+    except Exception:
+        print(f"bad --tiers {args.tiers!r} (want three fractions, e.g. 0.25,0.10,0.05)", file=sys.stderr)
+        return 2
+
     logf: Optional[TextIO] = None
     if args.log:
         d = os.path.dirname(args.log)
@@ -916,6 +988,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         regime_min_move=args.regime_frac * args.lead_min_move,
         regime_lookback=args.regime_lookback,
         sessions=sessions,
+        tiers=tiers, skip_band=skip_band, cooldown_loss=args.cooldown_loss,
         div_mode=args.div_mode, div_boost_mult=args.div_boost_mult,
         quiet_vol_max=args.quiet_vol_max,
     )
@@ -941,6 +1014,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "div_mode": args.div_mode, "div_boost_mult": args.div_boost_mult,
         "quiet_vol_max": args.quiet_vol_max,
         "sessions": sorted(sessions) if sessions else None,
+        "skip_band": list(skip_band) if skip_band else None,
+        "cooldown_loss": args.cooldown_loss,
+        "tiers": list(tiers),
         "sizing": args.sizing, "stake_usd": args.stake_usd,
         "bankroll": args.bankroll, "price_source": args.entry_price_source,
         "provider": args.provider,

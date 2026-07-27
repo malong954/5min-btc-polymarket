@@ -92,6 +92,9 @@ def stake_for(
     max_stake_frac: float = 1.0,
     margin: float = 0.03,
     pct: float = 0.10,
+    start_bankroll: Optional[float] = None,
+    balance: Optional[float] = None,
+    tiers: tuple = (0.25, 0.10, 0.05),
 ) -> float:
     """Return the dollar stake for one trade under `mode`. Never exceeds the
     bankroll (or max_stake_frac of it).
@@ -112,6 +115,17 @@ def stake_for(
     if mode == "percent":
         # Fraction of the current balance -> auto-scales with the account.
         return min(bankroll * clamp(pct, 0.0, 1.0), cap_usd)
+    if mode == "tiered":
+        # Aggressive-above-water, defensive-below: tiers[0] of balance while at
+        # or above the starting bankroll, tiers[1] between 50-100% of it,
+        # tiers[2] below 50%. De-escalating on drawdown is what keeps a hot
+        # fraction survivable: the 25/10/5 default replayed to the same final
+        # balance as flat-25% on a strong edge but can never spiral a broke
+        # account (a $30 balance stakes $1.50, not $7.50).
+        ref = start_bankroll if start_bankroll else bankroll
+        bal = balance if balance is not None else bankroll
+        frac = tiers[0] if bal >= ref else (tiers[1] if bal >= 0.5 * ref else tiers[2])
+        return min(bankroll * clamp(frac, 0.0, 1.0), cap_usd)
     if mode == "confidence":
         # NOTE: scaling by RAW confidence enlarges -EV bets — only safe once
         # confidence has been calibrated to a probability. Prefer kelly mode.

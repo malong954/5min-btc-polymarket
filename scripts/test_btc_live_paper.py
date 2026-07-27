@@ -507,6 +507,66 @@ def test_session_gate():
               drive(LivePaperEngine(entry_threshold=0.0, entry_price=0.85), bars)))
 
 
+def test_tiered_sizing_follows_the_account():
+    """SIZING=tiered: 25% of balance at/above the starting bankroll, 10% at
+    50-100%, 5% below 50% — aggressive above water, defensive in a hole."""
+    from btc_sizing import stake_for
+    kw = dict(base_stake=10, confidence=0.5, entry_price=0.7, start_bankroll=100.0)
+    check("at the start: 25% tier", abs(stake_for("tiered", bankroll=100, balance=100.0, **kw) - 25.0) < 1e-9)
+    check("above water: still 25%", abs(stake_for("tiered", bankroll=140, balance=140.0, **kw) - 35.0) < 1e-9)
+    check("drawdown to 50-100%: 10% tier", abs(stake_for("tiered", bankroll=80, balance=80.0, **kw) - 8.0) < 1e-9)
+    check("below half: 5% tier", abs(stake_for("tiered", bankroll=30, balance=30.0, **kw) - 1.5) < 1e-9)
+    bars = synth_bars(6000, autocorr=0.5, seed=31)
+    eng = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, sizing="tiered", bankroll=100.0)
+    ev = drive(eng, bars)
+    entries = [e for e in ev if e["type"] == "entry"]
+    check("tiered engine enters", bool(entries))
+    check("first tiered stake is 25% of the account", abs(entries[0]["stake_usd"] - 25.0) < 1e-9)
+
+
+def test_skip_band_refuses_the_dead_zone():
+    """--skip-band 0.60:0.80: armed rounds whose ask sits inside the band skip
+    as mid_band; asks outside the band trade normally."""
+    bars = synth_bars(6000, autocorr=0.5, seed=31)
+    mid = LivePaperEngine(entry_threshold=0.0, skip_band=(0.60, 0.80),
+                          require_market_price=True)
+    ev_mid = drive_prices(mid, bars, lambda sl: {"UP": 0.70, "DOWN": 0.70})
+    check("in-band asks never enter", not any(e["type"] == "entry" for e in ev_mid))
+    sided = [e for e in ev_mid if e["type"] == "skip" and e.get("side")]
+    check("in-band rounds skip as mid_band",
+          sided and all(e["reason"] == "mid_band" for e in sided))
+    out = LivePaperEngine(entry_threshold=0.0, skip_band=(0.60, 0.80),
+                          require_market_price=True)
+    ev_out = drive_prices(out, bars, lambda sl: {"UP": 0.55, "DOWN": 0.55})
+    check("below-band asks trade normally", any(e["type"] == "entry" for e in ev_out))
+    hi = LivePaperEngine(entry_threshold=0.0, skip_band=(0.60, 0.80),
+                         require_market_price=True, max_entry_price=0.97)
+    ev_hi = drive_prices(hi, bars, lambda sl: {"UP": 0.82, "DOWN": 0.82})
+    check("above-band asks trade normally", any(e["type"] == "entry" for e in ev_hi))
+
+
+def test_cooldown_after_loss():
+    """--cooldown-loss 1: after each settled loss the next armed round is
+    refused (reason cooldown), shadow-graded, and only ONE round is consumed."""
+    bars = synth_bars(8000, autocorr=0.5, seed=33)
+    eng = LivePaperEngine(entry_threshold=0.0, entry_price=0.85, cooldown_loss=1)
+    ev = drive(eng, bars)
+    losses = [e for e in ev if e["type"] == "settle" and e["result"] == "loss"]
+    cds = [e for e in ev if e["type"] == "skip" and e.get("reason") == "cooldown"]
+    check("losses occurred (test is meaningful)", len(losses) > 3)
+    check("cooldown skips occur after losses", bool(cds))
+    check("at most one cooldown per loss", len(cds) <= len(losses))
+    # every cooldown skip must come after at least one loss settle
+    first_loss_ts = losses[0]["ts"]
+    check("no cooldown before the first loss", all(c["ts"] >= first_loss_ts for c in cds))
+    check("cooldown rounds still shadow-grade",
+          any(e["type"] == "shadow_settle" and e.get("reason") == "cooldown" for e in ev))
+    plain = LivePaperEngine(entry_threshold=0.0, entry_price=0.85)
+    ev_plain = drive(plain, bars)
+    check("cooldown off -> no cooldown skips",
+          not any(e["type"] == "skip" and e.get("reason") == "cooldown" for e in ev_plain))
+
+
 def test_divergence_veto_and_boost():
     """div_mode veto refuses divergence rounds (skip reason divergence_veto);
     div_mode boost multiplies the stake on those same rounds. Divergence is
@@ -566,6 +626,9 @@ def main():
     test_quiet_rule_gates_on_calm_and_divergence()
     test_quiet_rule_is_one_shot()
     test_session_gate()
+    test_tiered_sizing_follows_the_account()
+    test_skip_band_refuses_the_dead_zone()
+    test_cooldown_after_loss()
     test_divergence_veto_and_boost()
     print("\nAll live paper-trading tests passed.")
 

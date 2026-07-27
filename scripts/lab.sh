@@ -125,6 +125,27 @@ done
 # trader takes a comma-separated list; empty stays empty (= all sessions)
 SESS_CSV="$(echo "$SESSIONS" | tr -s ' ' ',' | sed 's/^,//; s/,$//')"
 sess_args(){ [ -n "$SESS_CSV" ] && printf '%s' "--sessions $SESS_CSV"; }
+# Winners/losers study 2026-07-27 (per-book, ex-US, split-half validated):
+#   SKIP_BAND_<A>="0.60:0.80"  refuse entries while the ask sits in the dead
+#                              middle band (BTC15: +3.9c -> +9.6c/share)
+#   COOLDOWN_<A>=1             after each settled loss, refuse the next N armed
+#                              rounds (BTC5: next-after-loss ran -4.8c/share)
+# SIZING=tiered stakes TIERS fractions of balance by account level: at/above
+# the starting bankroll / 50-100% of it / below 50%. Default 0.25,0.10,0.05.
+SKIP_BAND="${SKIP_BAND-${SAVED_SKIP_BAND:-}}"
+SKIP_BAND_BTC="${SKIP_BAND_BTC-${SAVED_SKIP_BAND_BTC:-$SKIP_BAND}}"
+SKIP_BAND_ETH="${SKIP_BAND_ETH-${SAVED_SKIP_BAND_ETH:-$SKIP_BAND}}"
+SKIP_BAND_SOL="${SKIP_BAND_SOL-${SAVED_SKIP_BAND_SOL:-$SKIP_BAND}}"
+SKIP_BAND_XRP="${SKIP_BAND_XRP-${SAVED_SKIP_BAND_XRP:-$SKIP_BAND}}"
+COOLDOWN="${COOLDOWN-${SAVED_COOLDOWN:-0}}"
+COOLDOWN_BTC="${COOLDOWN_BTC-${SAVED_COOLDOWN_BTC:-$COOLDOWN}}"
+COOLDOWN_ETH="${COOLDOWN_ETH-${SAVED_COOLDOWN_ETH:-$COOLDOWN}}"
+COOLDOWN_SOL="${COOLDOWN_SOL-${SAVED_COOLDOWN_SOL:-$COOLDOWN}}"
+COOLDOWN_XRP="${COOLDOWN_XRP-${SAVED_COOLDOWN_XRP:-$COOLDOWN}}"
+TIERS="${TIERS:-${SAVED_TIERS:-0.25,0.10,0.05}}"
+skip_band_for(){ case "$1" in btc) echo "$SKIP_BAND_BTC";; eth) echo "$SKIP_BAND_ETH";; sol) echo "$SKIP_BAND_SOL";; xrp) echo "$SKIP_BAND_XRP";; *) echo "$SKIP_BAND";; esac; }
+cooldown_for(){ case "$1" in btc) echo "$COOLDOWN_BTC";; eth) echo "$COOLDOWN_ETH";; sol) echo "$COOLDOWN_SOL";; xrp) echo "$COOLDOWN_XRP";; *) echo "$COOLDOWN";; esac; }
+band_args(){ B="$(skip_band_for "$1")"; [ -n "$B" ] && printf '%s' "--skip-band $B"; }
 for DV in "$DIV_MODE_BTC" "$DIV_MODE_ETH" "$DIV_MODE_SOL" "$DIV_MODE_XRP"; do
   case "$DV" in off|boost|veto) ;; *) echo "invalid DIV_MODE: $DV (allowed: off boost veto)"; exit 1 ;; esac
 done
@@ -178,7 +199,7 @@ STAKE="${STAKE:-${SAVED_STAKE:-10}}"
 # justifies more size than a conf-0.5 graze (Kelly f* = (q-p)/(1-p)).
 SIZING="${SIZING:-${SAVED_SIZING:-flat}}"
 STAKE_PCT="${STAKE_PCT:-${SAVED_STAKE_PCT:-0.10}}"
-case "$SIZING" in flat|percent|confidence|kelly) ;; *) echo "invalid SIZING: $SIZING (allowed: flat percent confidence kelly)"; exit 1 ;; esac
+case "$SIZING" in flat|percent|confidence|kelly|tiered) ;; *) echo "invalid SIZING: $SIZING (allowed: flat percent confidence kelly tiered)"; exit 1 ;; esac
 BANKROLL="${BANKROLL:-${SAVED_BANKROLL:-100}}"
 
 # ETH=1 is the old spelling of ASSETS="eth" — honor it, without duplicating.
@@ -531,6 +552,11 @@ mkdir -p out
   echo "SAVED_DIV_BOOST_MULT=$DIV_BOOST_MULT"
   echo "SAVED_QUIET_VOL_MAX=$QUIET_VOL_MAX"
   echo "SAVED_SESSIONS=\"$SESSIONS\""
+  echo "SAVED_TIERS=$TIERS"
+  for A in BTC ETH SOL XRP; do
+    eval "echo \"SAVED_SKIP_BAND_${A}=\$SKIP_BAND_${A}\""
+    eval "echo \"SAVED_COOLDOWN_${A}=\$COOLDOWN_${A}\""
+  done
   echo "SAVED_ASSETS=\"$ASSETS\""
   echo "SAVED_M15=\"$M15\""
   echo "SAVED_STAKE=$STAKE"
@@ -560,7 +586,7 @@ else
     --provider "$PROVIDER" --poll 2 --entry-threshold "$BTHR" \
     --entry-rule "$BRULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$BCAP" \
     --lead-min-conf "$CONF_BTC" --lead-hi "$BHI" --lead-lo "$BLO" --regime-frac "$REGIME" \
-    --div-mode "$(div_mode_for btc)" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) \
+    --div-mode "$(div_mode_for btc)" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $(band_args btc) --cooldown-loss "$(cooldown_for btc)" --tiers "$TIERS" \
     --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
@@ -598,7 +624,7 @@ for A in $ASSETS; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI" --lead-lo "$ALO" --regime-frac "$REGIME" \
-      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) \
+      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $(band_args "$A") --cooldown-loss "$(cooldown_for "$A")" --tiers "$TIERS" \
       --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
@@ -633,7 +659,7 @@ for A in $M15; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI15" --lead-lo "$ALO15" --regime-frac "$REGIME" \
-      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) \
+      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $(band_args "$A") --cooldown-loss "$(cooldown_for "$A")" --tiers "$TIERS" \
       --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A-15m.jsonl" --quiet \

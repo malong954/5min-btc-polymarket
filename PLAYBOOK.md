@@ -94,6 +94,12 @@ strategy than the one being run.
   Caveat: that replay assumes bid fills; ~20% of rounds had no usable bid and
   real maker fills are adversely selected, so the true maker edge is between the
   two. Measuring the real fill rate is the Limitless prototype's job.
+- **SIZING=tiered (2026-07-27, Felipe's scheme):** 25% of balance at/above the
+  starting bankroll, 10% at 50–100%, 5% below 50%. Replayed on the go-forward
+  rules: BTC15 ex-US+barbell (edge +9.6¢, Kelly 48%) → **$2,908** at 44% DD —
+  under Kelly there, fine. BTC5 ex-US+cooldown (edge +4.1¢, Kelly 15%) → $335
+  but with a **96% drawdown** (balance touched ~$4). Acceptable for paper by
+  the owner's explicit choice; NOT a real-money scheme on the 5m book.
 - **Confidence-weighted sizing stays BLOCKED** until confidence is calibrated:
   the conf→winrate gap runs +30 to +45 points and flips sign at the top band.
   Kelly needs a true probability; feeding it a miscalibrated one mis-sizes
@@ -120,6 +126,43 @@ strategy than the one being run.
 - **Limitless maker venue.** The structural escape from the taker overround +
   label noise (venue-published Chainlink settle, maker rebates flip the fee
   sign). Feed built + tested (`scripts/btc_limitless.py`), not wired to trade.
+
+---
+
+## THE WINNERS/LOSERS TREND — the barbell + loss-clustering (2026-07-27)
+
+Deep dive over every ENTERED trade (BTC5 n=684, BTC15 n=413), all features:
+
+**1. The mid-price dead zone (the trend).** Entered trades win at the price
+EXTREMES and lose in the middle, on BOTH books:
+
+| entry price | BTC5 EV/share | BTC15 EV/share |
+|---|---|---|
+| < 0.60 (we disagree with the book) | **+10.7¢** BOTH+ | **+25.2¢** BOTH+ |
+| 0.60–0.80 (the dead zone) | −1 to −3¢ BOTH− | **−5.6¢** BOTH− |
+| 0.80–0.85 (book confirms) | +1.6¢ | **+7.0¢** BOTH+ |
+
+Mechanism: a cheap ask = the book disagrees with us — in asia/europe the book
+is slow and we are right. 0.80+ = the book confirms. The 0.60–0.80 middle is
+the maximum-uncertainty zone where the ask already prices exactly what our
+signal knows. Ex-US replays: BTC15 +3.9→+9.6¢/share with the band skipped
+(`SKIP_BAND_BTC=0.60:0.80` on the 15m book, skip reason `mid_band`).
+Stable BOTH+ on BTC15; on BTC5 h1 was negative — barbell is BTC15-only for now.
+
+**2. After-loss cooldown (BTC5).** The next entered trade after a loser ran
+**−4.8¢/share BOTH−** (n=188); dropping it lifts BTC5 ex-US from +1.1¢ to
+**+4.1¢/share BOTH+** (4% replay $125→$229). Losses cluster: a loss marks a
+regime the rule is mis-reading. `COOLDOWN_BTC=1`, skip reason `cooldown`.
+NOTE: BTC15 shows the OPPOSITE (after-loss +8.1¢ BOTH+) — cooldown is
+book-specific, do not apply it to 15m.
+
+Also confirmed in the same study: slippage-paying trades lose (−5.9¢ BOTH−),
+thick-ask-wall trades lose on BTC5 (−4.6¢ BOTH−), UTC 20-24 is the worst block
+on both books (session gate already covers it). Multiple-comparisons caveat:
+~30 cells were tested; these survived split-half + mechanism + (for the
+barbell) cross-book replication, but they are FORWARD EXPERIMENTS with kill
+rules, not settled fact. Kill rule: one full segment of the feature's skip
+reason shadow-grading POSITIVE at its refused asks → revert.
 
 ---
 
