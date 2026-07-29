@@ -148,6 +148,7 @@ class LivePaperEngine:
         tiers: tuple = (0.25, 0.10, 0.05),
         skip_band: Optional[tuple] = None,
         cooldown_loss: int = 0,
+        ask_fall_veto: float = 0.0,
         div_mode: str = "off",
         div_boost_mult: float = 2.0,
         quiet_vol_max: float = 0.77,
@@ -202,6 +203,15 @@ class LivePaperEngine:
         # rounds after each settled loss. 0 = off.
         self.cooldown_loss = cooldown_loss
         self.cooldown_pending = 0
+        # Ask-momentum veto (loser autopsy 2026-07-29): refuse entries when the
+        # entry side's ask FELL by at least this much over the trailing ~60s.
+        # Measured on 565 ex-US BTC5 trades: ask-fell-2c entries ran 55.1% win,
+        # -14.3c/share (both halves) -- the book repricing AGAINST our side
+        # while spot still shows it leading is informed flow calling the
+        # reversal early. Rising asks ("chasing") are FINE: +3.0c both halves.
+        # 0 = off. Keeps watching (a falling ask can stabilize).
+        self.ask_fall_veto = ask_fall_veto
+        self.ask_hist: list = []   # (ts, up_ask, dn_ask) trailing ~120s
         # Market interval: 5m (300s rounds) or 15m (900s rounds). Stamped on
         # every event so the dashboard can separate e.g. BTC 5m from BTC 15m.
         self.window = window
@@ -539,6 +549,8 @@ class LivePaperEngine:
                     reason = "no_direction"
                 elif w.get("flat_regime"):
                     reason = "flat_regime"    # setup armed, but the market is flat
+                elif w.get("ask_fell"):
+                    reason = "ask_falling"    # armed, but the book was repricing against us
                 elif w.get("cooldown"):
                     reason = "cooldown"       # armed, but inside the after-loss pause
                 elif w.get("mid_band"):
@@ -610,6 +622,11 @@ class LivePaperEngine:
                                            "features": feat, "note": note})
                 ask = entry_prices.get(sig.direction) if (entry_prices and sig.direction) else None
                 ask_ok = isinstance(ask, (int, float)) and 0.0 < ask < 1.0
+                if entry_prices:
+                    ua, da = entry_prices.get("UP"), entry_prices.get("DOWN")
+                    self.ask_hist.append((now, ua if isinstance(ua, (int, float)) else None,
+                                          da if isinstance(da, (int, float)) else None))
+                    self.ask_hist = [h for h in self.ask_hist if now - h[0] <= 120]
                 if ask_ok:
                     self.watch["ask"] = round(float(ask), 4)   # for skip diagnostics
                 if self.entry_rule == "edge":
@@ -677,6 +694,16 @@ class LivePaperEngine:
                     # leave the band while the setup still holds.
                     self.watch["mid_band"] = True
                     armed = False
+                if armed and self.ask_fall_veto > 0 and ask_ok:
+                    # Entry-side ask ~45-90s ago (closest sample in that window).
+                    then = [h for h in self.ask_hist if 45 <= now - h[0] <= 90]
+                    prev = None
+                    if then:
+                        h = then[-1]
+                        prev = h[1] if sig.direction == "UP" else h[2]
+                    if isinstance(prev, (int, float)) and (ask - prev) <= -self.ask_fall_veto:
+                        self.watch["ask_fell"] = True
+                        armed = False
                 if armed and (self.cooldown_pending > 0 or self.watch.get("cooldown")):
                     # After-loss cooldown: refuse this armed round (the flag
                     # sticks for the WHOLE round — one pending unit is consumed
@@ -861,6 +888,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Refuse entries while the ask is inside this price band, e.g. 0.60:0.80 "
                          "(the maximum-uncertainty zone; measured on BTC15 ex-US: +3.9c -> +9.6c/share "
                          "with the band skipped). Blocked rounds skip as mid_band. Default: off")
+    ap.add_argument("--ask-fall-veto", type=float, default=0.0,
+                    help="Refuse entries when the entry side's ask FELL by at least this much over "
+                         "the trailing ~60s (measured: ask-fell-2c entries ran -14.3c/share on BTC5 "
+                         "while rising-ask entries were +3.0c). Skips as ask_falling. 0 = off")
     ap.add_argument("--cooldown-loss", type=int, default=0,
                     help="After each settled LOSS, refuse the next N otherwise-armed rounds "
                          "(loss-clustering: BTC 5m's next trade after a loser ran -4.8c/share both "
@@ -989,6 +1020,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         regime_lookback=args.regime_lookback,
         sessions=sessions,
         tiers=tiers, skip_band=skip_band, cooldown_loss=args.cooldown_loss,
+        ask_fall_veto=args.ask_fall_veto,
         div_mode=args.div_mode, div_boost_mult=args.div_boost_mult,
         quiet_vol_max=args.quiet_vol_max,
     )
@@ -1016,6 +1048,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "sessions": sorted(sessions) if sessions else None,
         "skip_band": list(skip_band) if skip_band else None,
         "cooldown_loss": args.cooldown_loss,
+        "ask_fall_veto": args.ask_fall_veto,
         "tiers": list(tiers),
         "sizing": args.sizing, "stake_usd": args.stake_usd,
         "bankroll": args.bankroll, "price_source": args.entry_price_source,

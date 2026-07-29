@@ -143,6 +143,15 @@ COOLDOWN_ETH="${COOLDOWN_ETH-${SAVED_COOLDOWN_ETH:-$COOLDOWN}}"
 COOLDOWN_SOL="${COOLDOWN_SOL-${SAVED_COOLDOWN_SOL:-$COOLDOWN}}"
 COOLDOWN_XRP="${COOLDOWN_XRP-${SAVED_COOLDOWN_XRP:-$COOLDOWN}}"
 TIERS="${TIERS:-${SAVED_TIERS:-0.25,0.10,0.05}}"
+# Ask-momentum veto (loser autopsy 2026-07-29): refuse entries when the entry
+# side's ask fell >= this over the trailing ~60s (BTC5: those entries ran
+# -14.3c/share both halves; rising asks are fine). 0 = off. Per-asset override.
+ASK_FALL="${ASK_FALL:-${SAVED_ASK_FALL:-0}}"
+ASK_FALL_BTC="${ASK_FALL_BTC:-${SAVED_ASK_FALL_BTC:-$ASK_FALL}}"
+ASK_FALL_ETH="${ASK_FALL_ETH:-${SAVED_ASK_FALL_ETH:-$ASK_FALL}}"
+ASK_FALL_SOL="${ASK_FALL_SOL:-${SAVED_ASK_FALL_SOL:-$ASK_FALL}}"
+ASK_FALL_XRP="${ASK_FALL_XRP:-${SAVED_ASK_FALL_XRP:-$ASK_FALL}}"
+ask_fall_for(){ case "$1" in btc) echo "$ASK_FALL_BTC";; eth) echo "$ASK_FALL_ETH";; sol) echo "$ASK_FALL_SOL";; xrp) echo "$ASK_FALL_XRP";; *) echo "$ASK_FALL";; esac; }
 skip_band_for(){ case "$1" in btc) echo "$SKIP_BAND_BTC";; eth) echo "$SKIP_BAND_ETH";; sol) echo "$SKIP_BAND_SOL";; xrp) echo "$SKIP_BAND_XRP";; *) echo "$SKIP_BAND";; esac; }
 cooldown_for(){ case "$1" in btc) echo "$COOLDOWN_BTC";; eth) echo "$COOLDOWN_ETH";; sol) echo "$COOLDOWN_SOL";; xrp) echo "$COOLDOWN_XRP";; *) echo "$COOLDOWN";; esac; }
 band_args(){ B="$(skip_band_for "$1")"; [ -n "$B" ] && printf '%s' "--skip-band $B"; }
@@ -153,6 +162,7 @@ band_args(){ B="$(skip_band_for "$1")"; [ -n "$B" ] && printf '%s' "--skip-band 
 for AUV in BTC ETH SOL XRP; do
   eval "COOLDOWN_${AUV}15=\"\${COOLDOWN_${AUV}15-\${SAVED_COOLDOWN_${AUV}15:-}}\""
   eval "SKIP_BAND_${AUV}15=\"\${SKIP_BAND_${AUV}15-\${SAVED_SKIP_BAND_${AUV}15:-}}\""
+  eval "ASK_FALL_${AUV}15=\"\${ASK_FALL_${AUV}15-\${SAVED_ASK_FALL_${AUV}15:-}}\""
 done
 for DV in "$DIV_MODE_BTC" "$DIV_MODE_ETH" "$DIV_MODE_SOL" "$DIV_MODE_XRP"; do
   case "$DV" in off|boost|veto) ;; *) echo "invalid DIV_MODE: $DV (allowed: off boost veto)"; exit 1 ;; esac
@@ -566,6 +576,8 @@ mkdir -p out
     eval "echo \"SAVED_COOLDOWN_${A}=\$COOLDOWN_${A}\""
     eval "echo \"SAVED_SKIP_BAND_${A}15=\$SKIP_BAND_${A}15\""
     eval "echo \"SAVED_COOLDOWN_${A}15=\$COOLDOWN_${A}15\""
+    eval "echo \"SAVED_ASK_FALL_${A}=\$ASK_FALL_${A}\""
+    eval "echo \"SAVED_ASK_FALL_${A}15=\$ASK_FALL_${A}15\""
   done
   echo "SAVED_ASSETS=\"$ASSETS\""
   echo "SAVED_M15=\"$M15\""
@@ -596,7 +608,7 @@ else
     --provider "$PROVIDER" --poll 2 --entry-threshold "$BTHR" \
     --entry-rule "$BRULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$BCAP" \
     --lead-min-conf "$CONF_BTC" --lead-hi "$BHI" --lead-lo "$BLO" --regime-frac "$REGIME" \
-    --div-mode "$(div_mode_for btc)" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $(band_args btc) --cooldown-loss "$(cooldown_for btc)" --tiers "$TIERS" \
+    --div-mode "$(div_mode_for btc)" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $(band_args btc) --cooldown-loss "$(cooldown_for btc)" --ask-fall-veto "$(ask_fall_for btc)" --tiers "$TIERS" \
     --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
     --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
     --log "$TLOG" --quiet \
@@ -634,7 +646,7 @@ for A in $ASSETS; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI" --lead-lo "$ALO" --regime-frac "$REGIME" \
-      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $(band_args "$A") --cooldown-loss "$(cooldown_for "$A")" --tiers "$TIERS" \
+      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $(band_args "$A") --cooldown-loss "$(cooldown_for "$A")" --ask-fall-veto "$(ask_fall_for "$A")" --tiers "$TIERS" \
       --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A.jsonl" --quiet \
@@ -666,6 +678,7 @@ for A in $M15; do
     AHI15="$(awk "BEGIN{print $(lead_hi_for "$A")*3}")"
     ALO15="$(awk "BEGIN{print $(lead_lo_for "$A")*3}")"
     M15CD="$(cooldown_for "$A")"; OV="$(eval echo "\${COOLDOWN_${AU}15}")"; [ -n "$OV" ] && M15CD="$OV"
+    M15AF="$(ask_fall_for "$A")"; OVA="$(eval echo "\${ASK_FALL_${AU}15-}")"; [ -n "$OVA" ] && M15AF="$OVA"
     M15SB="$(skip_band_for "$A")"; OVB="$(eval echo "\${SKIP_BAND_${AU}15}")"
     [ -n "$OVB" ] && M15SB="$OVB"; [ "$M15SB" = "none" ] && M15SB=""
     M15BANDARG=""; [ -n "$M15SB" ] && M15BANDARG="--skip-band $M15SB"
@@ -673,7 +686,7 @@ for A in $M15; do
       --provider binance --poll 3 --entry-threshold "$ATHR" \
       --entry-rule "$ARULE" --edge-margin "$EDGE_MARGIN" --max-entry-price "$MAX_PRICE" --lead-max-price "$ACAP" \
       --lead-min-conf "$AF" --lead-hi "$AHI15" --lead-lo "$ALO15" --regime-frac "$REGIME" \
-      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $M15BANDARG --cooldown-loss "$M15CD" --tiers "$TIERS" \
+      --div-mode "$(div_mode_for "$A")" --div-boost-mult "$DIV_BOOST_MULT" --quiet-vol-max "$QUIET_VOL_MAX" $(sess_args) $M15BANDARG --cooldown-loss "$M15CD" --ask-fall-veto "$M15AF" --tiers "$TIERS" \
       --entry-price-source polymarket --sizing "$SIZING" --stake-pct "$STAKE_PCT" --stake-usd "$STAKE" \
       --big-mult 1.0 --confluence 0.0 --bankroll "$BANKROLL" \
       --log "out/live-$A-15m.jsonl" --quiet \

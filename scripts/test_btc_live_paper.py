@@ -567,6 +567,48 @@ def test_cooldown_after_loss():
           not any(e["type"] == "skip" and e.get("reason") == "cooldown" for e in ev_plain))
 
 
+def test_ask_fall_veto():
+    """--ask-fall-veto: an entry whose side-ask FELL by >= the veto over the
+    trailing ~60s is refused (ask_falling); flat or rising asks trade."""
+    bars = synth_bars(6000, autocorr=0.5, seed=31)
+    t0 = bars[0].ts
+
+    class Feed:
+        """Price feed keyed on the engine's wall clock via closure state."""
+        def __init__(self, slope_per_min):
+            self.slope = slope_per_min
+        def __call__(self, now):
+            m = (now - t0) % 300 / 60.0
+            px = 0.80 + self.slope * m
+            px = min(max(px, 0.05), 0.95)
+            return {"UP": px, "DOWN": px}
+
+    def drive_wall(engine, feed, poll=15):
+        start, end = bars[0].ts, bars[-1].ts + 60
+        events, now = [], start + 40 * 60
+        while now <= end:
+            events.extend(engine.step(now, visible_bars(bars, now),
+                                      entry_prices=feed(now)))
+            now += poll
+        return events
+
+    fall = LivePaperEngine(entry_threshold=0.0, ask_fall_veto=0.02,
+                           require_market_price=True)
+    ev_fall = drive_wall(fall, Feed(-0.06))
+    check("falling ask never enters", not any(e["type"] == "entry" for e in ev_fall))
+    sided = [e for e in ev_fall if e["type"] == "skip" and e.get("side")]
+    check("refusals carry reason ask_falling",
+          sided and all(e["reason"] == "ask_falling" for e in sided))
+    rise = LivePaperEngine(entry_threshold=0.0, ask_fall_veto=0.02,
+                           require_market_price=True)
+    ev_rise = drive_wall(rise, Feed(+0.06))
+    check("rising ask trades normally", any(e["type"] == "entry" for e in ev_rise))
+    off = LivePaperEngine(entry_threshold=0.0, require_market_price=True)
+    ev_off = drive_wall(off, Feed(-0.06))
+    check("veto off -> falling ask still trades (measurement default)",
+          any(e["type"] == "entry" for e in ev_off))
+
+
 def test_divergence_veto_and_boost():
     """div_mode veto refuses divergence rounds (skip reason divergence_veto);
     div_mode boost multiplies the stake on those same rounds. Divergence is
@@ -629,6 +671,7 @@ def main():
     test_tiered_sizing_follows_the_account()
     test_skip_band_refuses_the_dead_zone()
     test_cooldown_after_loss()
+    test_ask_fall_veto()
     test_divergence_veto_and_boost()
     print("\nAll live paper-trading tests passed.")
 

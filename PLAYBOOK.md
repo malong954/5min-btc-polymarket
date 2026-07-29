@@ -166,6 +166,32 @@ reason shadow-grading POSITIVE at its refused asks → revert.
 
 ---
 
+## THE ASK-FALL VETO — the loser signature (2026-07-29)
+
+Autopsy of all 154 ex-US BTC5 losers, joined with book context at entry:
+
+| entry-side ask over prior ~60s | n | win% | EV/share |
+|---|---|---|---|
+| **FELL ≥2¢** | 98 | 55.1% | **−14.3¢** `BOTH−` |
+| ~flat | 33 | 78.8% | +6.5¢ `BOTH+` |
+| ROSE ≥2¢ (chasing) | 313 | 78.0% | +3.0¢ `BOTH+` |
+
+**Chasing a rising ask is fine. Buying the leading side while its ask is
+FALLING is the deepest loss cell ever isolated** — the book repricing against
+our side while spot still shows it leading is informed flow calling the
+reversal early (the book leads spot; we have measured that repeatedly).
+Removing the cell lifts the remaining BTC5 book to ~+3¢/share.
+Implemented: `ASK_FALL_BTC=0.02` (trader `--ask-fall-veto`), skip reason
+`ask_falling`, shadow-graded. Kill rule: a full segment of ask_falling skips
+grading POSITIVE at the refused asks → revert.
+
+Secondary loser signatures (same autopsy, weaker): BTC5 entries at RSI ≤35 ran
+−7.0¢ `BOTH−` (late to a falling knife) while BTC15's RSI extremes are
+POSITIVE — any RSI filter must be 5m-only and is NOT yet implemented.
+Spread, stretch/exhaustion: nothing stable. BTC15 had no `BOTH−` veto cell.
+
+---
+
 ## SESSION GATE — validated, implemented (2026-07-25)
 
 Live entered trades, all segments, split by UTC session:
