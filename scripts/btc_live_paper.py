@@ -411,6 +411,15 @@ class LivePaperEngine:
         cur = bucket_slot(int(now), self.slot)
         sec_left = (cur + self.slot) - now
         events: list[dict[str, Any]] = []
+        if entry_prices:
+            # Trailing ask history for the ask-fall veto — recorded every poll
+            # (from round start, not just inside the entry window) and KEYED BY
+            # ROUND: each round is a fresh contract, so cross-round comparisons
+            # are meaningless.
+            ua, da = entry_prices.get("UP"), entry_prices.get("DOWN")
+            self.ask_hist.append((now, cur, ua if isinstance(ua, (int, float)) else None,
+                                  da if isinstance(da, (int, float)) else None))
+            self.ask_hist = [h for h in self.ask_hist if now - h[0] <= 120]
         model = MTFModel(bars_1m, weights=self.weights, confluence=self.confluence)
 
         def spot_label(rs: int) -> Optional[str]:
@@ -622,11 +631,6 @@ class LivePaperEngine:
                                            "features": feat, "note": note})
                 ask = entry_prices.get(sig.direction) if (entry_prices and sig.direction) else None
                 ask_ok = isinstance(ask, (int, float)) and 0.0 < ask < 1.0
-                if entry_prices:
-                    ua, da = entry_prices.get("UP"), entry_prices.get("DOWN")
-                    self.ask_hist.append((now, ua if isinstance(ua, (int, float)) else None,
-                                          da if isinstance(da, (int, float)) else None))
-                    self.ask_hist = [h for h in self.ask_hist if now - h[0] <= 120]
                 if ask_ok:
                     self.watch["ask"] = round(float(ask), 4)   # for skip diagnostics
                 if self.entry_rule == "edge":
@@ -695,12 +699,15 @@ class LivePaperEngine:
                     self.watch["mid_band"] = True
                     armed = False
                 if armed and self.ask_fall_veto > 0 and ask_ok:
-                    # Entry-side ask ~45-90s ago (closest sample in that window).
-                    then = [h for h in self.ask_hist if 45 <= now - h[0] <= 90]
+                    # Entry-side ask ~45-90s ago, SAME ROUND only (each round is
+                    # a fresh contract; history from before the round is a
+                    # different market's price).
+                    then = [h for h in self.ask_hist
+                            if h[1] == cur and 45 <= now - h[0] <= 90]
                     prev = None
                     if then:
                         h = then[-1]
-                        prev = h[1] if sig.direction == "UP" else h[2]
+                        prev = h[2] if sig.direction == "UP" else h[3]
                     if isinstance(prev, (int, float)) and (ask - prev) <= -self.ask_fall_veto:
                         self.watch["ask_fell"] = True
                         armed = False
