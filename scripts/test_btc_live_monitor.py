@@ -259,6 +259,32 @@ def test_session_banner_tracks_the_clock_and_the_gate():
     check("session banner is rendered in the panel", "SESSION" in out)
 
 
+def test_parked_books_hidden_from_account():
+    """A book whose config announces a never-fires threshold (>1.0) and that has
+    no trades is PARKED: excluded from the account bankroll and the per-market
+    balance line. A parked book that HAS traded stays visible."""
+    st = new_state(bankroll=100.0)
+    p = Painter(color=False)
+    # two live books + one parked recorder
+    for a, thr in (("BTC", 0.6), ("BTC15", 0.6), ("SOL", 1.01)):
+        ev = {"type": "config", "asset": a.rstrip("15") or a, "window": "15m" if a == "BTC15" else "5m",
+              "bankroll": 100.0, "entry_rule": "threshold", "entry_threshold": thr, "ts": 1}
+        # _mkt_name derives the display name from asset+window; feed matching fields
+        ev["asset"] = "BTC" if a.startswith("BTC") else a
+        fold_event(st, ev)
+    check("parked book excluded from bankroll", abs(st["bankroll"] - 200.0) < 1e-9)
+    out = render(st, 0.85, p)
+    check("parked book absent from the balance line", "SOL $" not in out)
+    check("live books still shown", "BTC" in out)
+    # a parked book with realized pnl stays visible (money was really at play)
+    fold_event(st, {"type": "settle", "asset": "SOL", "window": "5m", "round": 300,
+                    "result": "loss", "entry_price": 0.7, "pnl": -0.7, "cum_pnl": -0.7,
+                    "pnl_usd": -10.0, "balance": 90.0, "stake_usd": 10.0,
+                    "trades": 1, "winrate": 0.0, "ts": 2})
+    out2 = render(st, 0.85, p)
+    check("parked book WITH trades reappears", "SOL" in out2 and "$90" in out2.replace(",", ""))
+
+
 def main():
     test_fold_aggregation()
     test_render_colors_wins_and_losses()
@@ -270,6 +296,7 @@ def main():
     test_15m_stream_is_a_separate_market()
     test_mixed_per_asset_rules_render_per_market()
     test_session_banner_tracks_the_clock_and_the_gate()
+    test_parked_books_hidden_from_account()
     test_missing_file_is_safe()
     print("\nAll live monitor tests passed.")
 

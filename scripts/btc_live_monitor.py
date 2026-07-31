@@ -198,6 +198,19 @@ def new_state(bankroll: float = 100.0, stake_usd: float = 10.0, entry_price: flo
     }
 
 
+def _is_hidden(ast: dict[str, Any]) -> bool:
+    """Parked (never-fires threshold) and never traded -> not capital in play."""
+    return bool(ast.get("parked")) and not ast.get("pnl_usd")
+
+
+def _resum_bankroll(state: dict[str, Any]) -> None:
+    assets = state.get("assets") or {}
+    live = [x for x in assets.values() if not _is_hidden(x)]
+    state["bankroll"] = sum(x["bankroll"] for x in live) or state.get("default_bankroll", 100.0)
+    state["balance"] = state["bankroll"] + state["pnl_usd"]
+    state["peak_bal"] = max(state.get("peak_bal", 0) or 0, state["balance"])
+
+
 def _asset_state(state: dict[str, Any], a: str) -> dict[str, Any]:
     """Get (or create) the per-market sub-state. Events without an asset field
     (older logs) count as BTC. New markets start at the default bankroll until
@@ -245,6 +258,12 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
         # Per-market rule map: with per-asset rules (BTC on lead, SOL/XRP on
         # threshold) a single global rule line would just show whichever
         # trader's config event arrived last.
+        # A threshold above 1.0 can never fire: the book is PARKED (recording
+        # only). Parked books with no trades are hidden from the account roll-up
+        # so the dashboard shows only capital that is actually in play.
+        ast["parked"] = (ev.get("entry_rule") == "threshold"
+                         and (ev.get("entry_threshold") or 0) > 1.0)
+        _resum_bankroll(state)
         if ev.get("entry_rule"):
             state.setdefault("mkt_rules", {})[a] = {
                 "rule": ev["entry_rule"], "thr": ev.get("entry_threshold"),
@@ -630,6 +649,8 @@ def render(state: dict[str, Any], entry_price: float, p: Painter,
         parts = []
         for a in names:
             ast = assets[a]
+            if _is_hidden(ast):
+                continue   # parked, never traded — not capital in play
             abal = ast["bankroll"] + ast["pnl_usd"]
             acol = GREEN if abal >= ast["bankroll"] else RED
             parts.append(p.c(f"{a:<4}" if len(a) <= 4 else a + " ", _color_for(a), BOLD)
