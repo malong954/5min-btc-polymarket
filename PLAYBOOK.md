@@ -94,6 +94,15 @@ strategy than the one being run.
   Caveat: that replay assumes bid fills; ~20% of rounds had no usable bid and
   real maker fills are adversely selected, so the true maker edge is between the
   two. Measuring the real fill rate is the Limitless prototype's job.
+- **VERDICT ON THE 25% TIER (2026-07-31, third round trip):** BTC15's run made
+  money per trade (+2.2¢/share; the SAME trades at flat $10 = **+$22.82**) yet
+  lost **−$13.56 in cash** with a $421→$86 peak-to-trough. Trade-weighted EV
+  positive + dollar-weighted return negative = the tier bets biggest exactly
+  when a streak is about to mean-revert. Three cycles now: $100→$202→$72,
+  $400→$470→$326, $100→$421→$86. The signal is not the problem; the top tier
+  is ~2× the strong book's Kelly and converts winning trade streams into
+  losing dollar streams. **Fix: `TIERS=0.10,0.05,0.05`** (10% top tier ≈
+  Kelly-neutral for BTC15, still auto-de-escalating).
 - **SIZING=tiered (2026-07-27, Felipe's scheme):** 25% of balance at/above the
   starting bankroll, 10% at 50–100%, 5% below 50%. Replayed on the go-forward
   rules: BTC15 ex-US+barbell (edge +9.6¢, Kelly 48%) → **$2,908** at 44% DD —
