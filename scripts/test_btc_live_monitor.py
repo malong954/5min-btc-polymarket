@@ -273,6 +273,8 @@ def test_parked_books_hidden_from_account():
         ev["asset"] = "BTC" if a.startswith("BTC") else a
         fold_event(st, ev)
     check("parked book excluded from bankroll", abs(st["bankroll"] - 200.0) < 1e-9)
+    check("peak never inflated by parked bankrolls (no phantom $400)",
+          st["peak_bal"] <= 200.0 + 1e-9)
     out = render(st, 0.85, p)
     check("parked book absent from the balance line", "SOL $" not in out)
     check("live books still shown", "BTC" in out)

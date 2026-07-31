@@ -206,8 +206,15 @@ def _is_hidden(ast: dict[str, Any]) -> bool:
 def _resum_bankroll(state: dict[str, Any]) -> None:
     assets = state.get("assets") or {}
     live = [x for x in assets.values() if not _is_hidden(x)]
+    old = state.get("bankroll") or 0
     state["bankroll"] = sum(x["bankroll"] for x in live) or state.get("default_bankroll", 100.0)
+    delta = state["bankroll"] - old
     state["balance"] = state["bankroll"] + state["pnl_usd"]
+    if delta < 0 and state.get("peak_bal"):
+        # A zero-pnl book left the roll-up: every historical balance (and thus
+        # the peak) included exactly its bankroll — remove it retroactively.
+        state["peak_bal"] = max(state["peak_bal"] + delta, state["balance"])
+        state["max_dd_usd"] = max(0.0, state.get("max_dd_usd", 0.0) + delta)             if state.get("max_dd_usd", 0.0) > 0 else state.get("max_dd_usd", 0.0)
     state["peak_bal"] = max(state.get("peak_bal", 0) or 0, state["balance"])
 
 
@@ -220,9 +227,7 @@ def _asset_state(state: dict[str, Any], a: str) -> dict[str, Any]:
     if a not in assets:
         assets[a] = {"bankroll": state.get("default_bankroll", 100.0),
                      "pnl_usd": 0.0, "hb": None, "pred": None}
-        state["bankroll"] = sum(x["bankroll"] for x in assets.values())
-        state["balance"] = state["bankroll"] + state["pnl_usd"]
-        state["peak_bal"] = max(state["peak_bal"], state["balance"])
+        _resum_bankroll(state)
     return assets[a]
 
 
