@@ -175,6 +175,53 @@ python3 scripts/test_btc_binance.py
 python3 scripts/test_btc_datafeeds.py
 ```
 
+## Parallel Trend Finder (Official Polymarket Data)
+
+`scripts/btc_trend_finder.py` replays every BTC trajectory archive under
+`data/lab/` and tests independent signal arms in parallel: spot lead/fade,
+5/15/30/60-second velocity, velocity consensus, the existing indicator model,
+market favorite/underdog, book momentum/reversal, liquidity pressure, and
+spot+book/velocity consensus.
+
+Unlike the candle backtest, this uses the recorded Polymarket ask and size plus
+Polymarket's own `result_pm` outcome. The default research assumptions are:
+
+- One immutable decision snapshot per arm and round at about 210 seconds left.
+- Fill from the first recorded quote at least 6 seconds later, never the signal
+  quote.
+- Maximum fill equal to recorded best-ask size, with a 5-share minimum.
+- One tick of adverse slippage and the current crypto taker fee formula,
+  `shares * 0.07 * price * (1-price)`.
+- Whole UTC days split chronologically into train/validation/holdout.
+- Bonferroni correction across every arm tested on the final holdout.
+
+```bash
+python3 scripts/btc_trend_finder.py \
+  --output out/btc_trend_report.json \
+  --trade-log out/btc_trend_trades.csv
+
+python3 scripts/test_btc_trend_finder.py
+
+# Diagnose whether execution costs consume an apparent signal. These are
+# sensitivity checks, not executable PnL assumptions:
+python3 scripts/btc_trend_finder.py --slippage 0 --fee-rate 0.07
+python3 scripts/btc_trend_finder.py --slippage 0 --fee-rate 0
+```
+
+On the July 2026 archive (3,399 official BTC 5m outcomes), no arm survived the
+default fee-and-slippage-aware train/validation screen. The spot/book consensus
+arm had a small gross holdout edge before costs, but the taker fee alone made it
+negative. This result does not prove that maker trading has no edge: these files
+contain top-of-book observations, not queue position or confirmed maker fills,
+so a maker claim needs a forward fill recorder and cannot be inferred here.
+
+The large dataset from
+[`Jon-Becker/prediction-market-analysis`](https://github.com/Jon-Becker/prediction-market-analysis)
+is useful for market metadata, historical trades, and calibration studies. Its
+default on-chain collector does not provide complete recent CLOB depth or
+second-level BTC 5m execution history, so it is supplementary rather than a
+replacement for the local trajectory recorder.
+
 ## Running Locally (macOS / Mac mini)
 The research tools and data feeds have no exchange-egress restrictions on a
 normal home network — a Mac mini is an ideal always-on host. The heavy trading
