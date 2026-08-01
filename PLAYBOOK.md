@@ -175,6 +175,32 @@ reason shadow-grading POSITIVE at its refused asks → revert.
 
 ---
 
+## THE FEE RECKONING — Felipe's independent research (2026-08-01)
+
+`TREND_RESEARCH.md` + `scripts/btc_trend_finder.py` (Felipe's parallel study,
+train/validation/holdout + Bonferroni — STRICTER than our split-half) reached
+our conclusions independently AND surfaced a cost our lab never charged:
+**Polymarket's crypto taker fee, `0.07 × p × (1−p)` ≈ 1.3–1.5¢/share.**
+The paper engine's EV numbers are GROSS. Regraded net (his cost model):
+
+| cell | gross | −fee | −fee −1¢ slip |
+|---|---|---|---|
+| **BTC15 Europe** | +3.3¢ | **+2.0¢** | **+1.0¢** |
+| BTC15 ex-US | +2.1¢ | +0.8¢ | −0.2¢ |
+| BTC15 all | +1.5¢ | +0.2¢ | −0.8¢ |
+| BTC5 (every cell) | ≤+0.2¢ | negative | negative |
+
+**Only BTC15-Europe survives the full cost stack** (and our measured live
+slippage is ~0.1¢, not 1¢, so realistic net ≈ +1.9¢). His 15 single-signal
+arms all died under costs — matching our ungated baselines — and his
+conclusion is ours, reached independently: **the taker path is nearly
+exhausted; the maker side is the destination**, gated on a forward maker
+shadow recorder (quotes, queue, fills, markouts) before any real money.
+TODO: confirm the 0.07 rate from the live site, then charge the fee in the
+paper engine so dashboards report net.
+
+---
+
 ## THE ASK-FALL VETO — the loser signature (2026-07-29)
 
 Autopsy of all 154 ex-US BTC5 losers, joined with book context at entry:
