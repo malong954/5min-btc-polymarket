@@ -532,8 +532,43 @@ case "${1:-start}" in
     if [ "$n" = "0" ]; then echo "no logs to sync"; exit 0; fi
     git add data/lab
     if git commit -m "lab data sync $TS ($n logs)"; then
-      git push && echo "synced $n logs -> data/lab on branch $(git rev-parse --abbrev-ref HEAD)" \
-        || { echo "commit made but push failed — retry with: git push"; exit 1; }
+      BR="$(git rev-parse --abbrev-ref HEAD)"
+      # Several machines/sessions sync this same branch, so a plain push can
+      # land after the remote has moved (non-fast-forward). Fetch + rebase and
+      # retry a few times before giving up — only a genuine conflict (the same
+      # log file changed on both sides) needs a human.
+      tries=0
+      ok=0
+      while [ "$tries" -lt 5 ] && [ "$ok" = "0" ]; do
+        if ERR="$(git push 2>&1)"; then
+          ok=1
+        else
+          echo "$ERR" >&2
+          if ! printf '%s' "$ERR" | grep -qE 'rejected|fetch first|non-fast-forward'; then
+            echo "push failed for a reason other than a stale branch — not retrying"
+            exit 1
+          fi
+          tries=$((tries + 1))
+          echo "push rejected (remote moved) — fetching + rebasing, attempt $tries/5..."
+          git fetch origin "$BR"
+          # --autostash: an unrelated in-progress edit elsewhere in the tree
+          # shouldn't block this (out/ itself is gitignored, so it's never
+          # the cause), and it's restored right after the rebase either way.
+          if ! git rebase --autostash "origin/$BR"; then
+            if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+              git rebase --abort
+            fi
+            echo "rebase hit a real conflict (likely the same log file changed on both sides) — resolve manually: git fetch origin $BR && git rebase origin/$BR && git push"
+            exit 1
+          fi
+        fi
+      done
+      if [ "$ok" = "1" ]; then
+        echo "synced $n logs -> data/lab on branch $BR"
+      else
+        echo "push still rejected after $tries attempts — resolve manually: git fetch origin $BR && git rebase origin/$BR && git push"
+        exit 1
+      fi
     else
       echo "nothing new to sync (logs unchanged since last sync)"
     fi
