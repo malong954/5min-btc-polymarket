@@ -532,8 +532,20 @@ case "${1:-start}" in
     if [ "$n" = "0" ]; then echo "no logs to sync"; exit 0; fi
     git add data/lab
     if git commit -m "lab data sync $TS ($n logs)"; then
-      git push && echo "synced $n logs -> data/lab on branch $(git rev-parse --abbrev-ref HEAD)" \
-        || { echo "commit made but push failed — retry with: git push"; exit 1; }
+      # The analysis side pushes commits between syncs, so a plain push is
+      # often rejected (non-fast-forward). Rebase our sync commit(s) on top of
+      # the remote first — data/lab files never conflict with code commits.
+      BR="$(git rev-parse --abbrev-ref HEAD)"
+      if ! git push 2>/dev/null; then
+        echo "remote moved — rebasing local sync commit(s) on top of it..."
+        if git pull --rebase origin "$BR" && git push; then
+          :
+        else
+          git rebase --abort 2>/dev/null
+          echo "auto-rebase failed — run: git pull --rebase && git push"; exit 1
+        fi
+      fi
+      echo "synced $n logs -> data/lab on branch $BR"
     else
       echo "nothing new to sync (logs unchanged since last sync)"
     fi
