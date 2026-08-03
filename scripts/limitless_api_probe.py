@@ -34,9 +34,20 @@ import urllib.error
 
 BASE = "https://api.limitless.exchange"
 
+# A bare Python UA is 403'd by many edge/WAF layers regardless of path or
+# signature — which looks exactly like "bad auth" and sends you chasing the
+# wrong bug. Every request below carries browser-ish headers so a 403 means
+# what it says.
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+COMMON = {"User-Agent": UA, "Accept": "application/json, text/plain, */*",
+          "Origin": "https://limitless.exchange",
+          "Referer": "https://limitless.exchange/"}
+
 DOC_PATHS = [
-    "/api-docs-json", "/docs-json", "/swagger.json", "/openapi.json",
-    "/api-docs", "/docs", "/api/docs", "/v1/openapi.json",
+    "/api-json", "/api-docs-json", "/docs-json", "/swagger.json", "/openapi.json",
+    "/api-docs", "/docs", "/api/docs", "/v1/openapi.json", "/swagger",
+    "/swagger-json", "/api/v1/openapi.json", "/redoc",
 ]
 
 # Read-only endpoints likely to exist on a trading account (safe to probe).
@@ -60,8 +71,15 @@ def load_env_creds() -> tuple[str, str]:
     return key, sec
 
 
-def fetch(url: str, headers: dict | None = None, timeout: float = 10.0):
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": "flippolybot-probe"})
+def fetch(url: str, headers: dict | None = None, timeout: float = 10.0,
+          bare: bool = False):
+    """bare=True deliberately omits the browser headers (used by the control
+    test that proves whether the edge is UA-filtering us)."""
+    h = dict(headers or {})
+    if not bare:
+        for k, v in COMMON.items():
+            h.setdefault(k, v)
+    req = urllib.request.Request(url, headers=h)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
@@ -123,24 +141,60 @@ def sign_variants(key: str, secret: str, method: str, path: str, body: str = "")
         yield (f"OKX/{ts_name}", {
             "OK-ACCESS-KEY": key, "OK-ACCESS-SIGN": sig_okx, "OK-ACCESS-TIMESTAMP": ts,
             "Content-Type": "application/json"})
+        # Bearer/token styles (some HMAC APIs still gate on a plain key header)
+        yield (f"BEARER/{ts_name}", {
+            "Authorization": f"Bearer {key}", "x-api-timestamp": ts,
+            "x-api-signature": h_hex(ts + method.upper() + path + body),
+            "Content-Type": "application/json"})
+        yield (f"KEYONLY/{ts_name}", {
+            "x-api-key": key, "Content-Type": "application/json"})
+        # signature over ts+path only (no method), both encodings
+        for enc_name, enc in (("hex", h_hex), ("b64", h_b64)):
+            yield (f"NOMETH/{ts_name}/{enc_name}", {
+                "x-api-key": key, "x-api-signature": enc(ts + path),
+                "x-api-timestamp": ts, "Content-Type": "application/json"})
 
 
 def cmd_auth() -> int:
     key, sec = load_env_creds()
     print(f"auth probe: key ...{key[-4:]}  (secret loaded, never printed)\n")
+
+    # --- CONTROL: is the edge blocking us before auth is even considered? ---
+    pub = "/markets/active/slugs"
+    st_bare, _ = fetch(BASE + pub, headers={"Accept": "application/json"}, bare=True)
+    st_ua, _ = fetch(BASE + pub)
+    print("control (public endpoint, no credentials):")
+    print(f"  {pub:<24} bare python UA -> {st_bare}")
+    print(f"  {pub:<24} browser  UA    -> {st_ua}")
+    if st_bare == 403 and st_ua == 200:
+        print("  => the edge 403s bare Python UAs. Earlier all-403 matrix was UA, not signing.")
+    elif st_ua != 200:
+        print("  => even the public read fails with browser headers; network/edge issue, not auth.")
+    else:
+        print("  => UA is not the blocker; 403s below are real auth rejections.")
+
+    # --- CONTROL 2: what does an UNAUTHENTICATED account request return? ---
+    st_noauth, body_noauth = fetch(BASE + "/portfolio")
+    print(f"\n  /portfolio  with NO auth headers -> {st_noauth} "
+          f"({body_noauth[:80].decode(errors='ignore') if body_noauth else ''})")
+    print("  (if signed requests return the SAME status, the signature isn't being "
+          "accepted at all; if they differ, we are close.)\n")
+
     hit = False
     for path in AUTH_PATHS:
         for name, headers in sign_variants(key, sec, "GET", path):
             status, body = fetch(BASE + path, headers=headers)
-            if status in (200, 401, 403):   # 200 = works; 401/403 = reached, wrong sig
+            if status in (200, 401):        # 200 = works; 401 = reached, wrong sig
                 tag = "  <== AUTH OK" if status == 200 else ""
-                print(f"  {path:<22} {name:<12} -> {status}{tag}")
+                print(f"  {path:<22} {name:<14} -> {status}{tag}")
                 if status == 200:
                     hit = True
                     print(f"      body: {body[:160].decode(errors='ignore')}")
     if not hit:
-        print("\nNo 200 yet. If every scheme 404s, the account endpoint name differs — "
-              "run --docs and paste the saved spec (or the endpoint list).")
+        print("\n(403/404 rows suppressed — only 200/401 shown, since a uniform 403 is "
+              "an edge block rather than a signing result.)")
+        print("No 200 yet. Next: open the 'Learn more' link beside the API-token dialog "
+              "in the Limitless UI and send that URL — it documents the exact recipe.")
     else:
         print("\nPLUMBING CONFIRMED — the 200 row names Limitless's exact HMAC recipe.")
     return 0
