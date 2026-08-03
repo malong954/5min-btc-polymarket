@@ -210,6 +210,7 @@ LEAD_CAP_XRP="${LEAD_CAP_XRP:-${SAVED_LEAD_CAP_XRP:-$LEAD_MAX_PRICE}}"
 ETH="${ETH:-${SAVED_ETH:-0}}"    # legacy switch; folded into ASSETS below
 ASSETS="${ASSETS-${SAVED_ASSETS:-}}"   # extra markets: any of "eth sol xrp"
 M15="${M15-${SAVED_M15:-}}"      # assets to ALSO trade on the 15m window
+LIMITLESS="${LIMITLESS-${SAVED_LIMITLESS:-btc}}"  # Limitless 15m recorder + dry-run executor
 STAKE="${STAKE:-${SAVED_STAKE:-10}}"
 # Sizing model: flat = same $STAKE every trade (measurement default). kelly /
 # confidence scale the stake with the edge — the fix for "high winrate, thin
@@ -231,6 +232,10 @@ done
 M15="$(echo "$M15" | tr 'A-Z' 'a-z')"
 for A in $M15; do
   case "$A" in btc|eth|sol|xrp) ;; *) echo "unknown asset in M15: $A (allowed: btc eth sol xrp)"; exit 1 ;; esac
+done
+LIMITLESS="$(echo "$LIMITLESS" | tr 'A-Z' 'a-z')"
+for A in $LIMITLESS; do
+  case "$A" in btc) ;; *) echo "unknown asset in LIMITLESS: $A (only btc has an executor/recorder cell)"; exit 1 ;; esac
 done
 
 [ -x "$PY" ] || { echo "create the venv first: python3 -m venv .venv && .venv/bin/pip install requests"; exit 1; }
@@ -254,6 +259,10 @@ brec_up()     { ps ax -o command 2>/dev/null | grep "[b]tc_record.py"     | grep
 atrader_up()  { ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -- "--asset $1" | grep -v -- "--window 15m" | grep -q .; }
 arec_up()     { ps ax -o command 2>/dev/null | grep "[b]tc_record.py"     | grep -q -- "--asset $1"; }
 m15trader_up(){ ps ax -o command 2>/dev/null | grep "[b]tc_live_paper.py" | grep -- "--window 15m" | grep -q -- "--asset $1"; }
+# btc matches launches that omitted --asset (it is the default) — a second
+# recorder appending to the same log would double every sample.
+lrec_up()     { if [ "$1" = "btc" ]; then ps ax -o command 2>/dev/null | grep "[b]tc_record.py" | grep -- "--venue limitless" | grep -vE -- "--asset (eth|sol|xrp)" | grep -q .; else ps ax -o command 2>/dev/null | grep "[b]tc_record.py" | grep -- "--venue limitless" | grep -q -- "--asset $1"; fi; }
+lexec_up()    { ps ax -o command 2>/dev/null | grep -q "[b]tc_limitless_exec.py"; }
 
 # Extra trader logs -> dashboard merge flags (string, not array: macOS bash 3.2
 # chokes on empty-array expansion under set -u; paths contain no spaces).
@@ -265,6 +274,7 @@ case "${1:-start}" in
   stop)
     trader_up   && pkill -f "btc_live_paper.py" && echo "stopped the paper trader(s)" || echo "trader not running"
     recorder_up && pkill -f "btc_record.py"     && echo "stopped the recorder(s)"     || echo "recorder not running"
+    pkill -f "btc_limitless_exec.py" 2>/dev/null && echo "stopped the limitless executor" || true
     exit 0 ;;
 
   newrun)
@@ -274,6 +284,7 @@ case "${1:-start}" in
     #   .venv/bin/python scripts/btc_entry_timing.py --log out/trajectory-<ts>.jsonl --crossing
     pkill -f "btc_live_paper.py" 2>/dev/null || true
     pkill -f "btc_record.py" 2>/dev/null || true
+    pkill -f "btc_limitless_exec.py" 2>/dev/null || true
     sleep 1
     TS="$(date +%Y%m%d-%H%M%S)"
     [ -f "$TLOG" ] && mv "$TLOG" "out/live-$TS.jsonl" && echo "archived trader log   -> out/live-$TS.jsonl"
@@ -285,6 +296,8 @@ case "${1:-start}" in
     for A in btc eth sol xrp; do
       [ -f "out/live-$A-15m.jsonl" ] && mv "out/live-$A-15m.jsonl" "out/live-$A-15m-$TS.jsonl" && echo "archived $A 15m trader log -> out/live-$A-15m-$TS.jsonl"
     done
+    [ -f out/live-btc-limitless-15m.jsonl ] && mv out/live-btc-limitless-15m.jsonl "out/live-btc-limitless-15m-$TS.jsonl" && echo "archived limitless exec log -> out/live-btc-limitless-15m-$TS.jsonl"
+    [ -f out/trajectory-limitless-btc-15m.jsonl ] && mv out/trajectory-limitless-btc-15m.jsonl "out/trajectory-limitless-btc-15m-$TS.jsonl" && echo "archived limitless recorder log -> out/trajectory-limitless-btc-15m-$TS.jsonl"
     echo "starting a fresh run..."
     exec "$0" start ;;
 
@@ -593,6 +606,7 @@ mkdir -p out
   done
   echo "SAVED_ASSETS=\"$ASSETS\""
   echo "SAVED_M15=\"$M15\""
+  echo "SAVED_LIMITLESS=\"$LIMITLESS\""
   echo "SAVED_STAKE=$STAKE"
   echo "SAVED_SIZING=$SIZING"
   echo "SAVED_STAKE_PCT=$STAKE_PCT"
@@ -710,6 +724,31 @@ for A in $M15; do
     else
       echo "started $AU 15m paper trader (pid $!)  own \$${BANKROLL} account, conf >= ${AF}, lead ${ALO15}-${AHI15}s ask <= ${ACAP} (x3 for 900s rounds)${ADMS}"
     fi
+  fi
+done
+
+# --- Limitless (real-money venue, Base chain): recorder + DRY-RUN executor ---
+# LIMITLESS=btc (default) keeps a 15m book recorder and the executor's dry-run
+# rehearsal alive across restarts; LIMITLESS="" disables both. The executor
+# stays dry until it is launched by hand with --live + LIMITLESS_LIVE=1 +
+# wallet/HMAC creds in .env — lab.sh NEVER arms real orders.
+for A in $LIMITLESS; do
+  AU="$(echo "$A" | tr 'a-z' 'A-Z')"
+  if lrec_up "$A"; then
+    echo "$AU limitless recorder already running"
+  else
+    nohup "$PY" scripts/btc_record.py --venue limitless --asset "$A" --window 15m \
+      --provider binance --poll 5 --log "out/trajectory-limitless-$A-15m.jsonl" \
+      >> "out/record-limitless-$A-nohup.log" 2>&1 &
+    echo "started $AU limitless 15m recorder (pid $!) -> out/trajectory-limitless-$A-15m.jsonl"
+  fi
+  if lexec_up; then
+    echo "limitless executor already running"
+  else
+    nohup "$PY" scripts/btc_limitless_exec.py \
+      --log "out/live-btc-limitless-15m.jsonl" --quiet \
+      >> "out/nohup-limitless-exec.log" 2>&1 &
+    echo "started limitless BTC15 DRY-RUN executor (pid $!) -> out/live-btc-limitless-15m.jsonl (no real orders; europe sessions)"
   fi
 done
 

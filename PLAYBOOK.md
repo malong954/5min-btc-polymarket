@@ -135,6 +135,24 @@ strategy than the one being run.
 - **Limitless maker venue.** The structural escape from the taker overround +
   label noise (venue-published Chainlink settle, maker rebates flip the fee
   sign). Feed built + tested (`scripts/btc_limitless.py`), not wired to trade.
+- **Limitless BTC15 edge transfer (2026-08-03, gathering).** First recorder
+  sync landed: 3 rounds only (recorder started 00:25Z) — need ~2-3 days
+  (~200 resolved rounds) before grading the BTC15 rule on Limitless books.
+  First book-quality read (n=308 samples) is GOOD: decision-window (45-180s
+  left, x3 for 15m) vig median 2.8c / max 8.4c — Polymarket-comparable — and
+  min-side depth >=15 shares in ~87% of samples. The scary spreads (p90 up to
+  70c) all live >280s before close, which the rule never touches.
+- **Limitless executor built, in dry-run (2026-08-03).** `scripts/
+  btc_limitless_exec.py`: paper engine decides (same BTC15 europe cell),
+  ExecGuard bounds it ($5/trade cap, $15 UTC-day kill, $10 open-exposure cap,
+  one order/round, thin-book + slip refusals), orders go FAK via the official
+  SDK (EIP-712 — never hand-rolled). Fee 0.07*p*(1-p)/share charged on every
+  logged fill. DRY-RUN unless --live + LIMITLESS_LIVE=1 + wallet/HMAC creds
+  (fail-closed, tested). lab.sh auto-starts recorder + dry-run executor
+  (LIMITLESS=btc default; lab.sh never arms live). SDK size gotcha, verified
+  in its builder: `size` is SHARES, not USDC, despite the docstring.
+  Before arming: rotate the burned API token, fund $100 USDC + ETH gas on
+  Base, confirm the 0.07 fee rate on the first real ticket.
 
 ---
 
