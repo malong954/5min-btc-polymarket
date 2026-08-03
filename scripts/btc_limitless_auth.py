@@ -18,8 +18,9 @@ Credentials come from the environment or .env — never arguments, never the rep
     LIMITLESS_API_KEY      (the token id shown as "API Key" in the UI)
     LIMITLESS_API_SECRET   (the base64 "Secret", shown once at creation)
 
-Read-only by default. Placing orders needs an explicit call to place_order();
-nothing in this module trades on import or on a plain run.
+READ-ONLY module: it cannot place an order at all. Orders require EIP-712
+wallet signing on top of this HMAC auth (see the note by the helpers), which the
+official SDK handles; the executor uses that for placement and this for reads.
 
     python3 scripts/btc_limitless_auth.py            # auth check + balances
 """
@@ -113,35 +114,49 @@ def request(method: str, path: str, params: Optional[dict] = None,
         return status, raw
 
 
-# ---- read-only helpers ------------------------------------------------------
+# ---- read-only helpers (paths taken from the SDK, not guessed) --------------
 def get_positions() -> tuple[int, Any]:
     return request("GET", "/portfolio/positions")
 
 
-def get_balance() -> tuple[int, Any]:
-    return request("GET", "/portfolio/balance")
+def get_profile() -> tuple[int, Any]:
+    """Account profile — also carries the user id an order payload needs."""
+    return request("GET", "/profiles/me")
 
 
-def get_orders(market_slug: Optional[str] = None) -> tuple[int, Any]:
-    return request("GET", "/orders", params={"market": market_slug} if market_slug else None)
+def get_history() -> tuple[int, Any]:
+    return request("GET", "/portfolio/history")
 
 
-def place_order(token_id: str, price: float, size: float, side: str,
-                market_slug: str, order_type: str = "GTC") -> tuple[int, Any]:
-    """REAL ORDER. Never called by this module's __main__; the executor calls it
-    explicitly after its own risk checks."""
-    return request("POST", "/orders", payload={
-        "tokenId": str(token_id), "price": price, "size": size,
-        "side": side.upper(), "orderType": order_type, "marketSlug": market_slug,
-    })
+def get_orderbook(market_slug: str) -> tuple[int, Any]:
+    return request("GET", f"/markets/{market_slug}/orderbook")
+
+
+def cancel_order(order_id: str) -> tuple[int, Any]:
+    return request("DELETE", f"/orders/{order_id}")
+
+
+def cancel_all(market_slug: str) -> tuple[int, Any]:
+    return request("DELETE", f"/orders/all/{market_slug}")
+
+
+# ---- ORDER PLACEMENT: deliberately not implemented here ---------------------
+# POST /orders does NOT accept a plain {price,size,side} body. The SDK builds an
+# unsigned order (salt, maker/taker amounts, expiration, venue config), signs it
+# EIP-712 with the WALLET key, and posts {order: <signed>, ownerId, orderType,
+# marketSlug}. HMAC authenticates the request; the signature authorises the
+# trade. Hand-rolling EIP-712 order construction for money-touching code would
+# be reckless when limitless-sdk already does it and is maintained by the venue,
+# so the executor imports the SDK for placement and uses THIS module (stdlib,
+# no deps) for reads. See scripts/btc_limitless_exec.py.
 
 
 def main() -> int:
     key, _ = load_creds()
     print(f"Limitless auth check — key ...{key[-4:]} (secret never printed)\n")
     ok = False
-    for label, fn in (("positions", get_positions), ("balance", get_balance),
-                      ("open orders", get_orders)):
+    for label, fn in (("positions", get_positions), ("profile", get_profile),
+                      ("history", get_history)):
         st, data = fn()
         body = json.dumps(data)[:220] if not isinstance(data, str) else data[:220]
         print(f"  {label:<12} -> {st}  {body}")
