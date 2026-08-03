@@ -37,6 +37,12 @@ def bucket_5m(ts: int) -> int:
 
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Record Polymarket price + BTC move + indicator trajectory per 5m round")
+    ap.add_argument("--venue", default="polymarket", choices=["polymarket", "limitless"],
+                    help="Which exchange's books/resolutions to record. limitless = Base-chain "
+                         "oracle-settled up/down markets (btc_limitless feed); events keep the "
+                         "same shapes (sample/result/result_pm) so every analyzer works unchanged")
+    ap.add_argument("--window", default="5m", choices=["5m", "15m"],
+                    help="Round interval. 15m scales the sampling window x3 unless overridden")
     ap.add_argument("--asset", default="btc", choices=["btc", "eth", "sol", "xrp"],
                     help="Which Polymarket 5m Up/Down market to record (sets slug + spot symbol)")
     ap.add_argument("--provider", default="binance", choices=["binance", "cryptocompare", "coinbase", "kraken"])
@@ -53,7 +59,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     logf = open(args.log, "a")
 
     from btc_price_feeds import build_feeds
-    from btc_polymarket import current_prices, current_slug, resolved_outcome
+    if args.venue == "limitless":
+        import btc_limitless as _venue
+        current_prices = lambda now, asset=args.asset: _venue.current_prices(
+            now, asset=asset, window=args.window)
+        current_slug = lambda rs, asset=args.asset: _venue.current_slug(rs, asset, args.window)
+        resolved_outcome = _venue.resolved_outcome
+    else:
+        from btc_polymarket import current_prices, current_slug, resolved_outcome
+    slot = 300 if args.window == "5m" else 900
+    if args.window == "15m":
+        # Window-shaped defaults were tuned on 5m rounds; scale unless overridden.
+        if args.max_left == 280.0:
+            args.max_left = 840.0
+        if args.min_left == 30.0:
+            args.min_left = 90.0
     from btc_backtest import Bar, DEFAULT_WEIGHTS, MTFModel
     from btc_history import fetch_history
 
@@ -171,8 +191,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         while args.max_steps is None or n < args.max_steps:
             try:
                 now = time.time()
-                r = bucket_5m(int(now))
-                sec_left = (r + 300) - now
+                r = int(now) - (int(now) % slot)
+                sec_left = (r + slot) - now
                 if r != cur_round:
                     # Round rolled over -> record the previous round's outcome.
                     if cur_round is not None and round_open is not None and last_spot is not None:
@@ -245,7 +265,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     p = close_pending[rs]
                     if now < p["next"]:
                         continue
-                    c = cl_open(rs + 300)
+                    c = cl_open(rs + slot)
                     if c is not None:
                         o = p["open"]
                         emit({"type": "result", "round": rs, "open": rnd(o),
@@ -326,7 +346,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             # measured: 5s-stale closes flipped labels vs the official settle
             # on fast finishes (half of all disagreements were reference errors).
             now2 = time.time()
-            left2 = (bucket_5m(int(now2)) + 300) - now2
+            left2 = ((int(now2) - int(now2) % slot) + slot) - now2
             time.sleep(1.0 if left2 <= 20 else args.poll)
     except KeyboardInterrupt:
         print("\n# stopped", file=sys.stderr)
