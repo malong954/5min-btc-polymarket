@@ -14,8 +14,58 @@ Rules of evidence used here:
   tag in `scripts/btc_deep_study.py`). One-segment rows are noise until they
   replicate forward.
 
-Last updated: 2026-07-24, after the first live-config segment
-(BTC 5m +$41.50 / +6.4% per share on 46 entries).
+Last updated: 2026-08-05, after THE DECAY (see section below) — read that
+section before trusting any older per-cell EV number in this file.
+
+---
+
+## THE DECAY — the taker edge died in the forward sample (2026-08-05)
+
+The single most important measurement the lab has produced. Weekly EV/share,
+BTC15, all sessions, official labels:
+
+    wk 07-13   n=121   -0.5c
+    wk 07-20   n=243   +4.3c   <- the golden week: built the bankroll AND the conviction
+    wk 07-27   n=230   -0.9c
+    wk 08-03   n= 98   -2.3c
+
+Every rule refinement (barbell band, session gate, ask-fall veto) was mined
+from data dominated by wk 07-20. The forward test of the deployed barbell
+(post-Jul-27, n=328): **every price band ≤ +1.2c gross — negative net of fee.**
+The 0.80+ leg fell from 92% win @ 0.86 (pre) to 80% @ 0.82 (post) — breakeven
+is 82%. The <0.60 leg's +27.7c was n=25 mirage; forward it is +1.2c gross.
+
+**Cross-venue confirmation (kills the "venue quirk" excuse):** the same rule
+graded on Limitless's own books + Chainlink settles over Aug 3-5 (n=38 across
+253 recorded rounds): -12.2c/share net. Both venues, same window, same sign.
+
+**Maker path, first read (offline shadow, 253 Limitless rounds): NEGATIVE.**
+Joining the leading side's best bid at the same decision point: 54% fill rate,
+65% win rate on fills, **-13c/share** (rebate would add back <1c). Mechanism is
+textbook adverse selection — passive bids fill disproportionately when the book
+is turning against the side. Crude fill model, n=54; a real market-making book
+(two-sided, earlier, dynamic) is a different strategy — but the naive
+"convert the taker signal to a resting bid" version is dead.
+
+**What the Aug-4 drawdown actually was** ($183 -> $90): NOT a rule-breaking
+streak. Tue+Wed 0.80-0.85 entries went 40/49 = 81.6% — exactly breakeven at the
+0.82 avg ask — while tiered 10% sizing ($14-18 stakes at the balance peak)
+converted fair-priced variance into -$70. Same trade-weighted-vs-dollar-weighted
+divergence as every prior round-trip: the sizing bets biggest right before the
+mean reversion.
+
+**Standing verdict until the weekly EV curve says otherwise:**
+1. DO NOT arm --live. No real deposit. The dry-run executor over the same two
+   days: 7 orders, -$4.91 net (rails held: $5 cap, stake floor) vs the
+   unguarded paper account's -$70. The pipeline did exactly what it was built
+   to do: it caught the edge dying BEFORE real money was at risk.
+2. Paper traders + recorders keep running as SENSORS (cheap, and the weekly EV
+   series is now the lab's primary instrument). Executor stays in dry-run.
+3. Re-arm discussion requires: two consecutive weeks of positive NET weekly EV
+   on the cell being armed, confirmed on both the Polymarket paper stream and
+   the Limitless transfer grade.
+4. Do not mine new gates from the pre-decay pooled history — any cell built on
+   data containing wk 07-20 inherits the mirage.
 
 ---
 
