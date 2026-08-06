@@ -105,8 +105,18 @@ few false positives; this one is favored because the region is coherent
 every session and conf band. Still: paper-forward confirmation required
 before any live talk (the standing two-positive-net-weeks bar applies).
 
+**Risk shape (Felipe's challenge, answered 2026-08-06):** "risking $5 to win
+$0.85" is LOWER-drawdown than the old cheap cells, not higher — losses are
+proportionally rarer. Monte Carlo (100 trades, flat $5): median max drawdown
+$15 / p99 $42 vs $27 / $73 for a 70%-at-0.65 cheap cell. What killed the old
+high-ask disaster was zero winrate margin at 0.99, not the payoff shape. But
+the concern IS real above 0.90: the 0.90-0.93 band's margin is +0.5 points
+(noise, fails both-halves) — so the cap is 0.90, not 0.97. Kept bands:
+0.80-0.85 (+3.8 margin) and 0.85-0.90 (+2.7), n=309, return per dollar
+staked +3-5%/trade, worst payoff a win >= ~17% of stake.
+
 **Deployed measurement config (2026-08-06), gates OFF for a pure read:**
-    RULE_BTC=lead CONF_BTC=0 LEAD_CAP_BTC=0.97 SKIP_BAND_BTC=0.0:0.799 \
+    RULE_BTC=lead CONF_BTC=0 LEAD_CAP_BTC=0.90 SKIP_BAND_BTC=0.0:0.799 \
     COOLDOWN_BTC=0 ASK_FALL_BTC=0 DIV_MODE_BTC=off SIZING=flat STAKE=5 \
     scripts/lab.sh newrun
 
