@@ -69,6 +69,49 @@ mean reversion.
 
 ---
 
+## THE CONFIRMATION CELL — the surviving region (found 2026-08-06)
+
+Full forward-only sweep (post-Jul-27 BTC5 recorder, official labels, ONE
+decision per round, n=1,685 rounds, ~35 cells tested, split-half bar):
+baseline dead (+0.3c/-0.4c), every cheap-ask cell dead — but the HIGH-ask
+region passes both halves in three adjacent bands (0.80-0.85, 0.85-0.90,
+0.90+), which is a coherent region, not a lucky cell.
+
+**The cell: BTC 5m, lead side, 180-240s left, |move| >= $10 (auto-scaled),
+ask 0.80-0.97.** Forward sample n=385:
+  - 88.6% win at 0.854 avg ask = **+3.2c/share gross**
+  - positive 10 of 11 days (only 07-28 negative) — NOT one hot week
+  - positive in ALL THREE sessions (+2.9/+3.5/+3.1 asia/europe/us)
+  - positive in EVERY confidence band (+6.7/+1.8/+3.7 low/mid/high) — the
+    indicator is not the source; the price region + decisive move is
+  - liquidity real: median 201 shares at the ask, only 4% dust (<$10)
+  - slip haircut measured on 690 actual paper requotes at asks>=0.78:
+    mean -0.01c, only 7% pay worse — realistic net ~= +3c/share
+  - |move|>=40 gate WEAKENS it (+1.2c) — do not add move filters
+
+**The embarrassing part:** this region was positive in the pre-period too
+(+6.4c). It was never traded on BTC5 because the lead cap was 0.72 — the cap
+kept us in the cheap region (which died) and out of the one region that
+survived. The edge didn't vanish; our cap was pointed at the wrong side of
+the book.
+
+**Cross-venue check: venue-specific.** The same cell on Limitless 15m books
+is -10c/share in BOTH halves (n=221) — their book jumps to fair/overpriced on
+confirmations. This cell is Polymarket-5m only. Do NOT transfer it.
+
+**Multiple-comparisons honesty:** ~35 cells at a both-halves bar expects a
+few false positives; this one is favored because the region is coherent
+(3 adjacent bands), the daily series is stable (10/11 days), and it holds in
+every session and conf band. Still: paper-forward confirmation required
+before any live talk (the standing two-positive-net-weeks bar applies).
+
+**Deployed measurement config (2026-08-06), gates OFF for a pure read:**
+    RULE_BTC=lead CONF_BTC=0 LEAD_CAP_BTC=0.97 SKIP_BAND_BTC=0.0:0.799 \
+    COOLDOWN_BTC=0 ASK_FALL_BTC=0 DIV_MODE_BTC=off SIZING=flat STAKE=5 \
+    scripts/lab.sh newrun
+
+---
+
 ## WORKS — validated, keep
 
 | Technique | Evidence | Where |
