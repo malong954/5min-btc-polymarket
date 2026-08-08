@@ -115,10 +115,19 @@ the concern IS real above 0.90: the 0.90-0.93 band's margin is +0.5 points
 0.80-0.85 (+3.8 margin) and 0.85-0.90 (+2.7), n=309, return per dollar
 staked +3-5%/trade, worst payoff a win >= ~17% of stake.
 
-**Deployed measurement config (2026-08-06), gates OFF for a pure read:**
-    RULE_BTC=lead CONF_BTC=0 LEAD_CAP_BTC=0.90 SKIP_BAND_BTC=0.0:0.799 \
+**Deployed measurement config (corrected 2026-08-08 — the 08-06 launch kept
+the stale asia/europe session gate and the 0.97 cap; the cell validated in
+ALL sessions, so SESSIONS must be explicitly cleared):**
+    SESSIONS="" RULE_BTC=lead CONF_BTC=0 LEAD_CAP_BTC=0.90 SKIP_BAND_BTC=0.0:0.799 \
     COOLDOWN_BTC=0 ASK_FALL_BTC=0 DIV_MODE_BTC=off SIZING=flat STAKE=5 \
     scripts/lab.sh newrun
+
+**Income expectations at measurement stakes (answered 2026-08-08, "made $10
+in 38h is trash"):** $/day = stake x ~4%/trade x ~24 trades/day. $5 flat IS
+~$4-5/day by construction — the segment's product is the validation, not the
+income. First 25 settles: 84% at 0.824, +1.6c/share — on-pace vs the +3.2c
+target within n=25 noise. Stake scales only AFTER the two-positive-weeks bar:
+$25 -> ~$22/day, $50 -> ~$45/day (median book depth $170 supports it).
 
 ---
 
