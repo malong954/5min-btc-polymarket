@@ -115,12 +115,19 @@ the concern IS real above 0.90: the 0.90-0.93 band's margin is +0.5 points
 0.80-0.85 (+3.8 margin) and 0.85-0.90 (+2.7), n=309, return per dollar
 staked +3-5%/trade, worst payoff a win >= ~17% of stake.
 
-**Deployed measurement config (corrected 2026-08-08 — the 08-06 launch kept
-the stale asia/europe session gate and the 0.97 cap; the cell validated in
-ALL sessions, so SESSIONS must be explicitly cleared):**
-    SESSIONS="" RULE_BTC=lead CONF_BTC=0 LEAD_CAP_BTC=0.90 SKIP_BAND_BTC=0.0:0.799 \
-    COOLDOWN_BTC=0 ASK_FALL_BTC=0 DIV_MODE_BTC=off SIZING=flat STAKE=5 \
-    scripts/lab.sh newrun
+**Deployed measurement config (corrected AGAIN 2026-08-10 — lab.sh persists
+every gate in lab.conf, so a clean-cell launch must clear EVERY gate
+explicitly. The 08-06 launch kept the stale session gate; the 08-08 launch
+kept the stale REGIME gate, which skipped 78 rounds in 2 days as flat_regime
+with an 87% shadow winrate — the volume collapse Felipe caught on the
+dashboard. Stake raised to flat $25: paper-only, flat = still clean, makes
+the daily number meaningful (~$15-25/day at target edge and volume):**
+    SESSIONS="" REGIME=0 RULE_BTC=lead CONF_BTC=0 LEAD_CAP_BTC=0.90 \
+    SKIP_BAND_BTC=0.0:0.799 COOLDOWN_BTC=0 ASK_FALL_BTC=0 DIV_MODE_BTC=off \
+    SIZING=flat STAKE=25 scripts/lab.sh newrun
+LESSON: before any measurement launch, diff the intended config against the
+config EVENT the trader emits (first line of the log) — not against the
+command you typed. lab.conf remembers what you forgot.
 
 **Income expectations at measurement stakes (answered 2026-08-08, "made $10
 in 38h is trash"):** $/day = stake x ~4%/trade x ~24 trades/day. $5 flat IS
