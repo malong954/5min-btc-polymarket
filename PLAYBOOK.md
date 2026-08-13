@@ -129,6 +129,15 @@ LESSON: before any measurement launch, diff the intended config against the
 config EVENT the trader emits (first line of the log) — not against the
 command you typed. lab.conf remembers what you forgot.
 
+**Amendment 2026-08-13 — US hours cut, clock restarted.** First 72h at full
+sessions (n=211): asia +2.3c (85%), europe +5.6c (88%), US **-8.7c** (74%,
+-$183) — all of it in 16-20Z (-19c/share, n=36), the US equity open hours.
+The sweep's US +3.1c was its false positive; the 972-trade lifetime study
+(US = informed flow) plus live forward data outvote it 2-1. Config amended to
+SESSIONS="asia,europe" (same command otherwise); the two-week validation
+clock restarts at the amendment. Asia+europe live blended: +4.1c/share over
+142 trades — on target.
+
 **Income expectations at measurement stakes (answered 2026-08-08, "made $10
 in 38h is trash"):** $/day = stake x ~4%/trade x ~24 trades/day. $5 flat IS
 ~$4-5/day by construction — the segment's product is the validation, not the
