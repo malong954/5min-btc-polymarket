@@ -129,6 +129,20 @@ LESSON: before any measurement launch, diff the intended config against the
 config EVENT the trader emits (first line of the log) — not against the
 command you typed. lab.conf remembers what you forgot.
 
+**THE MEAN-REVERSION TRAP (2026-08-14) — the most expensive lesson in this
+file.** Daily EV of the fixed cell across 35 days of recorder history
+alternates sign almost perfectly (map: .+-+-+-+.+-++-.++-+++++--++-.+-.+-+).
+Lag-1 autocorrelation: **-0.28** — a good day predicts a WORSE next day.
+Trading only after a positive trailing week earns +2.1c vs +3.0c always-on,
+and the sat-out days averaged +6.8c. CONSEQUENCES, now hard rules:
+1. NO config/gate/session/stake changes on less than 14 days of segment
+   data. Every reactive amendment this month sold the bottom of a wave.
+2. The always-on fixed cell averaged +3.0c/share over the full 35 days —
+   the edge is real; only the reaction function was losing.
+3. Bankroll rule: stake <= bankroll/20. The 08-13 insolvency ($100 -> $0 at
+   $25 stakes) was ordinary variance hitting an undersized bankroll, not
+   edge failure ($25 stakes need >= $500 behind them).
+
 **Amendment 2026-08-13 — US hours cut, clock restarted.** First 72h at full
 sessions (n=211): asia +2.3c (85%), europe +5.6c (88%), US **-8.7c** (74%,
 -$183) — all of it in 16-20Z (-19c/share, n=36), the US equity open hours.
