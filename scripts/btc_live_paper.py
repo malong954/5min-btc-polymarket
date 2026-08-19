@@ -139,7 +139,7 @@ class LivePaperEngine:
         lead_min_move: float = 10.0,
         lead_min_conf: float = 0.0,
         lead_persist: float = 5.0,
-        official_wait: float = 150.0,
+        official_wait: float = 600.0,
         asset: str = "BTC",
         window: str = "5m",
         regime_min_move: float = 0.0,
@@ -230,7 +230,12 @@ class LivePaperEngine:
         # Conviction floor for the lead rule (the combo candidate): 0 = off.
         self.lead_min_conf = lead_min_conf
         # How long past round close to wait for Polymarket's official
-        # resolution before falling back to the spot label.
+        # resolution before falling back to the spot label. Measured
+        # 2026-08-19: officials often post MINUTES after close; a 150s wait +
+        # 6 fetch tries graded 83/135 settles off the chainlink fallback,
+        # which mislabeled 10 of them (7 real wins graded as losses, -4.7c of
+        # phantom EV). 600s + persistent retries keeps the official label on
+        # nearly every round; chainlink remains the late fallback.
         self.official_wait = official_wait
         # 'lead' rule — the measured candidate strategy: buy whichever side BTC
         # already leads, inside the sweet-spot window (seconds-left hi..lo),
@@ -1090,10 +1095,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # hold (or shadow) — the spot label breaks ties the wrong way.
                 if use_pm:
                     from btc_polymarket import current_slug, resolved_outcome
+                    # Officials can post minutes late; 6 tries burned out in
+                    # ~10s of eligibility and pushed 60%+ of settles onto the
+                    # chainlink fallback (11% label error). Keep trying across
+                    # the whole official_wait window instead.
                     waiting = [rs for rs in list(engine.positions) + list(engine.shadows)
                                if rs not in engine.settled and rs not in engine.shadow_settled
                                and rs not in official and now >= rs + slot + 45
-                               and official_tries.get(rs, 0) < 6]
+                               and official_tries.get(rs, 0) < 200]
                     for rs in waiting[:2]:   # bounded per poll
                         try:
                             oc = resolved_outcome(current_slug(rs, asset, args.window))

@@ -143,6 +143,19 @@ and the sat-out days averaged +6.8c. CONSEQUENCES, now hard rules:
    $25 stakes) was ordinary variance hitting an undersized bankroll, not
    edge failure ($25 stakes need >= $500 behind them).
 
+**THE GRADING BUG (2026-08-19) — most of "the horrible week" wasn't real.**
+The no-touch segment showed -6.6c/share over 135 trades (3σ under target,
+$500 -> $237). Diagnosis: the SAME cell simulated on recorder books over the
+SAME days was +1.1c — and the gap traced to grading, not trading. Officials
+often post minutes after close; the live engine's 150s wait + 6 fetch tries
+(exhausted in ~10s) pushed 83/135 settles onto the chainlink-candle fallback,
+which mislabeled 10 rounds (7 real wins graded losses). REGRADED with
+official labels: **-1.9c/share, 80.8% win, true balance ~$364** — a flat
+week, not a collapse. Fix: official_wait 150->600s, fetch tries 6->200.
+Every settle_source=chainlink row in past segment logs is suspect; regrade
+from recorder result_pm before trusting any of them. The no-touch clock
+restarts on the fixed engine.
+
 **Amendment 2026-08-13 — US hours cut, clock restarted.** First 72h at full
 sessions (n=211): asia +2.3c (85%), europe +5.6c (88%), US **-8.7c** (74%,
 -$183) — all of it in 16-20Z (-19c/share, n=36), the US equity open hours.
