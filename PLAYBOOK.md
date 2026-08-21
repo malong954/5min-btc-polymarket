@@ -143,6 +143,17 @@ and the sat-out days averaged +6.8c. CONSEQUENCES, now hard rules:
    $25 stakes) was ordinary variance hitting an undersized bankroll, not
    edge failure ($25 stakes need >= $500 behind them).
 
+**PRE-REGISTERED day-14 amendment candidate (logged 2026-08-21, day 2 — NOT
+deployed, per the no-touch rule):** counter-trend veto — skip cell entries
+whose side opposes a >$50 trailing-1h drift. Evidence at registration: live
+segment's entire BTC5 loss sits on DOWN entries during the bull tape (-$114
+on DOWN, +$8 on UP); 35-day history splits aligned +2.8c (BOTH+) / against
++0.7c (recent half -0.8c) / flat-hour +1.9c (BOTH+), n=917. Judge on the
+FULL 14-day segment at the window's end; deploy only if the segment's
+counter-trend class is negative and the aligned class holds.
+Settle-source check 2026-08-21: 110/110 settles graded 'official' on the
+fixed engine — the scorekeeper is clean.
+
 **THE GRADING BUG (2026-08-19) — most of "the horrible week" wasn't real.**
 The no-touch segment showed -6.6c/share over 135 trades (3σ under target,
 $500 -> $237). Diagnosis: the SAME cell simulated on recorder books over the
