@@ -143,6 +143,16 @@ and the sat-out days averaged +6.8c. CONSEQUENCES, now hard rules:
    $25 stakes) was ordinary variance hitting an undersized bankroll, not
    edge failure ($25 stakes need >= $500 behind them).
 
+**DAY-10 UPDATE (2026-08-29): the counter-trend veto FAILED its forward
+test — do not deploy, do not re-mine.** On the live segment: BTC5 against
+-1.5c vs aligned -0.2c (weakly right-signed), but BTC15 EXACTLY BACKWARDS
+(against +6.7c at 89.2%, aligned -6.3c). Opposite signs across books in the
+same window = noise wearing a story. Segment at day 10 (all 763 settles
+official-graded): BTC5 -0.3c ±1.7 (n=504, zero), BTC15 +1.4c ±2.4 (n=259).
+Day-14 bar, fixed in advance: a book earns a live conversation ONLY if
+full-segment EV - 2*se > 0. On trajectory, BTC5 will not clear; BTC15 needs
+a strong finish.
+
 **PRE-REGISTERED day-14 amendment candidate (logged 2026-08-21, day 2 — NOT
 deployed, per the no-touch rule):** counter-trend veto — skip cell entries
 whose side opposes a >$50 trailing-1h drift. Evidence at registration: live
