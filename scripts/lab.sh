@@ -159,10 +159,20 @@ band_args(){ B="$(skip_band_for "$1")"; [ -n "$B" ] && printf '%s' "--skip-band 
 # of these is set (measured need: BTC15 WINS after losses — +8.1c both halves —
 # so the after-loss cooldown must be 5m-only). COOLDOWN_<A>15=0 disables the
 # cooldown on the 15m book; SKIP_BAND_<A>15=none disables the band there.
+# LEAD_HI_<A>15 / LEAD_LO_<A>15 set the 15m lead window in ABSOLUTE seconds
+# (bypassing the x3 scaling of the 5m values); CONF_<A>15 sets the 15m
+# confidence floor alone — so a 5m book can be parked (CONF_<A>=1.01) while
+# its 15m sibling keeps trading (measured 2026-09-02: BTC15 late-window
+# entries <660s left ran +2.9c/share in the 14-day segment and +2.7c over
+# the 1,019-trade prior history, all four halves positive; early entries
+# negative in both).
 for AUV in BTC ETH SOL XRP; do
   eval "COOLDOWN_${AUV}15=\"\${COOLDOWN_${AUV}15-\${SAVED_COOLDOWN_${AUV}15:-}}\""
   eval "SKIP_BAND_${AUV}15=\"\${SKIP_BAND_${AUV}15-\${SAVED_SKIP_BAND_${AUV}15:-}}\""
   eval "ASK_FALL_${AUV}15=\"\${ASK_FALL_${AUV}15-\${SAVED_ASK_FALL_${AUV}15:-}}\""
+  eval "LEAD_HI_${AUV}15=\"\${LEAD_HI_${AUV}15-\${SAVED_LEAD_HI_${AUV}15:-}}\""
+  eval "LEAD_LO_${AUV}15=\"\${LEAD_LO_${AUV}15-\${SAVED_LEAD_LO_${AUV}15:-}}\""
+  eval "CONF_${AUV}15=\"\${CONF_${AUV}15-\${SAVED_CONF_${AUV}15:-}}\""
 done
 for DV in "$DIV_MODE_BTC" "$DIV_MODE_ETH" "$DIV_MODE_SOL" "$DIV_MODE_XRP"; do
   case "$DV" in off|boost|veto) ;; *) echo "invalid DIV_MODE: $DV (allowed: off boost veto)"; exit 1 ;; esac
@@ -600,6 +610,9 @@ mkdir -p out
     eval "echo \"SAVED_SKIP_BAND_${A}=\$SKIP_BAND_${A}\""
     eval "echo \"SAVED_COOLDOWN_${A}=\$COOLDOWN_${A}\""
     eval "echo \"SAVED_SKIP_BAND_${A}15=\$SKIP_BAND_${A}15\""
+    eval "echo \"SAVED_LEAD_HI_${A}15=\$LEAD_HI_${A}15\""
+    eval "echo \"SAVED_LEAD_LO_${A}15=\$LEAD_LO_${A}15\""
+    eval "echo \"SAVED_CONF_${A}15=\$CONF_${A}15\""
     eval "echo \"SAVED_COOLDOWN_${A}15=\$COOLDOWN_${A}15\""
     eval "echo \"SAVED_ASK_FALL_${A}=\$ASK_FALL_${A}\""
     eval "echo \"SAVED_ASK_FALL_${A}15=\$ASK_FALL_${A}15\""
@@ -703,6 +716,9 @@ for A in $M15; do
     ARULE="$(rule_for "$A")"; ATHR="$(thresh_for "$A")"
     AHI15="$(awk "BEGIN{print $(lead_hi_for "$A")*3}")"
     ALO15="$(awk "BEGIN{print $(lead_lo_for "$A")*3}")"
+    OVH="$(eval echo "\${LEAD_HI_${AU}15}")"; [ -n "$OVH" ] && AHI15="$OVH"
+    OVL="$(eval echo "\${LEAD_LO_${AU}15}")"; [ -n "$OVL" ] && ALO15="$OVL"
+    OVC="$(eval echo "\${CONF_${AU}15}")"; [ -n "$OVC" ] && AF="$OVC"
     M15CD="$(cooldown_for "$A")"; OV="$(eval echo "\${COOLDOWN_${AU}15}")"; [ -n "$OV" ] && M15CD="$OV"
     M15AF="$(ask_fall_for "$A")"; OVA="$(eval echo "\${ASK_FALL_${AU}15-}")"; [ -n "$OVA" ] && M15AF="$OVA"
     M15SB="$(skip_band_for "$A")"; OVB="$(eval echo "\${SKIP_BAND_${AU}15}")"

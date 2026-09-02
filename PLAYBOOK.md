@@ -143,6 +143,42 @@ and the sat-out days averaged +6.8c. CONSEQUENCES, now hard rules:
    $25 stakes) was ordinary variance hitting an undersized bankroll, not
    edge failure ($25 stakes need >= $500 behind them).
 
+**DAY-14 VERDICT (2026-09-02) — the clean segment is complete.** 14.2 days,
+1,023 settles, 100% official-graded, zero interruptions, zero config
+changes.
+  BTC5   n=673  81.6% @ 0.828  EV -1.2c ±1.5   EV-2se = -4.2c  FAIL  ($-254)
+  BTC15  n=350  84.0% @ 0.823  EV +1.7c ±2.0   EV-2se = -2.2c  FAIL  (+$177)
+By the pre-stated bar NEITHER book is statistically validated. BTC5 is
+parked (negative point estimate, second half -3.5c: the 5m confirmation
+cell is dead). BTC15 is ELECTED by Felipe as the continuing book: positive
+point estimate, +35% on the segment, second half +3.5c — "promising, not
+proven"; ~20% chance the true edge is <= 0. Live remains OFF.
+
+**Two structural cells survive FOUR independent half-samples (both halves
+of the segment AND both halves of the 1,019-trade prior history), with the
+complement negative in both datasets — the only "improvements" that earn
+deployment without a fresh test:**
+  1. LATE-WINDOW ENTRIES (armed with <660s left, i.e. the setup formed
+     DURING the window): segment +2.9c n=181 (+3.2/+2.6), prior +2.7c
+     n=530 (+1.1/+4.2). Early entries (>=660s): segment ~0, prior -1.5c.
+     Deployed as LEAD_HI_BTC15=660 (window 660-540s). Halves volume,
+     ~doubles EV/trade: same $/day, half the variance.
+  2. HOURS 12-16 UTC: segment +3.7c n=92, prior +2.5c n=231 — real but too
+     thin to run alone; noted for future stake concentration, not deployed.
+Rejected despite passing the segment: side UP (prior h2 +0.6c), conf>=0.5
+(prior h2 negative), weekday (prior +0.4c, noise).
+
+**Elected config (2026-09-02):**
+    SESSIONS="asia europe" REGIME=0 RULE_BTC=lead CONF_BTC=1.01 CONF_BTC15=0 \
+    LEAD_HI_BTC15=660 LEAD_CAP_BTC=0.90 SKIP_BAND_BTC=0.0:0.799 \
+    COOLDOWN_BTC=0 ASK_FALL_BTC=0 DIV_MODE_BTC=off SIZING=flat STAKE=25 \
+    BANKROLL=500 scripts/lab.sh newrun
+(CONF_BTC=1.01 parks the 5m book as a shadow sensor; CONF_BTC15=0 keeps the
+15m book live; LEAD_HI_BTC15 is the new absolute-seconds 15m override.)
+BTC15 risk profile @ $25 flat, 14 days: max drawdown $133, daily P&L
+mean +$12 sd $45, worst day -$85 — size real money to survive 3 worst days
+in a row (>= $300 behind $25 stakes; $500 is comfortable).
+
 **DAY-10 UPDATE (2026-08-29): the counter-trend veto FAILED its forward
 test — do not deploy, do not re-mine.** On the live segment: BTC5 against
 -1.5c vs aligned -0.2c (weakly right-signed), but BTC15 EXACTLY BACKWARDS
