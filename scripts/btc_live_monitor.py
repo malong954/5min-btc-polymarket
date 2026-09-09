@@ -280,6 +280,10 @@ def fold_event(state: dict[str, Any], ev: dict[str, Any]) -> dict[str, Any]:
             state["edge_margin"] = ev["edge_margin"]
         if ev.get("stake_usd") is not None:
             state["stake_usd"] = ev["stake_usd"]
+            # The header shows last_stake, which otherwise keeps its $10
+            # default until the FIRST entry — a fresh $25 launch read "$10.00
+            # /trade" for hours (2026-09-09). The config line is the truth.
+            state["last_stake"] = float(ev["stake_usd"])
         if ev.get("lead_min_conf") is not None:
             state["lead_min_conf"] = ev["lead_min_conf"]
         if ev.get("lead_max_price") is not None:
