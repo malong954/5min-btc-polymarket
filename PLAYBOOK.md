@@ -143,6 +143,18 @@ and the sat-out days averaged +6.8c. CONSEQUENCES, now hard rules:
    $25 stakes) was ordinary variance hitting an undersized bankroll, not
    edge failure ($25 stakes need >= $500 behind them).
 
+**STALE-LAUNCH #3 (2026-09-02 -> 09-09): six days of zero entries.** The
+elected config was launched WITHOUT `git pull`, on the lab.sh from the
+commit before the CONF_BTC15/LEAD_HI_BTC15 overrides existed. The old
+script ignored both, so CONF_BTC=1.01 parked BTC5 AND BTC15 (emitted
+config: lead_min_conf=1.01, lead_hi=720). 2,579 rounds skipped
+no_lead_setup, 0 entries, 0 settles. Fix: lab.sh now has three preflights —
+(1) refuses to start when the checkout is behind origin (FORCE_STALE=1 to
+override), (2) prints the build hash + the override names it understands,
+(3) after starting, reads each trader's EMITTED config line back and shouts
+PARKED when a conf floor > 1. Rule: the launch isn't done until the
+readback matches the intent.
+
 **DAY-14 VERDICT (2026-09-02) — the clean segment is complete.** 14.2 days,
 1,023 settles, 100% official-graded, zero interruptions, zero config
 changes.

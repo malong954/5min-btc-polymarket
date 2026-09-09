@@ -580,6 +580,25 @@ esac
 
 mkdir -p out
 
+# --- PREFLIGHT 1: stale code. Three launches have gone out with a config that
+# differed from the intent because the Mac was behind origin (stale session
+# gate, stale REGIME, and 2026-09-02: CONF_BTC15/LEAD_HI_BTC15 unknown to the
+# old script, which parked BOTH BTC books for six days). Best-effort fetch;
+# refuse to start if behind unless FORCE_STALE=1.
+BR_NOW="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+if git fetch --quiet origin "$BR_NOW" 2>/dev/null; then
+  BEHIND="$(git rev-list --count "HEAD..origin/$BR_NOW" 2>/dev/null || echo 0)"
+  if [ "${BEHIND:-0}" -gt 0 ] && [ "${FORCE_STALE:-0}" != "1" ]; then
+    echo "!! this checkout is $BEHIND commit(s) BEHIND origin/$BR_NOW — the config you"
+    echo "!! typed may reference settings this lab.sh doesn't know yet."
+    echo "!! run:  git pull   then re-run this command   (or FORCE_STALE=1 to override)"
+    exit 1
+  fi
+fi
+# --- PREFLIGHT 2: say which per-window overrides this build understands, so a
+# variable the script silently ignores is visible at a glance.
+echo "build $(git rev-parse --short HEAD 2>/dev/null || echo '?')  (lab.sh knows: CONF_<A>15 LEAD_HI_<A>15 LEAD_LO_<A>15 SKIP_BAND_<A>15 COOLDOWN_<A>15 ASK_FALL_<A>15)"
+
 # Persist the effective settings — a later plain `scripts/lab.sh` reuses them.
 {
   echo "SAVED_PROVIDER=$PROVIDER"
@@ -768,6 +787,32 @@ for A in $LIMITLESS; do
   fi
 done
 
+# --- PREFLIGHT 3: read back what each trader ACTUALLY emitted as its config
+# (the first line of its log) — the only source of truth. PARKED is shouted.
+sleep 4
+echo
+echo "---- emitted trader configs (verify these match your intent) ----"
+for LOGF in "$TLOG" out/live-btc-15m.jsonl; do
+  [ -f "$LOGF" ] || continue
+  "$PY" - "$LOGF" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+for line in open(path):
+    if '"config"' not in line:
+        continue
+    c = json.loads(line)
+    if c.get("type") != "config":
+        continue
+    conf = c.get("lead_min_conf")
+    parked = isinstance(conf, (int, float)) and conf > 1.0
+    tag = "  <<< PARKED (conf floor > 1: this book will never enter)" if parked else ""
+    print(f"  {path:<28} window={c.get('window')} rule={c.get('entry_rule')} conf>={conf} "
+          f"lead {c.get('lead_lo')}-{c.get('lead_hi')}s cap {c.get('lead_max_price')} "
+          f"band {c.get('skip_band')} sessions={c.get('sessions')} stake ${c.get('stake_usd')}{tag}")
+    break
+PYEOF
+done
+echo "------------------------------------------------------------------"
 echo
 echo "opening dashboard — Ctrl-C exits the dashboard; everything keeps running."
 echo "later:  scripts/lab.sh analyze   (full report)   scripts/lab.sh stop"
