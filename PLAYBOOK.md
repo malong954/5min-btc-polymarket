@@ -143,6 +143,27 @@ and the sat-out days averaged +6.8c. CONSEQUENCES, now hard rules:
    $25 stakes) was ordinary variance hitting an undersized bankroll, not
    edge failure ($25 stakes need >= $500 behind them).
 
+**GO-LIVE VERDICT ON LIMITLESS (2026-09-11) — the elected cell does not
+transfer to the only venue we can trade.** Felipe asked to fund real money
+this weekend on the 14-day-elected BTC15 cell. Graded on the FULL Limitless
+recorder (3,743 resolved rounds, Aug 3 -> Sep 11, Chainlink official
+settle, net of the 7% fee):
+  elected cell (late 660-540, asia+europe, 0.80-0.90):
+      n=474  73.4% @ 0.849  NET -12.4c/share ±2.0  (6σ negative)
+      halves -20.8c / -4.0c; EVERY week negative (best week -1.9c)
+  all sessions -11.2c, europe -15.1c, asia -9.2c, band 0.80-0.85 -13.7c
+  dry-run executor since Aug 3 (older config): 131 orders, 76% win, -$44.82
+  exhaustive sweep, 85 cells (4 windows x 5 bands x 4 sessions, n>=60):
+      ZERO cells positive in both halves. Best worse-half: -4.2c.
+  fading the expensive lead: +5.4c pooled but halves +13.3/-2.5 with an
+      assumed 3c spread (median real spread 4c) — not robust.
+Mechanism: Limitless's book prices confirmations at ~0.85 where the true
+hit rate is ~73-75%; Polymarket's 15m book at the same price hits ~84%.
+Same rule, different counterparties. The Polymarket edge is real-ish and
+inaccessible (geo-block; we do not evade it). STANDING VERDICT: no real
+money on Limitless with any taker cell we have. Not "test more" — the
+sample is 3,743 rounds and every slice loses.
+
 **STALE-LAUNCH #3 (2026-09-02 -> 09-09): six days of zero entries.** The
 elected config was launched WITHOUT `git pull`, on the lab.sh from the
 commit before the CONF_BTC15/LEAD_HI_BTC15 overrides existed. The old
