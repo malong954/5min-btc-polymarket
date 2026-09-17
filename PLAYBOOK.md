@@ -14,8 +14,70 @@ Rules of evidence used here:
   tag in `scripts/btc_deep_study.py`). One-segment rows are noise until they
   replicate forward.
 
-Last updated: 2026-08-05, after THE DECAY (see section below) — read that
-section before trusting any older per-cell EV number in this file.
+Last updated: 2026-09-17. **READ "THE FINAL NUMBER" FIRST** (immediately
+below) — it supersedes every per-cell EV figure in this file.
+
+---
+
+## THE FINAL NUMBER (2026-09-17) — the answer, on 521 clean forward trades
+
+Two segments, both with verified-emitted configs and 100% official-graded
+settles, are the only fully-trustworthy forward evidence this lab produced:
+
+    A) 14-day validation (Aug 19 - Sep 2, window 720-540)
+         n=350  84.0% @ 0.823   EV +1.68c ±1.96
+    B)  8-day late-window  (Sep 9 - Sep 17, window 660-540)
+         n=171  78.9% @ 0.822   EV -3.28c ±3.13
+    ------------------------------------------------------------
+    POOLED n=521  82.3% @ 0.823   EV +0.05c ±1.67   P&L +$7.27
+
+**82.3% won; the book charged 82.3%.** Over 521 trades and ~$13,000 of
+turnover the edge is five hundredths of a cent per share — zero to three
+decimal places, with a 95% interval of [-3.3c, +3.4c] that is symmetric
+about nothing. The 8-day red segment is not a bad wave and August was not a
+good one: they are the two halves of a zero. Pooled thirds: +0.3c / +2.7c /
+-2.8c — noise around zero, no decay, no regime, nothing to time.
+
+**My late-window "improvement" failed out-of-sample and was the last straw.**
+It passed four independent half-samples in-sample (+2.9c segment, +2.7c
+prior history, all halves positive) and delivered -3.3c on the only data it
+had never seen. That is the tenth mined cell to die forward:
+
+    cell mined from history        in-sample claim      forward result
+    divergence boost x2            +8.9 vs +2.9%        blew $100 -> $0
+    quiet rule (alts)              +4.0% BOTH+          -1.0%/sh, 2 segments
+    session gate (ex-US)           -$95 US attributed   later swept US +3.1c
+    barbell band 0.60-0.80         +3.9 -> +9.6c        all bands <=+1.2c
+    after-loss cooldown            -4.8c next trade     5m-only, then nothing
+    ask-fall veto                  -14.3c cell          never confirmed
+    tiered sizing 25/10/5          size up when winning peak size into reversion
+    confirmation cell 0.80-0.90    +3.2c, 10/11 days    pooled forward ZERO
+    counter-trend veto             aligned +2.8c        opposite across books
+    late-window <660s              +2.9/+2.7c, 4 halves -3.3c out-of-sample
+    ------------------------------------------------------------------------
+    10 cells mined.  Forward survivors: 0.
+
+Ten for ten is not bad luck; it is the signature of an efficiently priced
+book plus a large search space. Every "trend" we found was our own search
+reflected back.
+
+**Venue side, settled separately (2026-09-11):** the only venue reachable
+without evading a geo-block is Limitless, where the same cell is
+**-12.4c/share net over 474 trades** (3,743 rounds recorded; 85-cell sweep
+found zero both-halves-positive cells; naive maker conversion -13c). So even
+a real Polymarket edge would have been unspendable.
+
+**STANDING VERDICT: the lab is done, and it succeeded at what it could
+actually determine.** 5m/15m crypto up-down books are efficient at our
+information and latency: ~2-3s polling of public spot against a book that
+sees the same feed. No real money. No further 14-day cycles of the same
+shape — 521 forward trades already answer the question that a 15th day
+would only re-ask. Reopen ONLY on a genuine change in inputs, not a new
+gate: materially better information (order-flow or sub-second feeds the book
+lacks), being the quoted maker on a venue that pays for it (measured
+negative here), or a venue with demonstrably worse-informed flow. Absent
+one of those, the honest position is that this market is fairly priced and
+the correct trade size is zero.
 
 ---
 
