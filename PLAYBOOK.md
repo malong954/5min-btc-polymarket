@@ -105,8 +105,14 @@ called the official outcome right only 58% of the time for $10-30 moves and
 85% for $30-100; the corrected move (spot - Binance open) gets 76% and 93%.
 Every recorder-based analysis inherited this — the BTC5 sweep that found the
 confirmation cell and the Limitless grades. Paper traders compute their own
-Binance-consistent move and are unaffected. FIX NEEDED in btc_record.py:
-compute move against an open from the SAME feed as spot.
+Binance-consistent move and are unaffected. FIXED 2026-10-05 in
+btc_record.py: `move` = Binance spot - Binance kline open (same feed);
+the Chainlink open still grades results. New samples carry `move_src`
+(kline|spot) and keep the old mixed value as `move_xfeed` for audit; result
+events add `open_feed`. Regression test: scripts/test_btc_record_move.py
+(fails on the old code). LOGS WITHOUT `move_src` ARE PRE-FIX AND BIASED —
+recover their same-feed open from the samples before the ~764s-left switch
+(implied open = spot - move) before using `move`.
 
 **1. The elected cell on Limitless, regraded on clean moves:**
 n=788, 77.5% @ 0.847, **-8.1c/share ±1.5**, halves -11.5/-4.6, every one of

@@ -174,6 +174,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     cur_round: Optional[int] = None
     round_open: Optional[float] = None
     open_src: Optional[str] = None    # chainlink | kline | spot
+    # SAME-FEED open for `move`. round_open above is the RESOLUTION reference
+    # (Chainlink when available) and grades results; but `move` is spot from the
+    # exchange feed, and subtracting a Chainlink open from a Binance-USDT spot
+    # injects the Binance-vs-Chainlink basis into every sample (measured
+    # 2026-10-05 on 5,678 Limitless rounds: median +$27, weekly +$7..+$66; near
+    # the close the mixed move called the outcome right 58% for $10-30 moves vs
+    # 76% for the same-feed move). So `move` = spot - feed_open, both Binance.
+    feed_open: Optional[float] = None
+    feed_open_src: Optional[str] = None   # kline | spot
+    last_feed_retry = 0.0
     last_spot: Optional[float] = None
     last_klines = 0.0
     last_slot_retry = 0.0
@@ -202,12 +212,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                             # grade from the pending queue below.
                             close_pending[cur_round] = {
                                 "open": round_open, "open_src": open_src,
+                                "open_feed": feed_open,
                                 "spot_close": last_spot, "tries": 0, "next": now + 3.0}
                         else:
                             outcome = "UP" if last_spot > round_open else "DOWN"
                             emit({"type": "result", "round": cur_round, "open": rnd(round_open),
                                   "close": rnd(last_spot), "outcome": outcome,
-                                  "open_src": open_src, "close_src": "spot", "ts": int(now)})
+                                  "open_src": open_src, "open_feed": rnd(feed_open),
+                                  "close_src": "spot", "ts": int(now)})
                         # Queue the round for its OFFICIAL Polymarket resolution
                         # (takes ~a minute to settle on-chain; poll a few times).
                         pm_pending[cur_round] = {"next": now + 45.0, "tries": 0}
@@ -224,6 +236,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if round_open is None:
                         print(f"# slot_open failed for round {r} — will retry / "
                               f"fall back to first spot", file=sys.stderr)
+                    # Same-feed open for `move` (never the Chainlink open).
+                    feed_open = round_open if open_src == "kline" else feed.slot_open(r)
+                    feed_open_src = "kline" if feed_open is not None else None
                 spot = feed.spot()
                 if spot is not None:
                     last_spot = spot
@@ -258,6 +273,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                         # a provisional open; the upgrade above keeps retrying.
                         round_open = spot
                         open_src = "spot"
+                # Keep the same-feed open alive: retry the exact kline open, and
+                # only in the first seconds of a round accept the live spot as
+                # a stand-in (later, spot would already contain the move).
+                if feed_open is None:
+                    elapsed = slot - sec_left
+                    if now - last_feed_retry >= 10:
+                        last_feed_retry = now
+                        feed_open = feed.slot_open(r)
+                        if feed_open is not None:
+                            feed_open_src = "kline"
+                    if feed_open is None and spot is not None and elapsed <= 15:
+                        feed_open = spot
+                        feed_open_src = "spot"
                 # Grade closed rounds against the Chainlink close (the candle AT
                 # the end boundary). Falls back to the last spot after ~30s so a
                 # Candlestick outage never silently drops results.
@@ -271,7 +299,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         emit({"type": "result", "round": rs, "open": rnd(o),
                               "close": rnd(c),
                               "outcome": "UP" if c >= o else "DOWN",   # ties -> UP (market rule)
-                              "open_src": p.get("open_src"), "close_src": "chainlink",
+                              "open_src": p.get("open_src"), "open_feed": rnd(p.get("open_feed")),
+                              "close_src": "chainlink",
                               "ts": int(now)})
                         del close_pending[rs]
                     else:
@@ -282,7 +311,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                             emit({"type": "result", "round": rs, "open": rnd(o),
                                   "close": rnd(sc),
                                   "outcome": "UP" if sc > o else "DOWN",
-                                  "open_src": p.get("open_src"), "close_src": "spot_fallback",
+                                  "open_src": p.get("open_src"), "open_feed": rnd(p.get("open_feed")),
+                                  "close_src": "spot_fallback",
                                   "ts": int(now)})
                             del close_pending[rs]
                 # Fetch official resolutions for recently closed rounds.
@@ -304,9 +334,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 in_window = args.min_left <= sec_left <= args.max_left
                 # Never be silent: if a full minute of in-window polls produced
                 # nothing, say exactly which gate is blocking.
-                if in_window and now - last_diag >= 60 and (round_open is None or spot is None):
+                if in_window and now - last_diag >= 60 and (feed_open is None or spot is None):
                     last_diag = now
-                    print(f"# waiting: round_open={'MISSING' if round_open is None else 'ok'} "
+                    print(f"# waiting: feed_open={'MISSING' if feed_open is None else 'ok'} "
                           f"spot={'MISSING' if spot is None else 'ok'} (round {r}, {sec_left:.0f}s left)",
                           file=sys.stderr)
                 # Refresh the heavier 1m klines periodically (and lazily on first use),
@@ -317,7 +347,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         last_klines = now
                     except Exception as e:
                         print(f"# kline fetch error: {e}", file=sys.stderr)
-                if in_window and round_open is not None and spot is not None:
+                if in_window and feed_open is not None and spot is not None:
                     pm = current_prices(now, asset=args.asset)
                     if not pm and r not in pm_missing_logged:
                         pm_missing_logged.add(r)
@@ -326,7 +356,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if pm:
                         idir, iconf, iscore, idiv = indicator_signal(r, now, spot=spot)
                         emit({"type": "sample", "round": r, "sec_left": round(sec_left, 1),
-                              "move": rnd(spot - round_open), "spot": rnd(spot),
+                              # same-feed move (Binance spot - Binance open);
+                              # move_src marks logs written after the fix, and
+                              # move_xfeed keeps the old mixed value for audit.
+                              "move": rnd(spot - feed_open), "move_src": feed_open_src,
+                              "move_xfeed": rnd(spot - round_open) if round_open is not None else None,
+                              "spot": rnd(spot),
                               "up_ask": pm.get("UP"), "dn_ask": pm.get("DOWN"),
                               "up_sz": pm.get("UP_size"), "dn_sz": pm.get("DOWN_size"),
                               "up_bid": pm.get("UP_bid"), "dn_bid": pm.get("DOWN_bid"),
