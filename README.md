@@ -71,6 +71,353 @@ scripts/btc5m_docker.sh status
 scripts/btc5m_docker.sh down
 ```
 
+## Real-Time BTC Impulse Gate
+The runner no longer trusts the Polymarket contract price alone. Before entry it
+confirms the **actual BTC move** in the current 5m round using two independent
+price feeds (`scripts/btc_price_feeds.py`, default Binance + Coinbase):
+
+- Measures `spot - round_open` on each feed and enforces the documented
+  ~$70-$100 impulse (`--btc-move-min-usd`, `--btc-move-max-usd`).
+- Cross-checks the feeds and skips when they disagree beyond
+  `--btc-feed-divergence-usd` (one feed lagging / bad tick).
+- Vetoes entries where the contract book points opposite to real BTC direction.
+
+Flags: `--btc-impulse` / `--no-btc-impulse`, `--btc-feeds binance,coinbase`,
+`--btc-move-min-usd`, `--btc-move-max-usd`, `--btc-feed-divergence-usd`,
+`--btc-min-feeds`. Feeds run on your machine.
+
+**Available feeds** (`--btc-feeds`, pick any two+ that your network/region allows):
+
+| feed | key? | round-open (gate) | notes |
+|------|------|-------------------|-------|
+| `binance` | no | yes | best coverage; may be geo-blocked (US) |
+| `coinbase` | no | yes | |
+| `kraken` | no | yes | |
+| `cryptocompare` | no | yes | keyless minute OHLCV, good Binance alt |
+| `coingecko` | no | spot-only | live cross-check display, not the gate |
+| `dia` | no | spot-only | keyless (DIAdata) |
+| `livecoinwatch` | yes (`LIVECOINWATCH_API_KEY`) | spot-only | |
+| `coinmarketcap` | yes (`COINMARKETCAP_API_KEY`) | spot-only | |
+
+The gate needs the current 5m round-open, so it only counts feeds marked
+"round-open"; spot-only feeds are fine for a live sanity check but are ignored by
+the impulse gate. Default `binance,coinbase`. On a US network, try
+`--btc-feeds coinbase,kraken` or `--btc-feeds coinbase,cryptocompare`.
+
+## Backtesting (Multi-Timeframe Indicators)
+`scripts/btc_backtest.py` backtests a 1m/5m/15m indicator ensemble
+(current-round impulse, RSI, MACD, EMA trend, relative volume) against the
+historical 5m settle. It freezes the clock ~2 min before close (no lookahead),
+predicts up/down, and reports directional accuracy, coverage, per-feature
+correlation, and simulated PnL at a configurable contract entry price.
+
+Each 5m market is a **Yes/No pair** (an "Up" token and a "Down" token). A
+prediction of `UP` means buy the Up/Yes contract; `DOWN` means buy the Down
+contract (equivalently "No" on Up). The backtest picks that side from the trend
+and prices the fill at `--entry-price`, settling $1 on a correct call.
+
+```bash
+# Offline demo (synthetic data, no network):
+python3 scripts/btc_backtest.py --synth 6000
+
+# Real data on your PC (provider = binance | cryptocompare):
+python3 scripts/btc_backtest.py --fetch binance --days 7 --entry-price 0.85
+python3 scripts/btc_backtest.py --fetch cryptocompare --days 7
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --entry-threshold 0.80 --json
+
+# Per-round CSV of every decision (taken/skipped, win/loss, all features):
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --trade-log out/trades.csv
+
+# Walk-forward: tune the threshold on rolling train blocks, score the NEXT
+# (unseen) block. The reported edge is out-of-sample, not curve-fit:
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --walk-forward \
+    --wf-train 500 --wf-test 250 --trade-log out/oos_trades.csv
+
+# Ablation: re-run walk-forward dropping one indicator at a time to see which
+# of impulse / RSI / MACD / 5m-trend / 15m-trend actually earns its weight:
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --ablation \
+    --wf-train 500 --wf-test 250
+
+# Weight optimization: head-to-head OOS comparison of fixed default weights vs
+# per-fold tuned weights (coordinate ascent on each train block, scored on the
+# next unseen block). Reports a verdict on whether tuning actually helps:
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --optimize-weights \
+    --wf-train 500 --wf-test 250
+```
+
+The ablation ranks features by **out-of-sample EV contribution** (baseline EV
+minus EV-with-feature-removed). A positive number means dropping the feature
+lowers EV, so it's pulling its weight; a negative number flags dead weight you
+can prune from `DEFAULT_WEIGHTS` in `scripts/btc_backtest.py`. Re-run on your own
+data — the ranking is data-dependent, not universal.
+
+Weight optimization tunes only on each in-sample block and is scored purely on
+the following unseen block, so its verdict is honest: if tuning does not beat the
+fixed baseline out-of-sample, the message says so (fixed weights are good enough;
+tuning would overfit). The whole pipeline carries a **leakage guard** in the test
+suite — when outcome labels are shuffled to break the feature→outcome link, the
+optimizer's out-of-sample edge collapses to negative, proving it cannot
+manufacture edge from noise. Trust the OOS numbers, not in-sample ones.
+
+**Key lesson the backtest makes explicit:** buying contracts at $0.80-$0.99 means
+your breakeven win-rate is 80-99%. High directional accuracy alone loses money;
+positive EV only appears when you raise `--entry-threshold` to trade only the
+highest-confidence rounds. **Always confirm with `--walk-forward`** — an
+in-sample threshold that looks great is easy to overfit; the walk-forward number
+is the honest one. Validate that the out-of-sample edge clears breakeven on real
+data before going live.
+
+Tests (stdlib only, no network):
+```bash
+python3 scripts/test_btc_impulse_feeds.py
+python3 scripts/test_btc_backtest.py
+python3 scripts/test_btc_binance.py
+python3 scripts/test_btc_datafeeds.py
+```
+
+## Parallel Trend Finder (Official Polymarket Data)
+
+`scripts/btc_trend_finder.py` replays every BTC trajectory archive under
+`data/lab/` and tests independent signal arms in parallel: spot lead/fade,
+5/15/30/60-second velocity, velocity consensus, the existing indicator model,
+market favorite/underdog, book momentum/reversal, liquidity pressure, and
+spot+book/velocity consensus.
+
+Unlike the candle backtest, this uses the recorded Polymarket ask and size plus
+Polymarket's own `result_pm` outcome. The default research assumptions are:
+
+- One immutable decision snapshot per arm and round at about 210 seconds left.
+- Fill from the first recorded quote at least 6 seconds later, never the signal
+  quote.
+- Maximum fill equal to recorded best-ask size, with a 5-share minimum.
+- One tick of adverse slippage and the current crypto taker fee formula,
+  `shares * 0.07 * price * (1-price)`.
+- Whole UTC days split chronologically into train/validation/holdout.
+- Bonferroni correction across every arm tested on the final holdout.
+
+```bash
+python3 scripts/btc_trend_finder.py \
+  --output out/btc_trend_report.json \
+  --trade-log out/btc_trend_trades.csv
+
+python3 scripts/test_btc_trend_finder.py
+
+# Diagnose whether execution costs consume an apparent signal. These are
+# sensitivity checks, not executable PnL assumptions:
+python3 scripts/btc_trend_finder.py --slippage 0 --fee-rate 0.07
+python3 scripts/btc_trend_finder.py --slippage 0 --fee-rate 0
+```
+
+On the July 2026 archive (3,399 official BTC 5m outcomes), no arm survived the
+default fee-and-slippage-aware train/validation screen. The spot/book consensus
+arm had a small gross holdout edge before costs, but the taker fee alone made it
+negative. This result does not prove that maker trading has no edge: these files
+contain top-of-book observations, not queue position or confirmed maker fills,
+so a maker claim needs a forward fill recorder and cannot be inferred here.
+
+The large dataset from
+[`Jon-Becker/prediction-market-analysis`](https://github.com/Jon-Becker/prediction-market-analysis)
+is useful for market metadata, historical trades, and calibration studies. Its
+default on-chain collector does not provide complete recent CLOB depth or
+second-level BTC 5m execution history, so it is supplementary rather than a
+replacement for the local trajectory recorder.
+
+## Running Locally (macOS / Mac mini)
+The research tools and data feeds have no exchange-egress restrictions on a
+normal home network — a Mac mini is an ideal always-on host. The heavy trading
+stack (`py_clob_client`, Polymarket auth) is only needed for *live execution*;
+the data + backtest layer needs just Python 3 and `requests`.
+
+```bash
+# 1. Python 3 (Homebrew) + a virtualenv
+brew install python@3.12
+# Clone the fork and check out the feature branch (the scripts live there,
+# not on main until merged):
+git clone https://github.com/malong954/5min-btc-polymarket.git
+cd 5min-btc-polymarket
+git checkout claude/bot-trend-detection-06svzm
+python3 -m venv .venv
+source .venv/bin/activate
+pip install requests            # data + backtest layer only
+
+# 2. Confirm a data provider is reachable from your network
+python3 scripts/btc_binance.py check          # or set BINANCE_BASE
+#   US network / Binance geo-blocked? Use CryptoCompare instead:
+#   (history) --fetch cryptocompare   (live gate) --btc-feeds coinbase,cryptocompare
+
+# 3. Pull real 1-minute history and back it up to CSV
+python3 scripts/btc_binance.py history --days 30 --out data/btc_1m.csv
+#   or, keyless alternative:
+#   python3 scripts/btc_history.py  (via) btc_backtest --fetch cryptocompare
+
+# 4. Validate the strategy OUT-OF-SAMPLE on that real data
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --walk-forward \
+    --wf-train 500 --wf-test 250 --entry-price 0.85 --trade-log out/oos.csv
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --ablation --wf-train 500 --wf-test 250
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --optimize-weights --wf-train 500 --wf-test 250
+
+# 5. Watch the live feed (REST poll)
+python3 scripts/btc_binance.py live --poll 2
+```
+
+Only after the out-of-sample edge clears breakeven on your own data should you
+wire in the execution stack and run `scripts/test_btc_5m_session_exit_sl.py`
+(which additionally needs `py_clob_client` and configured Polymarket credentials).
+For an always-on setup, run the watcher under `launchd` (a `launchd` plist is the
+macOS equivalent of cron) or inside the provided Docker isolation.
+
+## Live Automation + Streaming Log (Paper Mode)
+`scripts/btc_live_paper.py` runs the validated multi-timeframe prediction on
+live data in real time and **streams every event** — heartbeat, movement
+prediction (~2 min before each close), paper entry, and settle (win/loss +
+running PnL). It is **paper by default: it never places real orders.** It
+simulates buying the predicted side and settling $1/$0 from the real BTC move,
+so you can watch the strategy's live behavior and true PnL before risking capital.
+
+**Entry price — real vs assumed.** `--entry-price-source polymarket` (default in
+the launchd service) fetches the **real Polymarket CLOB best ask** of the
+predicted side per trade (`scripts/btc_polymarket.py`), so P&L and breakeven are
+factual — it skips a round it can't price. `--entry-price-source fixed` uses the
+`--entry-price` assumption (e.g. 0.85), which is fine for synthetic/offline runs
+but is *not* a real cost. The dashboard labels breakeven "real" vs "assumed".
+
+**Easiest start** — one command runs the trader in the background (real pricing +
+balance-scaled stake) and opens the red/green dashboard:
+```bash
+scripts/start.sh            # start + dashboard   (uses .venv automatically)
+scripts/start.sh stop       # stop the trader
+STAKE_PCT=0.15 scripts/start.sh   # stake 15% of the CURRENT balance per trade
+```
+`--sizing percent --stake-pct 0.15` scales the stake to the live balance, so it
+grows as the account grows — but note it **compounds both ways**: above breakeven
+it grows, below breakeven it decays toward zero. It is not a substitute for a
+real edge.
+
+```bash
+# Or run the trader directly with REAL Polymarket per-trade pricing:
+.venv/bin/python scripts/btc_live_paper.py --provider binance --poll 2 \
+    --entry-threshold 0.60 --entry-price-source polymarket --log out/live.jsonl
+
+# In another terminal, tail the machine-readable stream:
+tail -f out/live.jsonl
+```
+
+Sample stream:
+```
+? PREDICT DOWN conf=0.88 move=$-21 rsi=27.5 (120s left)
+▲ ENTER DOWN @ $0.85  conf=0.88
+[WIN]  SETTLE DOWN -> DOWN WIN pnl=+0.150  cum=+0.450  wr=100.0% (3 trades)
+```
+
+Each JSONL line is one event (`heartbeat|prediction|entry|skip|settle`) — pipe it
+to a dashboard, alerting, or a replay. Real execution stays in
+`scripts/test_btc_5m_session_exit_sl.py` (needs `py_clob_client` + credentials);
+only enable it once the paper stream's out-of-sample PnL clears breakeven.
+
+### Position Sizing
+`scripts/btc_sizing.py` + `btc_backtest.py --sizing-report` compare sizing modes
+on **out-of-sample** trades. The economics are unforgiving: buying at price `c`
+pays $1, so **EV per trade = stake · (p − c) / c**. A flat stake is a pure
+multiplier — it *cannot* change the sign of EV. Only `p > c` (win-rate above the
+entry price) is profitable.
+
+Modes:
+- **flat** — constant stake; scales gains and losses linearly.
+- **confidence** — stake scaled by model confidence.
+- **kelly** — fractional Kelly on a *calibrated* win probability; stakes **zero**
+  when `p ≤ c`. Kelly compounds hardest on a real edge (biggest gains, deep
+  drawdowns) but over-bets *noise* on a marginal edge (biggest losses).
+
+```bash
+python3 scripts/btc_backtest.py --csv data/btc_1m.csv --sizing-report \
+    --wf-train 500 --wf-test 250 --bankroll 100 --base-stake 10
+```
+
+Kelly numbers for this contract at `c = 0.85`: **f\* = −0.21 at p = 81.8%**
+(don't bet) and **+0.20 at p = 88%** (bet ~20%). Kelly mode also requires a
+safety margin (`p ≥ c + 0.03`, default) because a win rate that only *barely*
+clears breakeven is usually estimation noise — and it's fractional (quarter–half
+Kelly). Note two traps: raw **confidence-scaled sizing enlarges −EV bets** (only
+safe after calibration), and **11 trades tells you almost nothing** — the 95% CI
+on 9/11 spans ~[52%, 95%], straddling breakeven, so distinguishing an 85% from an
+88% edge needs on the order of 1,000+ trades. The live trader accepts
+`--sizing flat|confidence|kelly`, but live kelly uses confidence as an
+*uncalibrated* proxy — validate with `--sizing-report` first. **Sizing amplifies
+edge; it never creates it. If your win-rate is below breakeven, no sizing scheme
+wins — raise the threshold first.**
+
+### Live Color Dashboard
+`scripts/btc_live_monitor.py` reads the JSONL stream and redraws a color panel in
+place — current price + movement prediction, cumulative PnL (**green profit /
+red loss**), win-rate vs breakeven, peak/drawdown, and a colored recent-trades
+list (green wins, red losses). Run it in any terminal alongside the trader:
+
+```bash
+python3 scripts/btc_live_monitor.py --log out/live.jsonl
+```
+
+It reads incrementally (remembers its file offset), so it stays fast as the log
+grows. `--once` renders a single frame; `--no-color` for plain text; the
+`--entry-price` sets the breakeven reference line.
+
+### Always-on (macOS launchd)
+To keep the paper trader running 24/7 — restarting on crash and after reboot,
+without holding a terminal open — install it as a launchd agent. The installer
+auto-detects this repo and its `.venv`:
+
+```bash
+scripts/install_launchd.sh install        # write plist + load + start
+scripts/install_launchd.sh status         # is it running?
+tail -f out/live.jsonl                     # watch the stream anytime
+scripts/install_launchd.sh uninstall      # stop + remove
+```
+
+Tune before installing via env vars, e.g.
+`PROVIDER=cryptocompare THRESHOLD=0.7 scripts/install_launchd.sh install`.
+Note: if the repo lives on an external volume (e.g. `/Volumes/MASTER`), launchd
+may start before the volume mounts at boot — `KeepAlive` retries every 30s until
+it's available. stdout/stderr go to `out/launchd.{out,err}.log`.
+
+## Validate on Real Data (one command)
+Before trusting any indicator, sizing, or threshold, validate on real history:
+```bash
+scripts/validate.sh            # downloads real 1m data + runs the full battery
+ENTRY_PRICE=0.90 scripts/validate.sh    # set to your observed avg real ask
+```
+It runs, in order: **walk-forward** (is there out-of-sample edge?), **ablation**
+(which of the indicators earn weight vs. drag), **sizing comparison**, and — if
+`out/live.jsonl` exists — the live **confidence→winrate** analysis. The honest
+rule it prints: if the walk-forward OOS edge is negative at your real breakeven,
+no indicator/sizing/threshold change fixes it — the signal isn't there yet.
+
+## AI-Assisted Analysis (Claude Code, your subscription)
+You can have Claude analyze the live log and propose tuning — using your Claude
+Pro/Max **subscription**, not per-call API billing. Install the `claude` CLI on
+the machine, sign in with your subscription account (not an API key), and run it
+inside this repo.
+
+`scripts/btc_analyze.py` turns the raw JSONL into grounded stats (win rate by
+confidence / entry price / hour / side / BTC move, edge vs the real breakeven,
+and flagged observations) so Claude reasons over facts, not raw JSON:
+
+```bash
+python3 scripts/btc_analyze.py --log out/live.jsonl          # human summary
+python3 scripts/btc_analyze.py --log out/live.jsonl --json   # for a program/agent
+```
+
+**Safe loop (do NOT skip the validation step):**
+1. `btc_analyze.py` summarizes the accumulated **real-priced** trades.
+2. Claude reads it and proposes a change (e.g. raise the threshold).
+3. **Validate on the real data first** — `btc_backtest.py --csv <your data> --walk-forward`
+   / `--sizing-report` / `--ablation`. A pattern in a few dozen trades is almost
+   always noise; the walk-forward + leakage guard exist precisely to catch this.
+4. Only then apply the change and keep paper-trading.
+
+Never let an agent auto-change live parameters on an un-validated "trend" — that
+is the overfitting trap this whole toolkit is built to avoid. Also note Claude
+subscriptions have usage limits, so schedule analysis periodically (hourly/daily),
+not in a tight loop.
+
 ## Execution Checklist (Before Live Trade)
 Use this quick pre-flight checklist before any real order:
 
