@@ -89,6 +89,68 @@ negative here), or a venue with demonstrably worse-informed flow. Absent
 one of those, the honest position is that this market is fairly priced and
 the correct trade size is zero.
 
+## "WHAT WOULD MAKE IT PROFITABLE?" — four tests on clean data (2026-10-05)
+
+Felipe asked whether to invest real money and, if not, what changes would
+make this profitable. Every test below uses the 6,092-round Limitless
+recorder (Aug 3 - Oct 5, official Chainlink outcomes, net of the 7% fee) and
+the 1,096 Polymarket paper entries that line up with it to the second.
+
+**0. A real data bug, found first: the recorder's `move` is biased.**
+`move = Binance spot - round_open`, but round_open switches ~2 min into the
+round (median 764s left) from the Binance kline open to the Chainlink open.
+From then on every recorded move carries the Binance-USDT vs Chainlink-USD
+basis: median +$27, weekly medians +$7 to +$66. Near the close, the raw move
+called the official outcome right only 58% of the time for $10-30 moves and
+85% for $30-100; the corrected move (spot - Binance open) gets 76% and 93%.
+Every recorder-based analysis inherited this — the BTC5 sweep that found the
+confirmation cell and the Limitless grades. Paper traders compute their own
+Binance-consistent move and are unaffected. FIX NEEDED in btc_record.py:
+compute move against an open from the SAME feed as spot.
+
+**1. The elected cell on Limitless, regraded on clean moves:**
+n=788, 77.5% @ 0.847, **-8.1c/share ±1.5**, halves -11.5/-4.6, every one of
+10 weeks negative (Sep weeks -2 to -5c). The basis bug inflated the old
+-12.4c verdict but was not hiding a profit.
+
+**2. Does anything we know beat the live Limitless book?** One snapshot per
+round at a fixed time, logistic fit on one half, scored on the other, both
+ways. A volatility-scaled move model fit ONLY on June BTC history (well
+calibrated there: within ~3 points in every bin), the indicator stack, and
+60s momentum:
+  - 12.5 / 10 / 7.5 min left: NOTHING adds information (gains +-0.003
+    log-loss, noise).
+  - 5 / 2.5 min left: our information helps overall (+0.010 / +0.025) — but
+    split by book state, ALL of it comes from dead books (spread > 6c;
+    p90 spread late is 65-80c). Where the book is live (spread <= 6c) our
+    information makes forecasts WORSE than the book alone (-0.008 at both).
+  - Out-of-sample taker sim on the full model: every time/threshold combo
+    negative or not robust (best: +1.7c with halves +6.0/-2.6).
+**Conclusion: we have no information the live Limitless book lacks, at any
+point in the round.**
+
+**3. Cross-venue (Polymarket's public price as fair value, trade Limitless):**
+same second, same side: Limitless ask is HIGHER than Polymarket's by a
+median +2.1c (p10 +0.6c, p90 +12.9c), before its fee; resolutions agree
+99.3%. Limitless was cheaper in only 58/1,096 moments, and those lost
+(-5.3c). Limitless is simply the more expensive venue for the same bet.
+
+**4. Liquidity ceiling:** median quoted ask depth is 16-50 shares
+($13-40) depending on time left — a $25 stake often cannot fill at the
+quoted price, so even a real edge would not scale.
+
+**ANSWER:** do not invest. No rule, gate, model, indicator, timing or
+venue choice available to this lab produces an edge net of costs, because
+the binding constraint is information, not settings: the market already
+prices everything we observe, faster. What could change that is a different
+project, not a tweak: (a) a genuine information advantage (sub-second
+Chainlink Data Streams + websocket books, competing with professional
+makers); (b) becoming the market maker — the spread and fee we keep paying
+are exactly the maker's income — which needs fast cancel/replace
+infrastructure, carries adverse selection (naive version measured -13c),
+and is capped by the thin depth above; or (c) a venue with demonstrably
+worse-informed flow, which neither venue here is.
+
 ---
 
 ## THE DECAY — the taker edge died in the forward sample (2026-08-05)
