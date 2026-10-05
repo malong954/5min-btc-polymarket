@@ -38,6 +38,16 @@ about nothing. The 8-day red segment is not a bad wave and August was not a
 good one: they are the two halves of a zero. Pooled thirds: +0.3c / +2.7c /
 -2.8c — noise around zero, no decay, no regime, nothing to time.
 
+**UPDATE 2026-10-05 — the same segment ran 26 days and came home.** It
+continued from -$170 (Sep 17) to +$10.94: n=569, 82.4% @ 0.824, EV
++0.07c ±1.60. Balance path $500 -> low $271 -> high $614 -> $511. A
+zero-edge simulation of 569 trades at this stake and price has a MEDIAN
+outcome of -$9; we finished at +$11. Pooled clean forward record is now
+**n=919, 83.0% @ 0.823, EV +0.68c ±1.24, 95% CI [-1.8c, +3.2c]** — still
+indistinguishable from zero. The verdict below stands. Note the $344 swing
+on a flat result: at real money that path means watching -46% before
+breaking even, for no expected gain.
+
 **My late-window "improvement" failed out-of-sample and was the last straw.**
 It passed four independent half-samples in-sample (+2.9c segment, +2.7c
 prior history, all halves positive) and delivered -3.3c on the only data it
