@@ -145,6 +145,33 @@ median +2.1c (p10 +0.6c, p90 +12.9c), before its fee; resolutions agree
 ($13-40) depending on time left — a $25 stake often cannot fill at the
 quoted price, so even a real edge would not scale.
 
+**5. Volume, every logged indicator, book imbalance, cross-asset (2026-10-13).**
+Felipe asked whether a neglected edge exists, "maybe volume trends". Same
+method: one row per round, price-only baseline, fit on one time-half and
+scored on the other. Datasets: 18,635 BTC 5m Polymarket rounds (paper
+predictions joined to recorder quotes within 10s, official outcomes) and
+5,954 BTC 15m Limitless rounds.
+  - Volume (relative 1m volume, signed by the move; spike >= 2x flag),
+    volatility factor, RSI, MACD, Bollinger %B, rate of change, EMA gap,
+    divergence, model score, and all combined: on Polymarket every gain
+    <= 0.0001 log-loss. On Limitless the best is volume at +0.0005 —
+    a median forecast shift of 0.86 points against a ~6c spread.
+  - Order-book size imbalance (ask and bid queues) and SOL / XRP moves as
+    leading indicators: every gain <= 0.0006; on Limitless imbalance hurts.
+  - Trading Limitless whenever volume-adjusted fair value beats ask + fee:
+    n=184 over two months, +2.6c ±3.3c (0.8 sigma), halves +4.7 / -0.2.
+    Indistinguishable from zero; not deployed, not a lead.
+  - Polymarket's 1.3-2.0x volume bucket showed +1.9c ±0.8 gross both
+    halves, but it is one of five buckets, not monotonic, and ~+0.6c after
+    the ~1.3c taker fee — dead.
+Volume, indicators, book queues and cross-asset moves are all already in
+the price. The search for a neglected public signal is closed.
+
+**The paper engine still does not charge Polymarket's taker fee** (see FEE
+RECKONING). At $25 stakes and ~0.82 asks that is ~$0.31 per trade: the
+569-trade BTC15 segment through Oct 5 was +$10.94 gross, **-$164.71 net**;
+the dashboard's 735 trades at +$78.56 gross are roughly **-$150 net**.
+
 **ANSWER:** do not invest. No rule, gate, model, indicator, timing or
 venue choice available to this lab produces an edge net of costs, because
 the binding constraint is information, not settings: the market already
