@@ -98,5 +98,6 @@ runner_mapping:
   example_aggressive_now: ".venv/bin/python scripts/test_btc_5m_session_exit_sl.py --threshold 0.70 --stake-usd 6 --stop-loss-pct 0.30 --exit-before-sec 20 --min-entry-seconds-left 60 --entry-timeout-min 60 --poll-sec 5 --execute"
 
 notes:
-  - "Current 5m runner uses threshold/side-strength logic; impulse filter integration can be extended at strategy layer."
-  - "Entry behavior: continuous CLOB ask monitoring; if UP/DOWN >= threshold, enter on stronger side."
+  - "Runner combines CLOB ask threshold with a real-time BTC impulse gate (scripts/btc_price_feeds.py): two cross-checked feeds (Binance + Coinbase) confirm the intra-round move and veto entries that fight actual BTC direction or ride a lagging feed."
+  - "Entry behavior: continuous CLOB ask monitoring; if UP/DOWN >= threshold, confirm BTC impulse, then enter on stronger side."
+  - "Strategy research: scripts/btc_backtest.py backtests a 1m/5m/15m indicator ensemble (RSI, MACD, EMA trend, volume) against historical 5m settle outcomes; use it to tune entry_threshold and confirm edge clears the contract breakeven win-rate before trading live."
